@@ -61,6 +61,9 @@ ensure_npm_login() {
     ok "已登录 npm: $who"
     return 0
   fi
+  if [[ "${CI:-}" == "true" ]]; then
+    die "CI 环境 npm 未认证(whoami 失败):请确认 Secrets.NPM_TOKEN 已配置且 setup-node 用 NODE_AUTH_TOKEN 注入"
+  fi
   warn "未登录 npm(官方 registry $NPM_REGISTRY),即将启动交互式登录…"
   if ! npm login --registry="$NPM_REGISTRY"; then
     die "npm login 失败,请手动执行: npm login --registry=$NPM_REGISTRY"
@@ -114,7 +117,11 @@ node --check scripts/publish-npm.js || die "publish-npm.js 语法错误"
 node --check npm/main/bin/sail.js   || die "sail.js 语法错误"
 check_npm_env
 if ! $DRY_RUN; then
-  ensure_npm_login
+  if [[ "${CI:-}" == "true" ]]; then
+    info "CI 环境:跳过交互式登录(依赖 NODE_AUTH_TOKEN;token 无效时 npm publish 会显式报错)"
+  else
+    ensure_npm_login
+  fi
 fi
 
 # ── 准备发布暂存区 dist/(复制模板 package.json + 编译二进制;不入源码树)──

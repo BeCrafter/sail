@@ -216,6 +216,19 @@ aws s3 ls --endpoint-url <your-s3-endpoint> s3://mybucket/
 2. **region 占位**:部分 S3 服务 region 为空,但 AWS SDK v2 的 endpoint 规则要求 region 非空。工具用 `us-east-1` 作为占位值(endpoint 已被 BaseEndpoint 覆盖,实际不影响请求)。
 3. **CopyObject 回退**:部分 S3 兼容服务的 `CopyObject` 返回成功但生成 0 字节对象。`cp`/`mv` 的 s3↔s3 路径在 CopyObject 后用 HEAD 校验目标大小与源一致;不一致时自动回退到 `download→re-upload`,保证数据正确。标准 S3(AWS/MinIO)上 CopyObject 校验通过,仍走零带宽服务端复制。
 
+## 发布
+
+发布走 GitHub Actions 自动化:推送形如 `vX.Y.Z` 的 tag 即触发交叉编译 + 发布到 npm,无需本地登录。
+
+1. 在仓库 **Settings → Secrets and variables → Actions** 添加 `NPM_TOKEN`(npm automation token,需有 `@becrafter` scope 发布权)。
+2. 打 tag 并推送:
+   ```bash
+   git tag v0.1.0 && git push origin v0.1.0
+   ```
+3. workflow 跑完,4 个平台子包 + 主包即发布到 `registry.npmjs.org`。也可在 Actions 页面手动触发并填版本号。
+
+本地发布(无 CI 时)仍可用:`make release VERSION=0.1.0`(未登录会引导 `npm login`)。
+
 ## 贡献
 
 欢迎提 Issue 或 Pull Request:<https://github.com/BeCrafter/sail/pulls>

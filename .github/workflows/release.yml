@@ -1,0 +1,44 @@
+name: release
+
+# 触发:推送 vX.Y.Z tag 自动发布;也支持 Actions 页面手动指定版本号触发。
+# 需要 Secrets: NPM_TOKEN(npm automation token,有 @becrafter scope 发布权)。
+# setup-node 用 NODE_AUTH_TOKEN 注入 ~/.npmrc,release.sh 在 CI 下跳过交互登录。
+on:
+  push:
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '发布版本号 (X.Y.Z,不带 v 前缀)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org/'
+
+      - name: Build & publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            VER="$INPUT_VERSION"
+          else
+            VER="${GITHUB_REF_NAME#v}"
+          fi
+          ./scripts/release.sh "$VER"
