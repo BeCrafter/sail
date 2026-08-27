@@ -7,6 +7,7 @@
 *.dll
 *.so
 *.dylib
+*.swp
 
 # Test binary, built with `go test -c`
 *.test
@@ -30,3 +31,9 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# sail build / release artifacts — never commit binaries or staging output
+/sail
+npm/darwin-*/bin/
+npm/linux-*/bin/
+/dist/

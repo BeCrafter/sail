@@ -1,0 +1,44 @@
+{
+  "name": "@becrafter/sail",
+  "version": "0.1.0",
+  "description": "S3-compatible object storage CLI — single static binary, zero runtime deps.",
+  "license": "MIT",
+  "author": "BeCrafter",
+  "homepage": "https://github.com/BeCrafter/sail#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BeCrafter/sail.git"
+  },
+  "bugs": {
+    "url": "https://github.com/BeCrafter/sail/issues"
+  },
+  "keywords": [
+    "s3",
+    "object-storage",
+    "cli",
+    "aws-s3",
+    "minio",
+    "oss",
+    "storage",
+    "command-line"
+  ],
+  "bin": {
+    "sail": "bin/sail.js"
+  },
+  "optionalDependencies": {
+    "@becrafter/sail-darwin-arm64": "0.1.0",
+    "@becrafter/sail-darwin-x64": "0.1.0",
+    "@becrafter/sail-linux-arm64": "0.1.0",
+    "@becrafter/sail-linux-x64": "0.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin/sail.js",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

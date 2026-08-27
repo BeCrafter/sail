@@ -1,0 +1,27 @@
+{
+  "name": "@becrafter/sail-linux-arm64",
+  "version": "0.1.0",
+  "description": "sail CLI binary for linux-arm64",
+  "homepage": "https://github.com/BeCrafter/sail#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BeCrafter/sail.git",
+    "directory": "npm/linux-arm64"
+  },
+  "bugs": {
+    "url": "https://github.com/BeCrafter/sail/issues"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin/"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}
