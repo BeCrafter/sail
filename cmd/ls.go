@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/BeCrafter/sail/internal/client"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spf13/cobra"
-	"github.com/BeCrafter/sail/internal/client"
 )
 
 var (
@@ -77,11 +77,15 @@ func listObjects(ctx context.Context, s3c *s3.Client, bucket, prefix string, lon
 	return nil
 }
 
-// listDirs 只列前缀下一层的"目录"(common prefixes),不含文件对象。
-// 用 Delimiter='/',对齐 Linux ls -d(只显目录本身)。
 func listDirs(ctx context.Context, s3c *s3.Client, bucket, prefix string) error {
 	if bucket == "" {
 		return fmt.Errorf("未指定 bucket")
+	}
+	// delimiter 模式下,prefix 必须以 "/" 结尾。否则 S3 会把本层所有 key 汇总成
+	// 单个 "prefix/" 的 CommonPrefix(如 "pdf/"),去前缀后变成空串,导致无输出。
+	// 这里统一补上尾斜杠;空串(列桶根目录)保持不变。
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
 	}
 	paginator := s3.NewListObjectsV2Paginator(s3c, &s3.ListObjectsV2Input{
 		Bucket:    &bucket,

@@ -121,6 +121,8 @@ step "ls -d + tree(目录列举与树形)"
 $SAIL ls -d "s3://$BUCKET/$PREFIX/dir/" 2>&1 | grep -q "^subdir/$" && ok "ls -d 只列子目录" || err "ls -d 未正确列子目录"
 # ls -d -l:-d 忽略 -l,仍只列目录
 $SAIL ls -d -l "s3://$BUCKET/$PREFIX/dir/" 2>&1 | grep -q "^subdir/$" && ok "ls -d -l 仍只列目录(-d 忽略 -l)" || err "ls -d -l 异常"
+# ls -d 无尾斜杠:prefix 不强制以 / 结尾,仍只列子目录(回归:曾因缺尾斜杠输出空)
+$SAIL ls -d "s3://$BUCKET/$PREFIX/dir" 2>&1 | grep -q "^subdir/$" && ok "ls -d 无尾斜杠仍只列子目录" || err "ls -d 无尾斜杠未正确列子目录"
 # tree:含子目录与文件
 TREE_OUT=$($SAIL tree "s3://$BUCKET/$PREFIX/dir/" 2>&1)
 echo "$TREE_OUT" | grep -q "subdir/" && ok "tree 含子目录" || err "tree 未含子目录"
