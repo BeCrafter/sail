@@ -6,10 +6,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
-	"github.com/spf13/cobra"
 	"github.com/BeCrafter/sail/internal/config"
+	"github.com/spf13/cobra"
 )
 
 var configCmd = &cobra.Command{
@@ -17,36 +18,81 @@ var configCmd = &cobra.Command{
 	Short: "配置管理",
 }
 
-var configInitCmd = &cobra.Command{
-	Use:   "init",
-	Short: "交互式生成配置文件 ~/.sail/config.yaml",
+var configSetupCmd = &cobra.Command{
+	Use:   "setup",
+	Short: "交互式生成/更新配置文件(支持 -c 指定路径、--reset 重置、新增或重配 profile)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		path, err := config.ConfigPath()
-		if err != nil {
-			return err
-		}
-		if _, err := os.Stat(path); err == nil {
-			fmt.Printf("配置文件已存在: %s\n是否覆盖? [y/N] ", path)
-			if !confirm() {
-				fmt.Println("已取消")
-				return nil
+		var err error
+
+		// 写入路径:优先 -c/--config,缺省回退默认路径
+		path := cfgPath
+		if path == "" {
+			path, err = config.ConfigPath()
+			if err != nil {
+				return err
 			}
 		}
+
+		// 加载已有配置;--reset 或文件不存在则视为全新
+		var cfg *config.Config
+		if cfgSetupReset {
+			cfg = &config.Config{Profiles: map[string]config.Profile{}}
+		} else if _, statErr := os.Stat(path); statErr != nil {
+			cfg = &config.Config{Profiles: map[string]config.Profile{}}
+		} else {
+			cfg, err = config.Load(path)
+			if err != nil {
+				return err
+			}
+		}
+		if cfg.Profiles == nil {
+			cfg.Profiles = map[string]config.Profile{}
+		}
+
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			return fmt.Errorf("创建目录失败: %w", err)
 		}
 
 		reader := bufio.NewReader(os.Stdin)
-		prof := promptReader(reader, "profile 名称", "prod")
-		endpoint := promptReader(reader, "endpoint (如 https://<your-s3-endpoint>/)", "")
-		accessKey := promptReader(reader, "access-key (可留空,用环境变量 SAIL_ACCESS_KEY)", "")
-		secretKey := promptReader(reader, "secret-key (可留空,用环境变量 SAIL_SECRET_KEY)", "")
-		bucket := promptReader(reader, "默认 bucket (可留空)", "")
-		cdnDomain := promptReader(reader, "CDN 域名 (用于 url 命令,可留空)", "")
-		region := promptReader(reader, "region (云厂商填如 us-east-1,自建服务留空)", "")
-		pathStyle := promptBoolReader(reader, "path-style (自建/MinIO 选 y,AWS S3 选 n)", true)
+		var existing config.Profile
+		exists := false
+		def := cfg.DefaultProfile
+		if def == "" && len(cfg.Profiles) > 0 {
+			def = firstProfileName(cfg.Profiles)
+		}
+		if def == "" {
+			def = "prod"
+		}
+		prof := promptReader(reader, "profile 名称", def)
+		existing, exists = cfg.Profiles[prof]
+		if exists {
+			fmt.Printf("profile %q 已存在,将重新配置。\n", prof)
+		}
+		endpoint := promptReader(reader, "endpoint (如 https://<your-s3-endpoint>/)", existing.Endpoint)
+		accessKey := promptReader(reader, "access-key (可留空,用环境变量 SAIL_ACCESS_KEY)", existing.AccessKey)
+		secretKey := promptReader(reader, "secret-key (可留空,用环境变量 SAIL_SECRET_KEY)", existing.SecretKey)
+		bucket := promptReader(reader, "默认 bucket (可留空)", existing.Bucket)
+		cdnDomain := promptReader(reader, "CDN 域名 (用于 url 命令,可留空)", existing.CDNDomain)
+		region := promptReader(reader, "region (云厂商填如 us-east-1,自建服务留空)", existing.Region)
+		pathStyle := promptBoolReader(reader, "path-style (自建/MinIO 选 y,AWS S3 选 n)", existing.PathStyle || !exists)
+		// cdn-bucket-path 仅在配置了 cdn-domain 时才有意义;空则跳过,留自动检测
+		var cdnBucketPath *bool
+		if cdnDomain != "" {
+			cdnBucketPath = promptTristateReader(reader, "CDN 域名是否已含 bucket 路径?", existing.CDNBucketPath)
+		}
 
-		content := renderConfig(prof, endpoint, accessKey, secretKey, bucket, cdnDomain, region, pathStyle)
+		cfg.Profiles[prof] = config.Profile{
+			Endpoint: endpoint, AccessKey: accessKey, SecretKey: secretKey,
+			Bucket: bucket, Region: region, PathStyle: pathStyle,
+			CDNDomain: cdnDomain, CDNBucketPath: cdnBucketPath,
+		}
+		// 始终允许把本次写入的 profile 设为默认:无默认或本就是默认时默认 yes,
+		// 否则默认 no(避免无意切换默认)。
+		if promptBoolReader(reader, "设为默认 profile?", cfg.DefaultProfile == "" || prof == cfg.DefaultProfile) {
+			cfg.DefaultProfile = prof
+		}
+
+		content := renderConfigFile(cfg)
 		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			return fmt.Errorf("写入配置失败: %w", err)
 		}
@@ -71,8 +117,12 @@ var configInitCmd = &cobra.Command{
 	},
 }
 
+// cfgSetupReset 为 true 时,setup 丢弃现有配置,重置为单 profile 的全新配置。
+var cfgSetupReset bool
+
 func init() {
-	configCmd.AddCommand(configInitCmd)
+	configCmd.AddCommand(configSetupCmd)
+	configSetupCmd.Flags().BoolVar(&cfgSetupReset, "reset", false, "丢弃现有配置,重置为单 profile 的全新配置")
 }
 
 // promptReader 从共享 reader 读取一行,空输入返回默认值。
@@ -105,7 +155,25 @@ func promptBoolReader(r *bufio.Reader, label string, def bool) bool {
 	return line == "y" || line == "yes"
 }
 
-// confirm 询问 y/n,默认 no。用于覆盖确认等场景。
+// promptTristateReader 读取 y/n/回车,返回 *bool 表示三态:
+// 回车或无效输入返回 def(自动检测);y/yes 返回 true(已含);n/no 返回 false(未含)。
+func promptTristateReader(r *bufio.Reader, label string, def *bool) *bool {
+	fmt.Printf("%s [y/n, 回车=自动检测]: ", label)
+	line, _ := r.ReadString('\n')
+	line = strings.TrimSpace(strings.ToLower(line))
+	switch line {
+	case "y", "yes":
+		v := true
+		return &v
+	case "n", "no":
+		v := false
+		return &v
+	default:
+		return def
+	}
+}
+
+// confirm 询问 y/n,默认 no。用于破坏性操作的确认(mv 递归等)。
 func confirm() bool {
 	r := bufio.NewReader(os.Stdin)
 	line, _ := r.ReadString('\n')
@@ -113,28 +181,58 @@ func confirm() bool {
 	return line == "y" || line == "yes"
 }
 
-func renderConfig(prof, endpoint, accessKey, secretKey, bucket, cdnDomain, region string, pathStyle bool) string {
-	ak := accessKey
+// renderConfigFile 渲染整个配置(所有 profile 按名称排序,保证确定性)。
+func renderConfigFile(cfg *config.Config) string {
+	if cfg == nil {
+		cfg = &config.Config{Profiles: map[string]config.Profile{}}
+	}
+	if cfg.Profiles == nil {
+		cfg.Profiles = map[string]config.Profile{}
+	}
+	names := make([]string, 0, len(cfg.Profiles))
+	for name := range cfg.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	b.WriteString("# S3 兼容存储 CLI 配置\n")
+	b.WriteString("# 密钥可用 ${VAR} 引用环境变量,避免明文。\n")
+	fmt.Fprintf(&b, "default-profile: %s\n", cfg.DefaultProfile)
+	b.WriteString("profiles:\n")
+	for _, name := range names {
+		b.WriteString(renderProfile(name, cfg.Profiles[name]))
+	}
+	return b.String()
+}
+
+// renderProfile 渲染单个 profile 块;ak/sk 为空时替换为 `${VAR}` 占位符,
+// cdn-bucket-path 仅在配置了 cdn-domain 时输出(注释行=自动检测,显式值=明确声明)。
+func renderProfile(name string, p config.Profile) string {
+	ak := p.AccessKey
 	if ak == "" {
 		ak = "${SAIL_ACCESS_KEY}"
 	}
-	sk := secretKey
+	sk := p.SecretKey
 	if sk == "" {
 		sk = "${SAIL_SECRET_KEY}"
 	}
-	bk := bucket
-	if bk == "" {
-		bk = ""
-	}
 	ps := "false"
-	if pathStyle {
+	if p.PathStyle {
 		ps = "true"
 	}
-	return fmt.Sprintf(`# S3 兼容存储 CLI 配置
-# 密钥可用 ${VAR} 引用环境变量,避免明文。
-default-profile: %s
-profiles:
-  %s:
+	// cdn-bucket-path 仅在配置了 cdn-domain 时才有意义:
+	// 未配置 CDN 域名则整行不输出(避免冗余);配置了则带说明注释,
+	// 注释行(自动检测)或显式 true/false 值由 p.CDNBucketPath 决定。
+	const cdnHint = "CDN 域名 URL 是否已含 bucket 路径:true=已含(不再追加),false=未含(总是追加)"
+	cdp := ""
+	if p.CDNDomain != "" {
+		if p.CDNBucketPath == nil {
+			cdp = fmt.Sprintf("    # cdn-bucket-path: false  # %s;注释掉(默认)则自动检测\n", cdnHint)
+		} else {
+			cdp = fmt.Sprintf("    cdn-bucket-path: %t  # %s\n", *p.CDNBucketPath, cdnHint)
+		}
+	}
+	return fmt.Sprintf(`  %s:
     endpoint: %s
     access-key: %s
     secret-key: %s
@@ -142,5 +240,18 @@ profiles:
     region: "%s"
     path-style: %s
     cdn-domain: "%s"
-`, prof, prof, endpoint, ak, sk, bk, region, ps, cdnDomain)
+%s`, name, p.Endpoint, ak, sk, p.Bucket, p.Region, ps, p.CDNDomain, cdp)
+}
+
+// firstProfileName 返回配置中按名称排序的第一个 profile,无则返回空串。
+func firstProfileName(m map[string]config.Profile) string {
+	names := make([]string, 0, len(m))
+	for name := range m {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return ""
+	}
+	return names[0]
 }

@@ -49,10 +49,10 @@ cd sail && go build -o sail .
 ### 快速初始化
 
 ```bash
-sail config init
+sail config setup
 ```
 
-交互式生成 `~/.sail/config.yaml`,并可选安装 shell 自动补全:
+交互式生成或更新 `~/.sail/config.yaml`(`--reset` 重置为全新配置;文件已存在时新增或重配一个 profile,保留其它),并可选安装 shell 自动补全:
 
 ```yaml
 # 密钥可用 ${VAR} 引用环境变量,避免明文。
@@ -66,6 +66,7 @@ profiles:
     region: ""
     path-style: true
     cdn-domain: <your-cdn-domain>
+    # cdn-bucket-path: false  # CDN 域名是否已含 bucket 路径;注释掉则自动检测
   test:
     endpoint: <your-s3-endpoint-test>
     access-key: ${SAIL_TEST_ACCESS_KEY}
@@ -87,6 +88,8 @@ profiles:
 ### cdn-domain 说明
 
 `cdn-domain` 用于 `sail url` 命令生成文件的公开访问地址,填入你的存储服务对应的 CDN 域名即可。
+
+**bucket 去重**:`sail url` 会检查 `cdn-domain` 的路径是否已包含 bucket 段(路径式 `.../bucket/`),若已包含则不再重复拼接,避免生成 `.../bucket/bucket/key` 这类失效链接。自动检测仅按路径段判断、不做子域推断;若自动检测失效或有特殊映射(如域名直接映射到 bucket、URL 不含 bucket),可用配置项 `cdn-bucket-path` 显式声明:`true` 表示域名已含 bucket(不再追加),`false` 表示未含(总是追加),注释掉则自动检测;也可用 `--no-bucket` 单次指定。
 
 **注意**:只有 `public-read` 权限的 bucket 的文件才能通过 CDN 域名访问;私有 bucket 只能通过鉴权的 GetObject 访问。
 
@@ -163,6 +166,7 @@ sail presign s3://mybucket/key --expires 3600
 # 生成 CDN 访问地址
 sail url s3://mybucket/path/file.jpg
 sail url s3://mybucket/path/file.jpg --cdn https://<your-cdn-domain>
+sail url s3://mybucket/path/file.jpg --no-bucket   # CDN 域名已含 bucket 路径,不再重复追加
 
 # 查看对象/文件内容(按格式智能渲染,本地文件免配置)
 sail view s3://mybucket/config.json              # JSON 自动美化缩进

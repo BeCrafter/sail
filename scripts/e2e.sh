@@ -2,7 +2,8 @@
 #
 # sail 端到端验证脚本(小文件、轻量)
 # 覆盖:cp(本地↔s3、s3↔s3、递归、管道、dry-run、默认桶)、mv、stat、view/cat、
-# ls、rm、presign、url。不测极限(大文件/海量对象)。
+# ls、rm、presign、url、config(-p 指定 profile / setup 增改·重置,均无需 S3)。
+# 不测极限(大文件/海量对象)。
 #
 # 用法:
 #   # 方式一:复用已有配置(推荐,不碰凭证)
@@ -202,6 +203,52 @@ if echo "$URL_OUT" | grep -q "^https\?://"; then
 else
     skip "url 未配置 cdn-domain(跳过)"
 fi
+
+# ── url bucket 去重(不依赖 config cdn-domain):自动检测 / --no-bucket / cdn-bucket-path ──
+# 自动检测:--cdn 域名已含 bucket 则不重复拼接
+AUTO_URL=$($SAIL url "s3://$BUCKET/$PREFIX/small.txt" --cdn "https://ov.example.com/$BUCKET" 2>&1) || true
+if echo "$AUTO_URL" | grep -qF "https://ov.example.com/$BUCKET/$PREFIX/small.txt" && ! echo "$AUTO_URL" | grep -qF "/$BUCKET/$BUCKET/"; then
+    ok "url 域名含 bucket 自动去重"
+else
+    err "url 自动去重失败: $AUTO_URL"
+fi
+# --no-bucket:显式不追加 bucket(覆盖自动检测,域名不含 bucket 也不追加)
+NOB_URL=$($SAIL url "s3://$BUCKET/$PREFIX/small.txt" --cdn "https://ov.example.com" --no-bucket 2>&1) || true
+if echo "$NOB_URL" | grep -qF "https://ov.example.com/$PREFIX/small.txt" && ! echo "$NOB_URL" | grep -qF "/$BUCKET/"; then
+    ok "url --no-bucket 不追加 bucket"
+else
+    err "url --no-bucket 失败: $NOB_URL"
+fi
+# cdn-bucket-path 配置字段(url 不连 S3,用临时配置)
+gen_cdn_cfg() {
+    cat > "$WORK_DIR/cdn-config.yaml" <<EOF
+default-profile: e2e-cdn
+profiles:
+  e2e-cdn:
+    endpoint: https://s3.example.com
+    access-key: e2e-dummy
+    secret-key: e2e-dummy
+    bucket: "$BUCKET"
+    path-style: true
+    cdn-domain: "https://ov.example.com/$BUCKET"
+    cdn-bucket-path: $1
+EOF
+}
+gen_cdn_cfg "true"
+CFG_TRUE=$("$SAIL_BIN" -c "$WORK_DIR/cdn-config.yaml" url "s3://$BUCKET/$PREFIX/small.txt" 2>&1)
+if echo "$CFG_TRUE" | grep -qF "https://ov.example.com/$BUCKET/$PREFIX/small.txt" && ! echo "$CFG_TRUE" | grep -qF "/$BUCKET/$BUCKET/"; then
+    ok "url cdn-bucket-path:true 去重(覆盖自动检测)"
+else
+    err "url cdn-bucket-path:true 失败: $CFG_TRUE"
+fi
+gen_cdn_cfg "false"
+CFG_FALSE=$("$SAIL_BIN" -c "$WORK_DIR/cdn-config.yaml" url "s3://$BUCKET/$PREFIX/small.txt" 2>&1)
+if echo "$CFG_FALSE" | grep -qF "/$BUCKET/$BUCKET/"; then
+    ok "url cdn-bucket-path:false 强制追加(覆盖自动检测)"
+else
+    err "url cdn-bucket-path:false 失败: $CFG_FALSE"
+fi
+
 PS_OUT=$($SAIL presign "s3://$BUCKET/$PREFIX/small.txt" 2>&1) || true
 if echo "$PS_OUT" | grep -q "X-Amz-Signature"; then
     echo "$PS_OUT" | grep -q "/$BUCKET/" && ok "presign 含 bucket" || err "presign 缺 bucket"
@@ -223,6 +270,103 @@ step "13. 错误处理"
 $SAIL stat "s3://$BUCKET/$PREFIX/__nope__" >/dev/null 2>&1 && err "stat 不应找到不存在对象" || ok "stat 不存在对象正确报错"
 $SAIL cp "$TEST_DIR/small.txt" "$WORK_DIR/should-fail.txt" >/dev/null 2>&1 && err "cp 本地→本地不应成功" || ok "cp 本地→本地正确拒绝"
 $SAIL mv -r "s3://$BUCKET/$PREFIX/dir/" "s3://$BUCKET/$PREFIX/dir5/" </dev/null >/dev/null 2>&1 && err "mv -r 非 TTY 无 --yes 不应成功" || ok "mv -r 非 TTY 无 --yes 正确拒绝"
+# ════════════════════════════════════════════════════════
+step "14. config: 多 profile 指定(-p)与 setup 增改/重置(无需 S3)"
+
+# ── 多 profile:无 -p(默认)与 -p 指定 ──
+cat > "$WORK_DIR/multi-cfg.yaml" <<EOF
+default-profile: prod
+profiles:
+  prod:
+    endpoint: https://s3.example.com
+    access-key: ak
+    secret-key: sk
+    bucket: "bucket-a"
+    region: "us-east-1"
+    path-style: true
+    cdn-domain: "https://cdn-prod.example.com"
+  test:
+    endpoint: https://s3-test.example.com
+    access-key: ak
+    secret-key: sk
+    bucket: "bucket-b"
+    region: "us-east-1"
+    path-style: true
+    cdn-domain: "https://cdn-test.example.com"
+EOF
+DEF_URL=$("$SAIL_BIN" -c "$WORK_DIR/multi-cfg.yaml" url "s3://x/key" 2>&1)
+echo "$DEF_URL" | grep -qF "cdn-prod.example.com" && ok "无 -p 用 default-profile(prod)" || err "无 -p 未用默认 profile: $DEF_URL"
+TST_URL=$("$SAIL_BIN" -c "$WORK_DIR/multi-cfg.yaml" -p test url "s3://x/key" 2>&1)
+echo "$TST_URL" | grep -qF "cdn-test.example.com" && ok "-p test 指定 test profile" || err "-p test 未生效: $TST_URL"
+PRD_URL=$("$SAIL_BIN" -c "$WORK_DIR/multi-cfg.yaml" -p prod url "s3://x/key" 2>&1)
+echo "$PRD_URL" | grep -qF "cdn-prod.example.com" && ok "-p prod 指定 prod profile" || err "-p prod 未生效: $PRD_URL"
+if "$SAIL_BIN" -c "$WORK_DIR/multi-cfg.yaml" -p nosuch url "s3://x/key" >/dev/null 2>&1; then
+    err "-p 不存在的 profile 不应成功"
+else
+    ok "-p 不存在的 profile 正确报错"
+fi
+
+# ── config setup 交互式新建(单 profile,自动设为默认) ──
+printf 'prod\nhttps://s3.example.com\nak\nsk\nbucket-a\n\nus-east-1\ny\n\n' | \
+    SHELL= "$SAIL_BIN" -c "$WORK_DIR/setup-new.yaml" config setup >/dev/null 2>&1
+grep -q 'default-profile: prod' "$WORK_DIR/setup-new.yaml" && ok "setup 新建默认=prod" || err "setup 新建未设默认"
+grep -q '  prod:' "$WORK_DIR/setup-new.yaml" && ok "setup 新建含 prod" || err "setup 新建缺 prod"
+
+# ── setup 新增 profile,保留现有(默认不变) ──
+cat > "$WORK_DIR/add-cfg.yaml" <<EOF
+default-profile: prod
+profiles:
+  prod:
+    endpoint: https://s3.example.com
+    access-key: ak
+    secret-key: sk
+    bucket: "bucket-a"
+    region: "us-east-1"
+    path-style: true
+    cdn-domain: ""
+EOF
+printf 'test\nhttps://s3-test.example.com\nak\nsk\nbucket-b\n\nus-east-1\ny\n\n' | \
+    SHELL= "$SAIL_BIN" -c "$WORK_DIR/add-cfg.yaml" config setup >/dev/null 2>&1
+grep -q '  prod:' "$WORK_DIR/add-cfg.yaml" && ok "setup 增 profile 保留 prod" || err "setup 增 profile 丢 prod"
+grep -q '  test:' "$WORK_DIR/add-cfg.yaml" && ok "setup 增 profile 加 test" || err "setup 增 profile 未加 test"
+grep -q 'bucket: "bucket-a"' "$WORK_DIR/add-cfg.yaml" && ok "setup 增 profile 保留 prod.bucket" || err "setup 增 profile 改动了 prod.bucket"
+grep -q 'default-profile: prod' "$WORK_DIR/add-cfg.yaml" && ok "setup 增 profile 默认不变" || err "setup 增 profile 默认被改"
+
+# ── 把新增 profile 设为默认(promote) ──
+printf 'test\nhttps://s3-test.example.com\nak\nsk\nbucket-b\n\nus-east-1\ny\ny\n' | \
+    SHELL= "$SAIL_BIN" -c "$WORK_DIR/add-cfg.yaml" config setup >/dev/null 2>&1
+grep -q 'default-profile: test' "$WORK_DIR/add-cfg.yaml" && ok "setup 可把新 profile 设为默认" || err "setup 未能把新 profile 设为默认"
+grep -q '  prod:' "$WORK_DIR/add-cfg.yaml" && grep -q '  test:' "$WORK_DIR/add-cfg.yaml" && ok "promote 后两 profile 均在" || err "promote 后 profile 缺失"
+
+# ── setup --reset:2 profile → 单 profile ──
+cat > "$WORK_DIR/reset-cfg.yaml" <<EOF
+default-profile: prod
+profiles:
+  prod:
+    endpoint: https://s3.example.com
+    access-key: ak
+    secret-key: sk
+    bucket: "bucket-a"
+    region: "us-east-1"
+    path-style: true
+    cdn-domain: ""
+  test:
+    endpoint: https://s3-test.example.com
+    access-key: ak
+    secret-key: sk
+    bucket: "bucket-b"
+    region: "us-east-1"
+    path-style: true
+    cdn-domain: ""
+EOF
+printf 'prod\nhttps://s3.example.com\nak\nsk\nbucket-a\n\nus-east-1\ny\n\n' | \
+    SHELL= "$SAIL_BIN" -c "$WORK_DIR/reset-cfg.yaml" config setup --reset >/dev/null 2>&1
+if grep -q '  prod:' "$WORK_DIR/reset-cfg.yaml" && ! grep -q '  test:' "$WORK_DIR/reset-cfg.yaml"; then
+    ok "setup --reset 只剩单 profile"
+else
+    err "setup --reset 未清空"
+fi
+grep -q 'default-profile: prod' "$WORK_DIR/reset-cfg.yaml" && ok "setup --reset 默认=prod" || err "setup --reset 默认错误"
 
 # ════════════════════════════════════════════════════════
 echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"

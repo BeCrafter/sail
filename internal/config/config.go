@@ -19,6 +19,9 @@ type Profile struct {
 	Region    string `mapstructure:"region"`
 	PathStyle bool   `mapstructure:"path-style"`
 	CDNDomain string `mapstructure:"cdn-domain"`
+	// CDNBucketPath 显式声明 cdn-domain 是否已含 bucket 路径。
+	// nil = 自动检测;true = 已含(不再追加);false = 未含(总是追加)。
+	CDNBucketPath *bool `mapstructure:"cdn-bucket-path"`
 }
 
 // Config 是 ~/.sail/config.yaml 的整体结构
@@ -29,14 +32,15 @@ type Config struct {
 
 // Resolved 是最终生效的、供 client 使用的配置
 type Resolved struct {
-	ProfileName string
-	Endpoint    string
-	AccessKey   string
-	SecretKey   string
-	Bucket      string
-	Region      string
-	PathStyle   bool
-	CDNDomain   string
+	ProfileName   string
+	Endpoint      string
+	AccessKey     string
+	SecretKey     string
+	Bucket        string
+	Region        string
+	PathStyle     bool
+	CDNDomain     string
+	CDNBucketPath *bool
 }
 
 var envVarPattern = regexp.MustCompile(`\$\{([A-Z0-9_]+)\}`)
@@ -87,14 +91,15 @@ func (c *Config) Resolve(profile string) (*Resolved, error) {
 	}
 
 	r := &Resolved{
-		ProfileName: profile,
-		Endpoint:    expandEnv(p.Endpoint),
-		AccessKey:   expandEnv(p.AccessKey),
-		SecretKey:   expandEnv(p.SecretKey),
-		Bucket:      expandEnv(p.Bucket),
-		Region:      p.Region,
-		PathStyle:   p.PathStyle,
-		CDNDomain:   expandEnv(p.CDNDomain),
+		ProfileName:   profile,
+		Endpoint:      expandEnv(p.Endpoint),
+		AccessKey:     expandEnv(p.AccessKey),
+		SecretKey:     expandEnv(p.SecretKey),
+		Bucket:        expandEnv(p.Bucket),
+		Region:        p.Region,
+		PathStyle:     p.PathStyle,
+		CDNDomain:     expandEnv(p.CDNDomain),
+		CDNBucketPath: p.CDNBucketPath,
 	}
 
 	// 环境变量覆盖

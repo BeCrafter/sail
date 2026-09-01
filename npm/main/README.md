@@ -27,7 +27,7 @@ npm install -g @becrafter/sail
 ## 快速开始
 
 ```bash
-sail config init                                # 交互式生成 ~/.sail/config.yaml
+sail config setup                               # 交互式生成/更新 ~/.sail/config.yaml
 sail cp local.txt s3://mybucket/path/local.txt  # 上传
 sail ls s3://mybucket/                          # 列举
 sail cp s3://mybucket/key local.txt             # 下载
@@ -46,6 +46,7 @@ profiles:
     region: ""
     path-style: true
     cdn-domain: <your-cdn-domain>
+    # cdn-bucket-path: false  # CDN 域名是否已含 bucket 路径;注释掉则自动检测
 ```
 
 密钥用 `${VAR}` 引用环境变量,避免在配置文件中明文存储。
