@@ -142,7 +142,7 @@ for entry in "${PLATFORMS[@]}"; do
   src="npm/$pkgkey"; dst="$STAGE/$pkgkey"
   mkdir -p "$dst/bin"
   cp "$src/package.json" "$dst/package.json"
-  GOOS=$goos GOARCH=$goarch CGO_ENABLED=0 go build -ldflags "-s -w" -o "$dst/bin/$binname" .
+  GOOS=$goos GOARCH=$goarch CGO_ENABLED=0 go build -ldflags "-s -w -X github.com/BeCrafter/sail/internal/version.Version=$VERSION" -o "$dst/bin/$binname" .
   chmod +x "$dst/bin/$binname"
   ok "built $pkgkey  ($(file -b "$dst/bin/$binname" | cut -d, -f1))"
 done

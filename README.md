@@ -127,6 +127,9 @@ export SAIL_SECRET_KEY="your-secret-key"
 > **路径语法**:`s3://bucket/key` 显式指定 bucket;`s3:///key`(空 bucket 段)用配置的默认 bucket;`s3://bucket` 仅 `ls` 列桶。跨桶同步仍用显式 `s3://bucket/key`。
 
 ```bash
+# 查看版本
+sail --version          # 或 sail -v
+
 # 复制(本地↔s3、s3↔s3);upload/download 为 cp 的别名
 sail cp local.txt s3://mybucket/path/local.txt
 sail cp local.txt s3:///path/local.txt           # s3:/// 用配置默认 bucket

@@ -4,9 +4,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/spf13/cobra"
 	"github.com/BeCrafter/sail/internal/config"
 	"github.com/BeCrafter/sail/internal/s3path"
+	"github.com/BeCrafter/sail/internal/version"
+	"github.com/spf13/cobra"
 )
 
 var (
@@ -20,6 +21,7 @@ var rootCmd = &cobra.Command{
 	Use:          "sail",
 	Short:        "S3 对象存储 CLI",
 	Long:         "sail 是 S3 协议对象存储的命令行工具,支持复制/移动/列举/删除/查看/预签名,单二进制零运行时依赖。",
+	Version:      version.Version,
 	SilenceUsage: true,
 	CompletionOptions: cobra.CompletionOptions{
 		HiddenDefaultCmd: true,
@@ -34,6 +36,9 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&profile, "profile", "p", "", "使用哪个 profile (默认 default-profile)")
 	rootCmd.PersistentFlags().StringVar(&cfgEndpoint, "endpoint", "", "覆盖 endpoint")
 	rootCmd.PersistentFlags().StringVar(&cfgBucket, "bucket", "", "覆盖默认 bucket")
+
+	// 自定义 --version / -v 的输出格式,默认模板会带 "sail version" 前缀。
+	rootCmd.SetVersionTemplate("sail version {{.Version}}\n")
 
 	// 关闭字母序排序,按注册顺序展示(对象操作 → 列举查看 → 访问地址 → 配置)
 	cobra.EnableCommandSorting = false

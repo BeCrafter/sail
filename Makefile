@@ -1,13 +1,14 @@
 SHELL := /bin/bash
 BINARY := sail
+VERSION ?= dev
 
 .DEFAULT_GOAL := help
 
 help: ## 显示可用目标
 	@awk -F'## ' '/^[a-zA-Z][a-zA-Z0-9_-]*:.*## /{t=$$1; sub(/:.*/, "", t); printf "  \033[36m%-13s\033[0m %s\n", t, $$2}' $(MAKEFILE_LIST)
 
-build: ## 编译当前平台二进制到 ./$(BINARY)
-	go build -ldflags "-s -w" -o $(BINARY) .
+build: ## 编译当前平台二进制到 ./$(BINARY) (可用 VERSION=x.y.z 注入版本,默认 dev)
+	go build -ldflags "-s -w -X github.com/BeCrafter/sail/internal/version.Version=$(VERSION)" -o $(BINARY) .
 
 tidy: ## go mod tidy
 	go mod tidy
