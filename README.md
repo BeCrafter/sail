@@ -52,7 +52,12 @@ cd sail && go build -o sail .
 sail config setup
 ```
 
-交互式生成或更新 `~/.sail/config.yaml`(`--reset` 重置为全新配置;文件已存在时新增或重配一个 profile,保留其它),并可选安装 shell 自动补全:
+交互式生成或更新 `~/.sail/config.yaml`(`--reset` 重置为全新配置;文件已存在时新增或重配一个 profile,保留其它),并可选安装 shell 自动补全。向导要点:
+
+- `endpoint` 为必填项,留空会原地重问
+- `access-key` / `secret-key` 可直接输入明文;回车留空则引用按 profile 派生的环境变量(机制见下方"密钥安全"),写盘后会打印需要 `export` 的变量名
+- 重配已有 profile 时,已配置的明文密钥不回显,回车即保留
+- 写盘后输出配置摘要,空字段明确标注,便于核对缺失项
 
 ```yaml
 # 密钥可用 ${VAR} 引用环境变量,避免明文。
@@ -109,14 +114,23 @@ profiles:
 
 ### 密钥安全
 
-配置文件中用 `${VAR}` 引用环境变量,避免明文存储:
+配置文件中的密钥有两种写法:直接明文,或用 `${VAR}` 引用环境变量(避免明文落盘):
 
-```bash
-export SAIL_ACCESS_KEY="your-access-key"
-export SAIL_SECRET_KEY="your-secret-key"
+```yaml
+access-key: my-plain-access-key        # 写法一:明文
+access-key: ${SAIL_TEST_ACCESS_KEY}    # 写法二:引用环境变量
 ```
 
-向导中留空密钥时,`config setup` 自动写入按 profile 派生的占位符(如 profile `test` → `${SAIL_TEST_ACCESS_KEY}`),各环境互不共享。生效优先级:运行时全局覆盖环境变量(`SAIL_ACCESS_KEY` 等,见下表)> 配置文件内 `${VAR}` 展开 > 空(启动报缺少密钥)。
+`sail config setup` 中回车留空密钥时,自动采用写法二并按 profile 派生变量名(profile `test` → `SAIL_TEST_ACCESS_KEY`,`staging-eu` → `SAIL_STAGING_EU_ACCESS_KEY`,即大写、连字符等非字母数字字符转下划线;清洗后为空回退 `SAIL_ACCESS_KEY`),各环境互不共享。向导结束时会打印需要 export 的变量名,例如:
+
+```bash
+export SAIL_TEST_ACCESS_KEY="your-access-key"
+export SAIL_TEST_SECRET_KEY="your-secret-key"
+```
+
+未设置这些变量时,sail 命令启动会报 `缺少 access-key/secret-key`。
+
+注意区分两类环境变量:文件内 `${VAR}` 引用的变量(按 profile 派生,如 `SAIL_TEST_ACCESS_KEY`)负责给密钥赋值;下方"环境变量覆盖"表中的 `SAIL_ACCESS_KEY` 等是**运行时全局覆盖**,一旦设置会无视配置文件直接生效。生效优先级:全局覆盖环境变量 > 配置文件内 `${VAR}` 展开 > 空(启动报缺少密钥)。
 
 ### 环境变量覆盖
 

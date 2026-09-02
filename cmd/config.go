@@ -68,9 +68,29 @@ var configSetupCmd = &cobra.Command{
 		if exists {
 			fmt.Printf("profile %q 已存在,将重新配置。\n", prof)
 		}
-		endpoint := promptReader(reader, "endpoint (如 https://<your-s3-endpoint>/)", existing.Endpoint)
-		accessKey := promptReader(reader, fmt.Sprintf("access-key (可留空,用 %s 或任意 ${VAR})", config.EnvVarName(prof, "ACCESS_KEY")), existing.AccessKey)
-		secretKey := promptReader(reader, fmt.Sprintf("secret-key (可留空,用 %s 或任意 ${VAR})", config.EnvVarName(prof, "SECRET_KEY")), existing.SecretKey)
+		// endpoint 是启动硬依赖(缺失时任何命令都报错),必须非空;
+		// 管道/脚本无输入时 ReadString 恒返回空,靠次数上限避免死循环。
+		var endpoint string
+		for i := 0; i < 3; i++ {
+			endpoint = promptReader(reader, "endpoint (必填,如 https://<your-s3-endpoint>/)", existing.Endpoint)
+			if endpoint != "" {
+				break
+			}
+			fmt.Println("endpoint 为必填项,请输入 S3 兼容服务地址。")
+		}
+		if endpoint == "" {
+			return fmt.Errorf("endpoint 连续 3 次为空,已退出。请重新运行 sail config setup")
+		}
+		akLabel := fmt.Sprintf("access-key (输入密钥;回车留空则引用环境变量 %s)", config.EnvVarName(prof, "ACCESS_KEY"))
+		if existing.AccessKey != "" {
+			akLabel = "access-key (回车保留已配置值;输入新值或 ${VAR} 替换)"
+		}
+		skLabel := fmt.Sprintf("secret-key (输入密钥;回车留空则引用环境变量 %s)", config.EnvVarName(prof, "SECRET_KEY"))
+		if existing.SecretKey != "" {
+			skLabel = "secret-key (回车保留已配置值;输入新值或 ${VAR} 替换)"
+		}
+		accessKey := promptSecretReader(reader, akLabel, existing.AccessKey)
+		secretKey := promptSecretReader(reader, skLabel, existing.SecretKey)
 		bucket := promptReader(reader, "默认 bucket (可留空)", existing.Bucket)
 		cdnDomain := promptReader(reader, "CDN 域名 (用于 url 命令,可留空)", existing.CDNDomain)
 		region := promptReader(reader, "region (云厂商填如 us-east-1,自建服务留空)", existing.Region)
@@ -91,13 +111,14 @@ var configSetupCmd = &cobra.Command{
 		if promptBoolReader(reader, "设为默认 profile?", cfg.DefaultProfile == "" || prof == cfg.DefaultProfile) {
 			cfg.DefaultProfile = prof
 		}
+		isDefault := cfg.DefaultProfile == prof
 
 		content := renderConfigFile(cfg)
 		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 			return fmt.Errorf("写入配置失败: %w", err)
 		}
 		fmt.Printf("\n配置已写入: %s\n", path)
-		fmt.Println("提示: 如使用 ${VAR} 占位符,可避免在文件中明文保存密钥。")
+		fmt.Print(setupSummary(prof, isDefault, cfg.Profiles[prof]))
 
 		// 引导安装 shell 自动补全 (仅 macOS)
 		if shell := detectShell(); shell != "" {
@@ -127,8 +148,23 @@ func init() {
 
 // promptReader 从共享 reader 读取一行,空输入返回默认值。
 func promptReader(r *bufio.Reader, label, def string) string {
-	if def != "" {
-		fmt.Printf("%s [%s]: ", label, def)
+	return promptReaderDisplay(r, label, def, def)
+}
+
+// promptSecretReader 同 promptReader,但已配置的明文密钥不回显(防终端/日志泄漏);
+// ${VAR} 占位符非明文,原样显示。
+func promptSecretReader(r *bufio.Reader, label, def string) string {
+	display := def
+	if display != "" && !strings.HasPrefix(display, "${") {
+		display = "已配置,回车保留"
+	}
+	return promptReaderDisplay(r, label, def, display)
+}
+
+// promptReaderDisplay 从共享 reader 读取一行,空输入返回 def;display 仅用于回显提示。
+func promptReaderDisplay(r *bufio.Reader, label, def, display string) string {
+	if display != "" {
+		fmt.Printf("%s [%s]: ", label, display)
 	} else {
 		fmt.Printf("%s: ", label)
 	}
@@ -196,7 +232,8 @@ func renderConfigFile(cfg *config.Config) string {
 	sort.Strings(names)
 	var b strings.Builder
 	b.WriteString("# S3 兼容存储 CLI 配置\n")
-	b.WriteString("# 密钥可用 ${VAR} 引用环境变量,避免明文;留空的密钥按 profile 生成 SAIL_<PROFILE>_(ACCESS|SECRET)_KEY 占位符。\n")
+	b.WriteString("# 密钥两种写法:直接明文,或 ${VAR} 引用环境变量(避免明文)。\n")
+	b.WriteString("# setup 留空的密钥会生成 ${SAIL_<PROFILE>_(ACCESS|SECRET)_KEY} 占位符,也可手动改为任意 ${VAR}。\n")
 	fmt.Fprintf(&b, "default-profile: %s\n", cfg.DefaultProfile)
 	b.WriteString("profiles:\n")
 	for _, name := range names {
@@ -255,4 +292,58 @@ func firstProfileName(m map[string]config.Profile) string {
 		return ""
 	}
 	return names[0]
+}
+
+// setupSummary 生成写盘后的配置摘要,空字段明确标注;密钥留空时
+// 追加需 export 的环境变量指引(未设置时的报错一并说明)。
+// 明文密钥只显示"已填写"不回显值,避免泄漏到终端/日志。
+func setupSummary(prof string, isDefault bool, p config.Profile) string {
+	var b strings.Builder
+	title := prof
+	if isDefault {
+		title += " (默认)"
+	}
+	fmt.Fprintf(&b, "配置摘要  profile: %s\n", title)
+	fmt.Fprintf(&b, "  endpoint:   %s\n", p.Endpoint)
+	if p.AccessKey != "" {
+		b.WriteString("  access-key: 已填写(明文)\n")
+	} else {
+		fmt.Fprintf(&b, "  access-key: 引用环境变量 %s (需先 export)\n", config.EnvVarName(prof, "ACCESS_KEY"))
+	}
+	if p.SecretKey != "" {
+		b.WriteString("  secret-key: 已填写(明文)\n")
+	} else {
+		fmt.Fprintf(&b, "  secret-key: 引用环境变量 %s (需先 export)\n", config.EnvVarName(prof, "SECRET_KEY"))
+	}
+	bucket := p.Bucket
+	if bucket == "" {
+		bucket = "(未填)"
+	}
+	fmt.Fprintf(&b, "  bucket:     %s\n", bucket)
+	region := p.Region
+	if region == "" {
+		region = "(未填,自建服务可留空)"
+	}
+	fmt.Fprintf(&b, "  region:     %s\n", region)
+	cdn := p.CDNDomain
+	if cdn == "" {
+		cdn = "(未填,url 命令不可用)"
+	}
+	fmt.Fprintf(&b, "  cdn-domain: %s\n", cdn)
+
+	var missing []string
+	if p.AccessKey == "" {
+		missing = append(missing, fmt.Sprintf("  export %s=<你的 AccessKey>", config.EnvVarName(prof, "ACCESS_KEY")))
+	}
+	if p.SecretKey == "" {
+		missing = append(missing, fmt.Sprintf("  export %s=<你的 SecretKey>", config.EnvVarName(prof, "SECRET_KEY")))
+	}
+	if len(missing) > 0 {
+		fmt.Fprintf(&b, "\n注意: profile %s 的密钥留空,已引用环境变量,使用前请先设置:\n", prof)
+		for _, m := range missing {
+			b.WriteString(m + "\n")
+		}
+		fmt.Fprintf(&b, "未设置时,sail 命令会报错: profile %q 缺少 access-key/secret-key\n", prof)
+	}
+	return b.String()
 }

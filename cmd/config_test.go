@@ -7,6 +7,52 @@ import (
 	"github.com/BeCrafter/sail/internal/config"
 )
 
+// TestSetupSummary 校验写盘后的配置摘要:
+// 留空密钥显示派生变量名与 export 指引;明文密钥不回显值(安全);空字段标注。
+func TestSetupSummary(t *testing.T) {
+	// 密钥留空:含变量名、(需先 export)、export 指引与未设置后果
+	out := setupSummary("prod", true, config.Profile{Endpoint: "https://s3.example.com", Bucket: "b1"})
+	for _, want := range []string{
+		"profile: prod (默认)",
+		"SAIL_PROD_ACCESS_KEY",
+		"(需先 export)",
+		"export SAIL_PROD_ACCESS_KEY=",
+		"export SAIL_PROD_SECRET_KEY=",
+		`缺少 access-key/secret-key`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("留空密钥的摘要应包含 %q:\n%s", want, out)
+		}
+	}
+
+	// 明文密钥:显示"已填写",不得回显密钥值
+	out = setupSummary("prod", false, config.Profile{Endpoint: "https://s3.example.com", AccessKey: "AK-SECRET-123", SecretKey: "SK-SECRET-456"})
+	if !strings.Contains(out, "已填写") {
+		t.Errorf("明文密钥应显示已填写:\n%s", out)
+	}
+	if strings.Contains(out, "AK-SECRET-123") || strings.Contains(out, "SK-SECRET-456") {
+		t.Errorf("摘要不得回显明文密钥:\n%s", out)
+	}
+	if strings.Contains(out, "(默认)") {
+		t.Errorf("isDefault=false 不应带 (默认):\n%s", out)
+	}
+
+	// 空字段标注 (未填
+	out = setupSummary("prod", false, config.Profile{})
+	if !strings.Contains(out, "(未填") {
+		t.Errorf("空字段应标注 (未填):\n%s", out)
+	}
+
+	// 仅 sk 留空:export 指引只含 SECRET_KEY
+	out = setupSummary("prod", false, config.Profile{Endpoint: "https://s3.example.com", AccessKey: "ak"})
+	if strings.Contains(out, "export SAIL_PROD_ACCESS_KEY=") {
+		t.Errorf("仅 sk 留空时 export 指引不应含 ACCESS_KEY:\n%s", out)
+	}
+	if !strings.Contains(out, "export SAIL_PROD_SECRET_KEY=") {
+		t.Errorf("仅 sk 留空时 export 指引应含 SECRET_KEY:\n%s", out)
+	}
+}
+
 // TestRenderProfileEnvPlaceholder 校验 ak/sk 留空时按 profile 派生占位符,
 // 多个 profile 的占位符互不相同(不再共享同一组环境变量)。
 func TestRenderProfileEnvPlaceholder(t *testing.T) {

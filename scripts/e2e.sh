@@ -368,14 +368,40 @@ else
 fi
 grep -q 'default-profile: prod' "$WORK_DIR/reset-cfg.yaml" && ok "setup --reset 默认=prod" || err "setup --reset 默认错误"
 
-# ── setup 留空 ak/sk:写入按 profile 派生的占位符 ──
-printf 'prod\nhttps://s3.example.com\n\n\nbucket-a\n\nus-east-1\ny\n\n' | \
-    SHELL= "$SAIL_BIN" -c "$WORK_DIR/placeholder-cfg.yaml" config setup >/dev/null 2>&1
+# ── setup 留空 ak/sk:写入按 profile 派生的占位符,结尾输出摘要与 export 指引 ──
+SETUP_OUT=$(printf 'prod\nhttps://s3.example.com\n\n\nbucket-a\n\nus-east-1\ny\n\n' | \
+    SHELL= "$SAIL_BIN" -c "$WORK_DIR/placeholder-cfg.yaml" config setup 2>&1)
 if grep -qF 'access-key: ${SAIL_PROD_ACCESS_KEY}' "$WORK_DIR/placeholder-cfg.yaml" \
     && grep -qF 'secret-key: ${SAIL_PROD_SECRET_KEY}' "$WORK_DIR/placeholder-cfg.yaml"; then
     ok "setup 留空 ak/sk 写派生占位符"
 else
     err "setup 留空 ak/sk 未写派生占位符"
+fi
+if echo "$SETUP_OUT" | grep -q '配置摘要' \
+    && echo "$SETUP_OUT" | grep -q 'export SAIL_PROD_ACCESS_KEY=' \
+    && echo "$SETUP_OUT" | grep -q '缺少 access-key/secret-key'; then
+    ok "setup 结尾输出配置摘要与 export 指引"
+else
+    err "setup 结尾缺配置摘要/export 指引"
+fi
+
+# ── setup endpoint 留空原地重问(1 次空后给有效值) ──
+printf 'prod\n\nhttps://s3.example.com\nak\nsk\nbucket-a\n\nus-east-1\ny\n\n' | \
+    SHELL= "$SAIL_BIN" -c "$WORK_DIR/retry-cfg.yaml" config setup >/dev/null 2>&1
+grep -qF 'endpoint: https://s3.example.com' "$WORK_DIR/retry-cfg.yaml" \
+    && ok "setup endpoint 留空重问后写入" || err "setup endpoint 重问未生效"
+
+# ── setup endpoint 连续 3 次留空:报错退出且不写盘 ──
+rm -f "$WORK_DIR/fail-cfg.yaml"
+if printf 'prod\n\n\n\n' | SHELL= "$SAIL_BIN" -c "$WORK_DIR/fail-cfg.yaml" config setup >/dev/null 2>&1; then
+    err "setup endpoint 连续留空应报错退出"
+else
+    ok "setup endpoint 连续留空正确报错"
+fi
+if [[ ! -f "$WORK_DIR/fail-cfg.yaml" ]]; then
+    ok "setup 报错退出时未写盘"
+else
+    err "setup 报错退出时不应写盘"
 fi
 
 # ════════════════════════════════════════════════════════
