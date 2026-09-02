@@ -40,8 +40,8 @@ default-profile: prod
 profiles:
   prod:
     endpoint: <your-s3-endpoint>
-    access-key: ${SAIL_ACCESS_KEY}
-    secret-key: ${SAIL_SECRET_KEY}
+    access-key: ${SAIL_PROD_ACCESS_KEY}
+    secret-key: ${SAIL_PROD_SECRET_KEY}
     bucket: ""
     region: ""
     path-style: true

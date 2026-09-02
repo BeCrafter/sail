@@ -69,8 +69,8 @@ var configSetupCmd = &cobra.Command{
 			fmt.Printf("profile %q 已存在,将重新配置。\n", prof)
 		}
 		endpoint := promptReader(reader, "endpoint (如 https://<your-s3-endpoint>/)", existing.Endpoint)
-		accessKey := promptReader(reader, "access-key (可留空,用环境变量 SAIL_ACCESS_KEY)", existing.AccessKey)
-		secretKey := promptReader(reader, "secret-key (可留空,用环境变量 SAIL_SECRET_KEY)", existing.SecretKey)
+		accessKey := promptReader(reader, fmt.Sprintf("access-key (可留空,用 %s 或任意 ${VAR})", config.EnvVarName(prof, "ACCESS_KEY")), existing.AccessKey)
+		secretKey := promptReader(reader, fmt.Sprintf("secret-key (可留空,用 %s 或任意 ${VAR})", config.EnvVarName(prof, "SECRET_KEY")), existing.SecretKey)
 		bucket := promptReader(reader, "默认 bucket (可留空)", existing.Bucket)
 		cdnDomain := promptReader(reader, "CDN 域名 (用于 url 命令,可留空)", existing.CDNDomain)
 		region := promptReader(reader, "region (云厂商填如 us-east-1,自建服务留空)", existing.Region)
@@ -196,7 +196,7 @@ func renderConfigFile(cfg *config.Config) string {
 	sort.Strings(names)
 	var b strings.Builder
 	b.WriteString("# S3 兼容存储 CLI 配置\n")
-	b.WriteString("# 密钥可用 ${VAR} 引用环境变量,避免明文。\n")
+	b.WriteString("# 密钥可用 ${VAR} 引用环境变量,避免明文;留空的密钥按 profile 生成 SAIL_<PROFILE>_(ACCESS|SECRET)_KEY 占位符。\n")
 	fmt.Fprintf(&b, "default-profile: %s\n", cfg.DefaultProfile)
 	b.WriteString("profiles:\n")
 	for _, name := range names {
@@ -205,16 +205,17 @@ func renderConfigFile(cfg *config.Config) string {
 	return b.String()
 }
 
-// renderProfile 渲染单个 profile 块;ak/sk 为空时替换为 `${VAR}` 占位符,
+// renderProfile 渲染单个 profile 块;ak/sk 为空时替换为按 profile 派生的
+// `${SAIL_<PROFILE>_<FIELD>}` 占位符(见 config.EnvVarName,多个 profile 互不共享),
 // cdn-bucket-path 仅在配置了 cdn-domain 时输出(注释行=自动检测,显式值=明确声明)。
 func renderProfile(name string, p config.Profile) string {
 	ak := p.AccessKey
 	if ak == "" {
-		ak = "${SAIL_ACCESS_KEY}"
+		ak = "${" + config.EnvVarName(name, "ACCESS_KEY") + "}"
 	}
 	sk := p.SecretKey
 	if sk == "" {
-		sk = "${SAIL_SECRET_KEY}"
+		sk = "${" + config.EnvVarName(name, "SECRET_KEY") + "}"
 	}
 	ps := "false"
 	if p.PathStyle {

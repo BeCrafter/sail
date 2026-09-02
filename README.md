@@ -60,8 +60,8 @@ default-profile: prod
 profiles:
   prod:
     endpoint: <your-s3-endpoint>
-    access-key: ${SAIL_ACCESS_KEY}
-    secret-key: ${SAIL_SECRET_KEY}
+    access-key: ${SAIL_PROD_ACCESS_KEY}
+    secret-key: ${SAIL_PROD_SECRET_KEY}
     bucket: ""
     region: ""
     path-style: true
@@ -84,6 +84,8 @@ profiles:
     path-style: true
     cdn-domain: <your-cdn-domain-staging>
 ```
+
+向导中留空 `access-key`/`secret-key` 时,会自动写入按 profile 派生的占位符 `SAIL_<PROFILE>_(ACCESS|SECRET)_KEY`(profile 名大写、连字符等非字母数字字符转下划线,清洗后为空则回退 `SAIL_ACCESS_KEY` 全局名);配置文件中也可手动改为任意 `${VAR}`。
 
 ### cdn-domain 说明
 
@@ -114,11 +116,12 @@ export SAIL_ACCESS_KEY="your-access-key"
 export SAIL_SECRET_KEY="your-secret-key"
 ```
 
+向导中留空密钥时,`config setup` 自动写入按 profile 派生的占位符(如 profile `test` → `${SAIL_TEST_ACCESS_KEY}`),各环境互不共享。生效优先级:运行时全局覆盖环境变量(`SAIL_ACCESS_KEY` 等,见下表)> 配置文件内 `${VAR}` 展开 > 空(启动报缺少密钥)。
+
 ### 环境变量覆盖
 
 | 变量 | 作用 |
 |------|------|
-| `SAIL_PROFILE` | 选择 profile |
 | `SAIL_ENDPOINT` | 覆盖 endpoint |
 | `SAIL_ACCESS_KEY` | 覆盖 access key |
 | `SAIL_SECRET_KEY` | 覆盖 secret key |
