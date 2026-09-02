@@ -45,6 +45,29 @@ type Resolved struct {
 
 var envVarPattern = regexp.MustCompile(`\$\{([A-Z0-9_]+)\}`)
 
+// EnvVarName 按 profile 派生环境变量名:SAIL_<清洗后PROFILE>_<FIELD>。
+// profile 名大写后仅保留 [A-Z0-9],其余字符视为分隔符并压缩为单个 _(去首尾);
+// 清洗后为空则回退为 SAIL_<FIELD>。结果只含 [A-Z0-9_],必可被 envVarPattern 展开。
+func EnvVarName(profile, field string) string {
+	var b strings.Builder
+	prevSep := true // 起始视为分隔符,自然去掉首部 _
+	for _, r := range strings.ToUpper(profile) {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			if prevSep {
+				b.WriteByte('_')
+			}
+			b.WriteRune(r)
+			prevSep = false
+		} else {
+			prevSep = true
+		}
+	}
+	if s := b.String(); s != "" {
+		return "SAIL" + s + "_" + field
+	}
+	return "SAIL_" + field
+}
+
 // ConfigPath 返回配置文件默认路径 ~/.sail/config.yaml
 func ConfigPath() (string, error) {
 	home, err := os.UserHomeDir()

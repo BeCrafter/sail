@@ -7,6 +7,27 @@ import (
 	"github.com/BeCrafter/sail/internal/config"
 )
 
+// TestRenderProfileEnvPlaceholder 校验 ak/sk 留空时按 profile 派生占位符,
+// 多个 profile 的占位符互不相同(不再共享同一组环境变量)。
+func TestRenderProfileEnvPlaceholder(t *testing.T) {
+	empty := config.Profile{Endpoint: "https://s3.example.com", PathStyle: true}
+
+	out := renderProfile("test", empty)
+	if !strings.Contains(out, "access-key: ${SAIL_TEST_ACCESS_KEY}") || !strings.Contains(out, "secret-key: ${SAIL_TEST_SECRET_KEY}") {
+		t.Errorf("test 留空应写派生占位符:\n%s", out)
+	}
+	if out = renderProfile("prod", empty); !strings.Contains(out, "${SAIL_PROD_ACCESS_KEY}") {
+		t.Errorf("prod 留空应写 ${SAIL_PROD_ACCESS_KEY}:\n%s", out)
+	}
+	if out = renderProfile("staging-eu", empty); !strings.Contains(out, "${SAIL_STAGING_EU_ACCESS_KEY}") {
+		t.Errorf("staging-eu 留空应写 ${SAIL_STAGING_EU_ACCESS_KEY}:\n%s", out)
+	}
+	// 核心回归:prod 块不得引用 test 的占位符
+	if out = renderProfile("prod", empty); strings.Contains(out, "${SAIL_TEST_ACCESS_KEY}") {
+		t.Errorf("prod 不应引用 test 的占位符:\n%s", out)
+	}
+}
+
 // TestRenderConfigFile 校验多 profile 渲染:保留所有 profile、default-profile、
 // 且 cdn-bucket-path 仅在配置了 cdn-domain 的 profile 中出现。
 func TestRenderConfigFile(t *testing.T) {

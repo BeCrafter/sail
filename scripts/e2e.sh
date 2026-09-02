@@ -368,6 +368,16 @@ else
 fi
 grep -q 'default-profile: prod' "$WORK_DIR/reset-cfg.yaml" && ok "setup --reset 默认=prod" || err "setup --reset 默认错误"
 
+# ── setup 留空 ak/sk:写入按 profile 派生的占位符 ──
+printf 'prod\nhttps://s3.example.com\n\n\nbucket-a\n\nus-east-1\ny\n\n' | \
+    SHELL= "$SAIL_BIN" -c "$WORK_DIR/placeholder-cfg.yaml" config setup >/dev/null 2>&1
+if grep -qF 'access-key: ${SAIL_PROD_ACCESS_KEY}' "$WORK_DIR/placeholder-cfg.yaml" \
+    && grep -qF 'secret-key: ${SAIL_PROD_SECRET_KEY}' "$WORK_DIR/placeholder-cfg.yaml"; then
+    ok "setup 留空 ak/sk 写派生占位符"
+else
+    err "setup 留空 ak/sk 未写派生占位符"
+fi
+
 # ════════════════════════════════════════════════════════
 echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${CYAN} 汇总  ${GREEN}通过 $pass  ${RED}失败 $fail  ${YELLOW}跳过 $skipped${NC}"
