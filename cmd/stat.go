@@ -8,16 +8,23 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/BeCrafter/sail/internal/client"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
 	"github.com/spf13/cobra"
-	"github.com/BeCrafter/sail/internal/client"
 )
 
 var statCmd = &cobra.Command{
 	Use:   "stat <s3://bucket/key | 本地路径>",
 	Short: "查看对象/文件元信息",
-	Args:  cobra.ExactArgs(1),
+	Long: `查看对象/文件的元信息:s3 路径走 HeadObject,本地路径走 os.Stat。
+输出 key、大小、content-type、最后修改时间、etag、存储类型、版本号与自定义 metadata。
+本地路径列出文件名、大小、权限位、修改时间与是否目录。
+
+示例:
+  sail stat s3://bucket/config.json
+  sail stat ./local.log`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		arg := args[0]
 		ctx := context.Background()

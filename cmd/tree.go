@@ -8,9 +8,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/BeCrafter/sail/internal/client"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spf13/cobra"
-	"github.com/BeCrafter/sail/internal/client"
 )
 
 var (

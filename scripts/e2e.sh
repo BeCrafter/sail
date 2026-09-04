@@ -6,8 +6,10 @@
 # 不测极限(大文件/海量对象)。
 #
 # 用法:
-#   # 方式一:复用已有配置(推荐,不碰凭证)
-#   SAIL_E2E_CONFIG=~/.sail/config.yaml SAIL_E2E_BUCKET=<默认桶> ./scripts/e2e.sh
+#   # 方式一:复用已有配置(推荐,不碰凭证;可用 SAIL_E2E_PROFILE 指定 profile,
+#   #        配置的默认桶须等于 SAIL_E2E_BUCKET)
+#   SAIL_E2E_CONFIG=~/.sail/config.yaml SAIL_E2E_PROFILE=test \
+#     SAIL_E2E_BUCKET=<该 profile 默认桶> ./scripts/e2e.sh
 #   # 方式二:交互输入凭证
 #   ./scripts/e2e.sh
 #   # 方式三:环境变量传凭证(自建临时配置)
@@ -47,8 +49,17 @@ CONFIG_FILE="${SAIL_E2E_CONFIG:-}"
 BUCKET="${SAIL_E2E_BUCKET:-}"
 
 if [[ -n "$CONFIG_FILE" ]]; then
-    SAIL="$SAIL_BIN -c $CONFIG_FILE"
-    [[ -n "$BUCKET" ]] || { echo -e "${RED}方式一需同时指定 SAIL_E2E_BUCKET(应等于配置默认桶)${NC}"; exit 1; }
+    # 复用已有配置;可用 SAIL_E2E_PROFILE 指定 profile(默认用配置的 default-profile)。
+    # 注意:配置默认桶必须等于 SAIL_E2E_BUCKET,否则 s3:/// 相关断言会落在错误的桶上。
+    PROFILE="${SAIL_E2E_PROFILE:-}"
+    if [[ -n "$PROFILE" ]]; then
+        SAIL="$SAIL_BIN -c $CONFIG_FILE -p $PROFILE"
+    else
+        SAIL="$SAIL_BIN -c $CONFIG_FILE"
+    fi
+    [[ -n "$BUCKET" ]] || { echo -e "${RED}方式一需同时指定 SAIL_E2E_BUCKET(应等于该 profile 的默认桶)${NC}"; exit 1; }
+    # 预检:配置/凭证可用性(避免后续成片失败难定位)
+    $SAIL ls --buckets >/dev/null 2>&1 || { echo -e "${RED}配置不可用(profile=${PROFILE:-<default-profile>}):请检查 endpoint/密钥/默认桶,或用 SAIL_E2E_PROFILE 指定有效 profile${NC}"; exit 1; }
 else
     ENDPOINT="${SAIL_E2E_ENDPOINT:-}"; ACCESS_KEY="${SAIL_E2E_ACCESS_KEY:-}"
     SECRET_KEY="${SAIL_E2E_SECRET_KEY:-}"; CDN_DOMAIN="${SAIL_E2E_CDN_DOMAIN:-}"
@@ -85,7 +96,7 @@ echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━�
 echo -e "${CYAN} sail 端到端验证  桶=$BUCKET  前缀=$PREFIX${NC}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 
-cleanup() { echo -e "\n${CYAN}━━━ 清理 ━━━${NC}"; $SAIL rm -r "s3://$BUCKET/$PREFIX/" 2>/dev/null || true; rm -rf "$WORK_DIR" "${WORK_DIR_CFG:-}" 2>/dev/null || true; echo -e "${GREEN}清理完成${NC}"; }
+cleanup() { echo -e "\n${CYAN}━━━ 清理 ━━━${NC}"; $SAIL rm -r "s3://$BUCKET/$PREFIX/" 2>/dev/null || true; if [[ -n "${TMPBUCKET:-}" ]]; then $SAIL rm -r "s3://$TMPBUCKET/" 2>/dev/null || true; $SAIL rb "s3://$TMPBUCKET" 2>/dev/null || true; fi; rm -rf "$WORK_DIR" "${WORK_DIR_CFG:-}" 2>/dev/null || true; echo -e "${GREEN}清理完成${NC}"; }
 trap cleanup EXIT
 
 # ── 测试文件(小文件) ───────────────────────────────────
@@ -178,7 +189,8 @@ step "9. stat(s3 + 本地 + s3:/// 默认桶)"
 STAT_OUT=$($SAIL stat "s3://$BUCKET/$PREFIX/small.txt" 2>&1)
 echo "$STAT_OUT" | grep -q "^key: s3://$BUCKET/$PREFIX/small.txt" && ok "stat s3 key 正确" || err "stat s3 key 错误"
 echo "$STAT_OUT" | grep -q "^etag:" && ok "  含 etag" || err "  缺 etag"
-$SAIL stat "s3:///$PREFIX/small.txt" 2>&1 | grep -q "^key: s3://$BUCKET/$PREFIX/small.txt" && ok "stat s3:/// 默认桶填充正确" || err "stat s3:/// 默认桶错误"
+STATS3=$($SAIL stat "s3:///$PREFIX/small.txt" 2>&1)
+echo "$STATS3" | grep -q "^key: s3://$BUCKET/$PREFIX/small.txt" && ok "stat s3:/// 默认桶填充正确" || err "stat s3:/// 默认桶错误: $(echo "$STATS3" | head -2)"
 STAT_LOC=$($SAIL stat "$TEST_DIR/small.txt" 2>&1) || true
 if echo "$STAT_LOC" | grep -q "^name: small.txt"; then ok "stat 本地文件正确"; else err "stat 本地文件错误 (exists=$([[ -f "$TEST_DIR/small.txt" ]] && echo y || echo n)): $STAT_LOC"; fi
 $SAIL stat "$TEST_DIR" 2>&1 | grep -q "^is-dir: true" && ok "stat 本地目录 is-dir 正确" || err "stat 本地目录错误"
@@ -266,12 +278,96 @@ $SAIL rm -r "s3://$BUCKET/$PREFIX/dir4/" >/dev/null 2>&1 && ok "rm -r 删除 dir
 [[ -z "$($SAIL ls "s3://$BUCKET/$PREFIX/dir4/" 2>/dev/null)" ]] && ok "  rm -r 后已清空" || err "  rm -r 后有残留"
 
 # ════════════════════════════════════════════════════════
-step "13. 错误处理"
+step "13. mkdir / rmdir / find / du / ls 排序"
+N="$PREFIX/new"
+$SAIL mkdir "s3://$BUCKET/$N/sub/" >/dev/null 2>&1 && ok "mkdir 创建占位对象" || err "mkdir 失败"
+s3exists "s3://$BUCKET/$N/sub/" && ok "  mkdir 后占位对象存在" || err "  占位对象未创建"
+$SAIL cp "$TEST_DIR/small.txt" "s3://$BUCKET/$N/a.txt" >/dev/null 2>&1
+$SAIL rmdir "s3://$BUCKET/$N/" >/dev/null 2>&1 && err "rmdir 非空目录应拒绝" || ok "rmdir 非空目录正确拒绝"
+$SAIL rmdir "s3://$BUCKET/$N/sub/" >/dev/null 2>&1 && ok "rmdir 空目录删除" || err "rmdir 空目录失败"
+$SAIL find "s3://$BUCKET/$N" --name 'a.txt' 2>/dev/null | grep -q "a.txt" && ok "find --name 命中" || err "find --name 未命中"
+$SAIL find "s3://$BUCKET/$N" --size '+0' 2>/dev/null | grep -q "a.txt" && ok "find --size +0 命中" || err "find --size 未命中"
+sz=$(s3size "s3://$BUCKET/$N/a.txt")
+$SAIL du --human "s3://$BUCKET/$N" 2>/dev/null | grep -q "$sz" && ok "du 统计命中" || err "du 统计异常"
+$SAIL ls -l -t "s3://$BUCKET/$N/" 2>/dev/null | head -1 | grep -q "a.txt" && ok "ls -t 排序输出" || err "ls -t 无输出"
+$SAIL ls --buckets 2>/dev/null | grep -q "$BUCKET" && ok "ls --buckets 列出桶" || err "ls --buckets 未列出桶"
+
+# ════════════════════════════════════════════════════════
+step "14. head / tail / wc / grep / checksum"
+T="s3://$BUCKET/$N/t.txt"
+$SAIL cp "$TEST_DIR/small.txt" "$T" >/dev/null 2>&1
+$SAIL head -n 1 "$T" 2>/dev/null | grep -q "hello sail" && ok "head 输出命中" || err "head 无输出"
+$SAIL tail -n 1 "$T" 2>/dev/null | grep -q "hello sail" && ok "tail 输出命中" || err "tail 无输出"
+$SAIL wc -l "$T" 2>/dev/null | grep -q "1 " && ok "wc -l 计数" || err "wc -l 异常"
+$SAIL grep -n "e2e" "$T" 2>/dev/null | grep -q "1:" && ok "grep 行号命中" || err "grep 未命中"
+CHK=$($SAIL checksum "$T" 2>/dev/null | awk '{print $1}')
+[[ ${#CHK} -eq 32 ]] && ok "checksum 输出 md5(32 位)" || err "checksum 输出异常"
+$SAIL checksum --compare "$TEST_DIR/small.txt" "$T" 2>/dev/null | grep -q ": OK" && ok "checksum --compare 相同" || err "checksum --compare 异常"
+
+# ════════════════════════════════════════════════════════
+step "15. 通配符(cp/rm 's3://b/a*.txt')"
+$SAIL cp "$TEST_DIR/test.csv" "s3://$BUCKET/$N/pick-a.txt" >/dev/null 2>&1
+$SAIL cp "$TEST_DIR/test.csv" "s3://$BUCKET/$N/pick-b.txt" >/dev/null 2>&1
+$SAIL cp "$TEST_DIR/test.json" "s3://$BUCKET/$N/pick-c.json" >/dev/null 2>&1
+$SAIL cp "s3://$BUCKET/$N/pick-*.txt" "s3://$BUCKET/$N/copied/" >/dev/null 2>&1 && ok "cp 通配符复制" || err "cp 通配符失败"
+[[ "$($SAIL ls "s3://$BUCKET/$N/copied/" 2>/dev/null | grep -c 'copied/')" -eq 2 ]] \
+    && ok "  通配符只复制命中的 2 个" || err "  通配符复制定数失败(.json 不应命中)"
+$SAIL rm "s3://$BUCKET/$N/copied/*.txt" >/dev/null 2>&1 && ok "rm 通配符删除" || err "rm 通配符删除失败"
+[[ -z "$($SAIL ls "s3://$BUCKET/$N/copied/" 2>/dev/null)" ]] && ok "  通配符删除后清空" || err "  通配符删除有残留"
+$SAIL rm -r "s3://$BUCKET/$N/copied/" "s3://$BUCKET/$N/pick-*.txt" "s3://$BUCKET/$N/pick-c.json" >/dev/null 2>&1
+
+# ════════════════════════════════════════════════════════
+step "16. sync(本地→s3 幂等 + --delete + --checksum/--include)"
+local_dir="$WORK_DIR/sync-src"; mkdir -p "$local_dir"
+echo "sync data" > "$local_dir/sync.txt"
+$SAIL sync "$local_dir" "s3://$BUCKET/$N/sync/" >/dev/null 2>&1 && ok "sync 首次全量" || err "sync 首次失败"
+$SAIL sync "$local_dir" "s3://$BUCKET/$N/sync/" 2>/dev/null | grep -q "跳过 1" && ok "sync 二次幂等跳过" || err "sync 未幂等"
+echo "sync data2" > "$local_dir/sync2.txt"
+$SAIL sync "$local_dir" "s3://$BUCKET/$N/sync/" 2>/dev/null | grep -q "传输 1" && ok "sync 增量只传新文件" || err "sync 增量异常"
+rm "$local_dir/sync2.txt"
+$SAIL sync --delete "$local_dir" "s3://$BUCKET/$N/sync/" 2>/dev/null | grep -q "删除 1" && ok "sync --delete 删除多余" || err "sync --delete 未删除"
+# --checksum:内容变化后触发传输,二次幂等
+echo "sync data changed" > "$local_dir/sync.txt"
+$SAIL sync --checksum "$local_dir" "s3://$BUCKET/$N/sync/" 2>/dev/null | grep -q "传输 1" && ok "sync --checksum 内容变化触发" || err "sync --checksum 未触发"
+$SAIL sync --checksum "$local_dir" "s3://$BUCKET/$N/sync/" 2>/dev/null | grep -q "跳过 1" && ok "sync --checksum 幂等跳过" || err "sync --checksum 未幂等"
+# --include:白名单外不传输
+echo "ignore me" > "$local_dir/skip.json"
+$SAIL sync --include '*.txt' "$local_dir" "s3://$BUCKET/$N/sync/" >/dev/null 2>&1
+$SAIL stat "s3://$BUCKET/$N/sync/skip.json" >/dev/null 2>&1 && err "sync --include 不应上传白名单外文件" || ok "sync --include 白名单生效"
+rm "$local_dir/skip.json"
+# --update:目标较新时跳过(本地 mtime 改旧)
+touch -t 202001010000 "$local_dir/sync.txt"
+$SAIL sync --update "$local_dir" "s3://$BUCKET/$N/sync/" 2>/dev/null | grep -q "跳过 1" && ok "sync --update 目标较新跳过" || err "sync --update 未跳过"
+$SAIL rm -r "s3://$BUCKET/$N/sync/" >/dev/null 2>&1
+
+# ════════════════════════════════════════════════════════
+step "17. mb / rb(无建桶权限时跳过)"
+TMPBUCKET="sail-e2e-mb-$((RANDOM + 20000))"
+if $SAIL mb "s3://$TMPBUCKET" >/dev/null 2>&1; then
+    ok "mb 创建桶"
+    $SAIL cp "$TEST_DIR/small.txt" "s3://$TMPBUCKET/x.txt" >/dev/null 2>&1
+    $SAIL rb "s3://$TMPBUCKET" >/dev/null 2>&1 && err "rb 非空桶应拒绝" || ok "rb 非空桶正确拒绝"
+    $SAIL rm -r "s3://$TMPBUCKET/" >/dev/null 2>&1 || true
+    # 桶为空与删除均存在最终一致性延迟:每轮先清空再删桶,直到成功
+    rb_ok=""
+    for ((i=0; i<8; i++)); do
+        $SAIL rm -r "s3://$TMPBUCKET/" >/dev/null 2>&1 || true
+        if $SAIL rb "s3://$TMPBUCKET" >/dev/null 2>&1; then rb_ok=1; break; fi
+        sleep 2
+    done
+    [[ -n "$rb_ok" ]] && ok "rb 删除空桶" || err "rb 删除空桶失败"
+else
+    skip "mb 无建桶权限(环境未授权 CreateBucket)"
+fi
+
+# ════════════════════════════════════════════════════════
+step "18. 错误处理"
 $SAIL stat "s3://$BUCKET/$PREFIX/__nope__" >/dev/null 2>&1 && err "stat 不应找到不存在对象" || ok "stat 不存在对象正确报错"
 $SAIL cp "$TEST_DIR/small.txt" "$WORK_DIR/should-fail.txt" >/dev/null 2>&1 && err "cp 本地→本地不应成功" || ok "cp 本地→本地正确拒绝"
 $SAIL mv -r "s3://$BUCKET/$PREFIX/dir/" "s3://$BUCKET/$PREFIX/dir5/" </dev/null >/dev/null 2>&1 && err "mv -r 非 TTY 无 --yes 不应成功" || ok "mv -r 非 TTY 无 --yes 正确拒绝"
+$SAIL cp "s3://$BUCKET/$PREFIX/nope-*.missing" "/tmp/" >/dev/null 2>&1 && err "cp 通配符无匹配应报错" || ok "cp 通配符无匹配正确报错"
 # ════════════════════════════════════════════════════════
-step "14. config: 多 profile 指定(-p)与 setup 增改/重置(无需 S3)"
+step "19. config: 多 profile 指定(-p)与 setup 增改/重置(无需 S3)"
 
 # ── 多 profile:无 -p(默认)与 -p 指定 ──
 cat > "$WORK_DIR/multi-cfg.yaml" <<EOF
