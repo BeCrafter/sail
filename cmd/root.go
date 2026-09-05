@@ -18,9 +18,14 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:          "sail",
-	Short:        "S3 对象存储 CLI",
-	Long:         "sail 是 S3 协议对象存储的命令行工具,支持复制/移动/列举/删除/查看/预签名,单二进制零运行时依赖。",
+	Use:   "sail",
+	Short: "S3 对象存储 CLI",
+	Long: `sail 是 S3 协议对象存储的命令行工具,以 Linux/macOS 文件命令为基准,
+支持对象传输(cp/mv/rm/sync/mb/rb)、检索统计(ls/tree/find/du/stat)、
+内容查看(view/head/tail/wc/grep)、校验与访问(checksum/presign/url)。
+单二进制零运行时依赖,兼容 AWS S3 / MinIO / 阿里云 OSS 及自建 S3 兼容服务。
+
+所有命令统一用 --help 查看详细说明与示例。`,
 	Version:      version.Version,
 	SilenceUsage: true,
 	CompletionOptions: cobra.CompletionOptions{
@@ -42,7 +47,7 @@ func init() {
 
 	// 关闭字母序排序,按注册顺序展示(对象操作 → 列举查看 → 访问地址 → 配置)
 	cobra.EnableCommandSorting = false
-	rootCmd.AddCommand(cpCmd, mvCmd, rmCmd, lsCmd, treeCmd, statCmd, viewCmd, presignCmd, urlCmd, configCmd)
+	rootCmd.AddCommand(cpCmd, mvCmd, rmCmd, mkdirCmd, rmdirCmd, mbCmd, rbCmd, syncCmd, lsCmd, treeCmd, findCmd, duCmd, statCmd, viewCmd, headCmd, tailCmd, wcCmd, grepCmd, checksumCmd, presignCmd, urlCmd, configCmd)
 }
 
 // Execute 运行根命令

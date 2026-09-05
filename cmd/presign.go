@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/BeCrafter/sail/internal/client"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spf13/cobra"
-	"github.com/BeCrafter/sail/internal/client"
 )
 
 var presignExpires int
@@ -15,7 +15,13 @@ var presignExpires int
 var presignCmd = &cobra.Command{
 	Use:   "presign s3://bucket/key",
 	Short: "生成预签名下载 URL",
-	Args:  cobra.ExactArgs(1),
+	Long: `生成预签名下载 URL(GET,默认有效 1 小时),无需凭证即可在有效期内访问。
+注意:部分自建 S3 兼容服务不支持 query string 认证(返回 "Authorization empty"),
+此时请改用 CDN 域名访问公开对象:sail url s3://bucket/key。
+
+示例:
+  sail presign s3://bucket/data.bin --expires 3600`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		r, _, err := loadResolved()
 		if err != nil {

@@ -16,6 +16,16 @@ import (
 var configCmd = &cobra.Command{
 	Use:   "config",
 	Short: "配置管理",
+	Long: `配置管理。子命令:
+  setup   交互式生成/更新配置文件(默认 ~/.sail/config.yaml,可用 -c 指定路径;
+          --reset 重置为全新配置;已有文件时新增或重配一个 profile,保留其它)
+setup 向导要点:
+  - endpoint 必填,留空原地重问
+  - access-key / secret-key 直接输入明文;回车留空则引用按 profile 派生的环境变量
+    (如 profile test → SAIL_TEST_ACCESS_KEY),写盘后打印需要 export 的变量名
+  - 重配已有 profile 时,已配置的明文密钥不回显,回车即保留
+  - 结尾输出配置摘要,空字段明确标注,便于核对缺失项
+详见 README「配置」章节。`,
 }
 
 var configSetupCmd = &cobra.Command{

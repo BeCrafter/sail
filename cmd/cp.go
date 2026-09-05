@@ -8,13 +8,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/spf13/cobra"
 	"github.com/BeCrafter/sail/internal/client"
 	"github.com/BeCrafter/sail/internal/config"
 	"github.com/BeCrafter/sail/internal/s3path"
 	"github.com/BeCrafter/sail/internal/uploader"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/spf13/cobra"
 )
 
 var (
@@ -28,6 +28,11 @@ var cpCmd = &cobra.Command{
 	Short:   "复制对象/文件(本地↔s3, s3↔s3)",
 	Long: `复制对象/文件,支持本地↔s3 与 s3↔s3(s3↔s3 优先走服务端 CopyObject,失败回退 download→re-upload)。
 upload/download 为 cp 的别名。
+
+s3 源路径支持通配符(* 匹配任意字符含 /,? 匹配单字符),自动展开为多个对象,
+目标视为目录/前缀,源相对层级保留(无需 -r):
+  sail cp 's3://bucket/logs/*.log' s3://bucket/archive/
+  sail cp 's3://bucket/*.json' ./download-dir/
 
 示例:
   sail cp ./local.txt s3://bucket/path/copied.txt
@@ -73,19 +78,32 @@ upload/download 为 cp 的别名。
 
 		ctx := context.Background()
 		var s3c *s3.Client
-		var r *config.Resolved
-		if !cpDryRun {
-			var err error
-			r, _, err = loadResolved()
-			if err != nil {
-				return err
+		r, _, err := loadResolved()
+		if err != nil {
+			return err
+		}
+		// 通配符来源需要列举,即使 dry-run 也要建客户端
+		srcWildcard := false
+		if srcIsS3 {
+			if sp, perr := parseS3(srcArg, r); perr == nil {
+				srcWildcard = hasWildcard(sp.Key)
 			}
+		}
+		if srcWildcard || !cpDryRun {
 			s3c, err = client.New(ctx, r)
 			if err != nil {
 				return err
 			}
-		} else {
-			r, _, _ = loadResolved() // dry-run:尽力读配置,仅为预演里显示 bucket 名
+		}
+
+		if srcWildcard {
+			if !hasDst && srcIsS3 {
+				dstArg = "."
+			}
+			if dstArg == "" {
+				return fmt.Errorf("通配符复制必须指定目标目录或 s3:// 前缀")
+			}
+			return cpWildcards(ctx, s3c, r, srcArg, dstArg, cpDryRun)
 		}
 
 		switch {
@@ -379,6 +397,59 @@ func copyOneS3(ctx context.Context, s3c *s3.Client, u *uploader.Uploader, srcBuc
 		return fmt.Errorf("复制 s3://%s/%s -> s3://%s/%s 失败(回退 re-upload): %w", srcBucket, srcKey, dstBucket, dstKey, uErr)
 	}
 	fmt.Printf("复制 s3://%s/%s -> s3://%s/%s (回退 download→upload)\n", srcBucket, srcKey, dstBucket, dstKey)
+	return nil
+}
+
+// cpWildcards 通配符来源复制:s3 -> s3 逐对象服务端复制,下载逐对象落盘。
+// 对象相对静态前缀的层级关系被保留(与 cp -r 语义一致)。
+func cpWildcards(ctx context.Context, s3c *s3.Client, r *config.Resolved, srcArg, dstArg string, dryRun bool) error {
+	objs, staticBase, bucket, err := expandWildcards(ctx, s3c, r, srcArg)
+	if err != nil {
+		return err
+	}
+	dstIsS3 := strings.HasPrefix(dstArg, "s3://")
+	dstBucket, dstBase, dstLocal := "", "", ""
+	if dstIsS3 {
+		dp, err := parseS3(dstArg, r)
+		if err != nil {
+			return err
+		}
+		dstBucket, dstBase = dp.Bucket, strings.TrimSuffix(dp.Key, "/")
+	} else {
+		dstLocal = dstArg
+	}
+	count := 0
+	u := uploader.New(s3c)
+	for _, obj := range objs {
+		rel := relKeyOf(*obj.Key, staticBase)
+		if dstIsS3 {
+			dstKey := s3path.JoinKey(dstBase, rel)
+			if dryRun {
+				fmt.Printf("将复制 s3://%s/%s -> s3://%s/%s\n", bucket, *obj.Key, dstBucket, dstKey)
+				count++
+				continue
+			}
+			srcSize := int64(-1)
+			if obj.Size != nil {
+				srcSize = *obj.Size
+			}
+			if err := copyOneS3(ctx, s3c, u, bucket, *obj.Key, srcSize, dstBucket, dstKey); err != nil {
+				return err
+			}
+		} else {
+			localPath := filepath.Join(dstLocal, filepath.FromSlash(rel))
+			if dryRun {
+				fmt.Printf("将复制 s3://%s/%s -> %s\n", bucket, *obj.Key, localPath)
+				count++
+				continue
+			}
+			if err := downloadOne(ctx, s3c, bucket, *obj.Key, localPath); err != nil {
+				return err
+			}
+		}
+		count++
+	}
+	fmt.Printf("共复制 %d 个对象\n", count)
 	return nil
 }
 

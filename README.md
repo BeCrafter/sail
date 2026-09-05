@@ -10,10 +10,13 @@
 ## 特性
 
 - **标准 S3 协议**:path-style + SigV4 签名,兼容 AWS S3 / MinIO / 阿里云 OSS 及各类自建 S3 兼容服务
-- **丰富的传输**:单文件、目录递归、管道流式上传,大文件自动分片
-- **对象管理**:下载、列举(长格式/目录视图/树形)、删除、复制/移动(本地↔s3、s3↔s3 服务端复制零带宽)
-- **内容查看**:多格式智能渲染——文本/JSON/YAML/CSV/XML/图片终端字符画/二进制
-- **访问地址**:预签名 URL、基于 CDN 域名的公开访问地址
+- **丰富的传输**:单文件、目录递归、管道流式上传,大文件自动分片(5MB/16 并发)
+- **批量操作**:URL 通配符(`cp/rm 's3://b/*.log'` 展开)、批量删除(DeleteObjects 每批 1000)、管道逐行删除(`ls | rm -r -`)
+- **对象与桶管理**:下载、列举(长格式/目录视图/树形/排序/列桶)、目录占位对象(mkdir/rmdir)、桶管理(mb/rb)、删除(批量/管道)、复制/移动(本地↔s3、s3↔s3 服务端复制零带宽)
+- **增量同步**:rsync 式 `sync`(大小+时间比对,`--checksum` 内容校验、`--update`、`--exclude/--include` 过滤、`--delete`、`--dry-run`),本地↔s3↔s3
+- **检索统计**:`find`(名称/大小/时间过滤)、`du`(按前缀层级统计占用)
+- **内容查看**:多格式智能渲染——文本/JSON/YAML/CSV/XML/图片终端字符画/二进制;`head`/`tail`/`wc`/`grep` 流式读写不落盘
+- **校验与鉴权**:`checksum`(md5/sha256 计算与比对)、`presign` 预签名 URL、基于 CDN 域名的公开访问地址
 - **多 profile 配置**:prod / test / staging 等多环境切换,密钥可引用环境变量避免明文
 - **跨平台**:macOS / Linux,单二进制下载即用;支持 shell 自动补全(zsh / bash / fish)
 
@@ -155,7 +158,14 @@ sail cp local.txt s3://mybucket/path/local.txt
 sail cp local.txt s3:///path/local.txt           # s3:/// 用配置默认 bucket
 sail upload local.txt                            # 1 参:上传到默认 bucket,key 用文件名
 sail cp -r ./dir s3://mybucket/prefix/           # 递归镜像目录
+sail cp 's3://mybucket/logs/*.log' s3://mybucket/archive/   # 通配符批复制(* 跨 /,保留层级)
+sail cp 's3://mybucket/*.json' ./download-dir/   # 通配符批量下载
 cat file | sail upload - s3://mybucket/key       # 管道输入
+
+# 桶管理(mb/rb 与 ls --buckets)
+sail mb s3://my-new-bucket
+sail rb s3://my-old-bucket                       # 仅删空桶;非空先 sail rm -r s3://my-old-bucket/
+sail ls --buckets                                # 列出所有桶
 
 # 下载(s3→本地);download 为 cp 的别名
 sail cp s3://mybucket/key local.txt
@@ -164,7 +174,16 @@ sail download s3://mybucket/key                  # 1 参:下载到当前目录
 # 列举
 sail ls s3://mybucket/prefix/
 sail ls -l s3://mybucket/                        # 长格式:大小+修改时间
+sail ls -l -t s3://mybucket/                     # 按修改时间排序(新→旧),--human 人类可读大小
+sail ls -l -S -r s3://mybucket/                  # 按大小排序(大→小)再逆序
 sail ls -d s3://mybucket/prefix/                 # 只列该层子目录(不含文件),对齐 ls -d
+
+# 查找与统计
+sail find s3://mybucket/logs --name '*.log' -l   # 按文件名通配(可重复多个)
+sail find s3://mybucket --size +1M --newer 2026-01-01   # 大小/时间过滤
+sail du -h s3://mybucket/prefix/                 # 按前缀层级统计占用
+sail du -h --max-depth 1 s3://mybucket           # 只显示 1 层 + 总计
+sail du -s s3://mybucket/prefix/                 # 只打印总计
 
 # 树形查看(S3 前缀或本地目录)
 sail tree s3://mybucket/prefix/                  # 完整树
@@ -173,9 +192,21 @@ sail tree -d s3://mybucket/prefix/               # 只显目录
 sail tree -s --human s3://mybucket/prefix/      # 文件附人类可读大小
 sail tree ./cmd                                  # 本地目录树
 
-# 删除
+# 删除与目录占位对象
 sail rm s3://mybucket/key
-sail rm -r s3://mybucket/prefix/
+sail rm -r s3://mybucket/prefix/                 # 递归删除(批量 DeleteObjects,每批 1000)
+sail rm key1 key2 key3                          # 多参数批量
+sail rm 's3://mybucket/logs/*.tmp'              # 通配符匹配删除
+sail ls s3://mybucket/prefix/ | sail rm -r -    # 管道逐行读取 key(xargs 式)
+sail mkdir s3://mybucket/new/dir/               # 目录占位对象(天然 -p 语义)
+sail rmdir s3://mybucket/new/dir/               # 只删空目录;非空请用 rm -r
+
+# 增量同步(rsync 式:大小+修改时间比对,幂等;--help 查看全部选项)
+sail sync ./dir s3://mybucket/mirror/
+sail sync --exclude '*.tmp' --delete ./dir s3://mybucket/mirror/
+sail sync --include '*.json' s3://mybucket/mirror/ ./dir2 --dry-run   # 白名单 + 预演
+sail sync --checksum ./dir s3://mybucket/mirror/  # 大小相同时按内容 md5 校验
+sail sync --update ./dir s3://mybucket/mirror/    # 只传输比目标新的条目
 
 # 预签名 URL(部分服务不支持,见下方"限制")
 sail presign s3://mybucket/key --expires 3600
@@ -194,6 +225,18 @@ sail view s3://mybucket/data.json --raw         # 原样输出,适合管道:sail
 sail cat s3://mybucket/data.json                 # cat 是 view --raw 的别名
 sail view s3://mybucket/big.json --force        # 跳过大小限制
 sail view s3://mybucket/photo.png --width 60    # 指定字符画列宽
+
+# 流式读取内容(s3 路径走 Range 只取需要的部分,不下载全量)
+sail head -n 20 s3://mybucket/logs/app.log      # 开头 N 行
+sail head --bytes 4096 s3://mybucket/data.bin   # 开头 N 字节
+sail tail -n 50 s3://mybucket/logs/app.log      # 结尾 N 行(Range 尾部窗口)
+sail wc -l s3://mybucket/logs/app.log           # 行数(默认三列:行 词 字节)
+sail grep -n "ERROR" s3://mybucket/logs/app.log # 正则逐行搜索(支持 -i/-v/-l/-n)
+
+# 校验和(md5/sha256 流式计算与比对,本地文件免配置)
+sail checksum s3://mybucket/data.bin            # 默认 md5
+sail checksum --algo sha256 --compare ./local.bin s3://mybucket/data.bin
+sail checksum --etag s3://mybucket/data.bin     # 展示原始 ETag(注意:分片对象 ETag≠内容 md5)
 
 # 复制对象/文件(本地↔s3、s3↔s3 走服务端 CopyObject 零带宽)
 sail cp ./local.txt s3://mybucket/path/copied.txt

@@ -7,10 +7,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/spf13/cobra"
 	"github.com/BeCrafter/sail/internal/client"
 	"github.com/BeCrafter/sail/internal/view"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/spf13/cobra"
 )
 
 var (

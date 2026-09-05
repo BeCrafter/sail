@@ -27,7 +27,7 @@ type Uploader struct {
 func New(s3c *s3.Client) *Uploader {
 	u := manager.NewUploader(s3c, func(o *manager.Uploader) {
 		o.PartSize = partSize
-		o.Concurrency = 5
+		o.Concurrency = 16
 		// manager.NewUploader 默认设为 WhenSupported,会对每个分片
 		// 使用 aws-chunked + CRC32 trailing checksum。部分 S3 兼容服务端不
 		// 解码 aws-chunked,导致存储的数据被 trailer 污染。设为
