@@ -11,6 +11,8 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/BeCrafter/sail/internal/i18n"
+
 	_ "golang.org/x/image/bmp"
 	"golang.org/x/image/draw"
 	_ "golang.org/x/image/webp"
@@ -30,7 +32,7 @@ func renderImage(s *Source, opts *Options) error {
 	}
 	img, format, err := image.Decode(bytes.NewReader(b))
 	if err != nil {
-		return fmt.Errorf("解码图片失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to decode image: %w"), err)
 	}
 	bounds := img.Bounds()
 	srcW, srcH := bounds.Dx(), bounds.Dy()
@@ -67,7 +69,7 @@ func renderImage(s *Source, opts *Options) error {
 	if ct == "" {
 		ct = "image/" + format
 	}
-	sizeStr := "未知"
+	sizeStr := i18n.T("unknown")
 	if s.Size >= 0 {
 		sizeStr = humanBytes(s.Size)
 	}

@@ -2,10 +2,12 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/BeCrafter/sail/internal/client"
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spf13/cobra"
@@ -13,11 +15,11 @@ import (
 
 var rmdirCmd = &cobra.Command{
 	Use:   "rmdir <s3://bucket/prefix/>...",
-	Short: "删除空目录占位对象",
-	Long: `删除空目录占位对象(不做递归删除)。目录下有其他对象时报错,请改用 sail rm -r。
-目录不存在占位对象时视为已删除(幂等)。
+	Short: "Delete empty directory placeholder objects",
+	Long: `Delete empty directory placeholder objects (no recursive deletion). Errors if the directory contains other objects; use sail rm -r instead.
+A directory with no placeholder object is treated as already deleted (idempotent).
 
-示例:
+Examples:
   sail rmdir s3://bucket/videos/2026/`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -37,12 +39,12 @@ var rmdirCmd = &cobra.Command{
 			}
 			dirKey := strings.TrimSuffix(p.Key, "/") + "/"
 			if dirKey == "/" {
-				return fmt.Errorf("缺少目录名,需指定 s3://bucket/prefix/")
+				return errors.New(i18n.T("missing directory name; specify s3://bucket/prefix/"))
 			}
 			if err := rmdirOne(ctx, s3c, p.Bucket, dirKey); err != nil {
 				return err
 			}
-			fmt.Printf("已删除 s3://%s/%s\n", p.Bucket, dirKey)
+			fmt.Printf(i18n.T("deleted s3://%s/%s\n"), p.Bucket, dirKey)
 		}
 		return nil
 	},
@@ -61,28 +63,28 @@ func rmdirOne(ctx context.Context, s3c *s3.Client, bucket, dirKey string) error 
 		MaxKeys: aws.Int32(2),
 	})
 	if err != nil {
-		return fmt.Errorf("列举失败: %w", err)
+		return fmt.Errorf(i18n.T("list failed: %w"), err)
 	}
 	if len(resp.Contents) == 0 {
 		return nil // 无占位对象也无子对象:幂等成功
 	}
 	first := resp.Contents[0]
 	if *first.Key != dirKey {
-		return fmt.Errorf("目录非空: s3://%s/%s (用 sail rm -r 递归删除)", bucket, strings.TrimSuffix(dirKey, "/"))
+		return fmt.Errorf(i18n.T("directory not empty: s3://%s/%s (remove recursively with sail rm -r)"), bucket, strings.TrimSuffix(dirKey, "/"))
 	}
 	if len(resp.Contents) > 1 {
-		return fmt.Errorf("目录非空: s3://%s/%s (用 sail rm -r 递归删除)", bucket, strings.TrimSuffix(dirKey, "/"))
+		return fmt.Errorf(i18n.T("directory not empty: s3://%s/%s (remove recursively with sail rm -r)"), bucket, strings.TrimSuffix(dirKey, "/"))
 	}
 	// 占位对象可能是 0 字节标记,也可能有人往该 key 写了真实内容(上传到 key "a/" 本身)。
 	if first.Size != nil && *first.Size != 0 {
-		return fmt.Errorf("占位对象非空(%d 字节),请用 sail rm 删除该对象: s3://%s/%s", *first.Size, bucket, dirKey)
+		return fmt.Errorf(i18n.T("placeholder object is not empty (%d bytes); delete it with sail rm: s3://%s/%s"), *first.Size, bucket, dirKey)
 	}
 	_, err = s3c.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: &bucket,
 		Key:    &dirKey,
 	})
 	if err != nil {
-		return fmt.Errorf("删除失败: %w", err)
+		return fmt.Errorf(i18n.T("delete failed: %w"), err)
 	}
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/spf13/cobra"
 )
 
@@ -17,11 +18,11 @@ var (
 
 var wcCmd = &cobra.Command{
 	Use:   "wc <src>...",
-	Short: "统计行数/单词数/字节数",
-	Long: `流式统计对象/文件的行、词、字节数。
-未给选项时输出三列(行 词 字节,GNU wc 顺序);给选项则只输出所选列。
+	Short: "Count lines, words, and bytes",
+	Long: `Stream-count lines, words, and bytes of an object/file.
+With no options, print three columns (lines words bytes, GNU wc order); with options, print only the selected columns.
 
-示例:
+Examples:
   sail wc -l s3://bucket/logs/app.log
   sail wc s3://bucket/a.json ./b.txt`,
 	Args: cobra.MinimumNArgs(1),
@@ -79,7 +80,7 @@ func wcOne(ctx context.Context, arg string) (lines, words, bytes int64, err erro
 			if rerr == io.EOF {
 				break
 			}
-			return 0, 0, 0, fmt.Errorf("读取失败: %w", rerr)
+			return 0, 0, 0, fmt.Errorf(i18n.T("read failed: %w"), rerr)
 		}
 	}
 	return lines, words, bytes, nil
@@ -109,7 +110,7 @@ func printWCLine(showL, showW, showC bool, name string, l, w, c int64) {
 }
 
 func init() {
-	wcCmd.Flags().BoolVarP(&wcLines, "lines", "l", false, "统计行数")
-	wcCmd.Flags().BoolVarP(&wcWords, "words", "w", false, "统计单词数")
-	wcCmd.Flags().BoolVar(&wcBytes, "bytes", false, "统计字节数")
+	wcCmd.Flags().BoolVarP(&wcLines, "lines", "l", false, "count lines")
+	wcCmd.Flags().BoolVarP(&wcWords, "words", "w", false, "count words")
+	wcCmd.Flags().BoolVar(&wcBytes, "bytes", false, "count bytes")
 }

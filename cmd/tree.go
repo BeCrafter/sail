@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/BeCrafter/sail/internal/client"
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spf13/cobra"
 )
@@ -34,17 +36,17 @@ type tnode struct {
 }
 
 var treeCmd = &cobra.Command{
-	Use:   "tree [s3://bucket/prefix/ | 本地路径]",
-	Short: "树形查看对象/文件树",
-	Long: `树形查看 S3 对象或本地文件树。
+	Use:   "tree [s3://bucket/prefix/ | LOCAL_PATH]",
+	Short: "Show object/file tree",
+	Long: `Show a tree of S3 objects or a local file tree.
 
 Flags:
-  -L N            最大深度(0=不限)
-  -d              只显目录(不含文件叶子)
-  -s              显文件大小(字节数)
-      --human     人类可读大小(隐含 -s)
+  -L N            maximum depth (0 = unlimited)
+  -d              show directories only (no file leaves)
+  -s              show file size (in bytes)
+      --human     human-readable sizes (implies -s)
 
-示例:
+Examples:
   sail tree s3://bucket/prefix/
   sail tree -L 2 s3://bucket/prefix/
   sail tree -d -s --human s3://bucket/prefix/
@@ -73,7 +75,7 @@ Flags:
 			var bucket, prefix string
 			if arg == "" {
 				if r.Bucket == "" {
-					return fmt.Errorf("未指定 bucket,请用 s3://bucket/prefix 或在配置中设置默认 bucket")
+					return errors.New(i18n.T("no bucket specified; use s3://bucket/prefix or set a default bucket in config"))
 				}
 				bucket = r.Bucket
 				rootLabel = "s3://" + bucket
@@ -96,10 +98,10 @@ Flags:
 		default: // 本地目录
 			info, err := os.Stat(arg)
 			if err != nil {
-				return fmt.Errorf("读取本地路径失败: %w", err)
+				return fmt.Errorf(i18n.T("failed to read local path: %w"), err)
 			}
 			if !info.IsDir() {
-				return fmt.Errorf("%s 不是目录", arg)
+				return fmt.Errorf(i18n.T("%s is not a directory"), arg)
 			}
 			entries, err = collectLocal(arg)
 			if err != nil {
@@ -123,7 +125,7 @@ func collectS3(ctx context.Context, s3c *s3.Client, bucket, prefix string) ([]te
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("列举失败: %w", err)
+			return nil, fmt.Errorf(i18n.T("list failed: %w"), err)
 		}
 		for _, obj := range page.Contents {
 			key := *obj.Key
@@ -254,8 +256,8 @@ func visibleKids(n *tnode) []*tnode {
 }
 
 func init() {
-	treeCmd.Flags().IntVarP(&treeDepth, "level", "L", 0, "最大深度(0=不限)")
-	treeCmd.Flags().BoolVarP(&treeDirsOnly, "dir", "d", false, "只显目录")
-	treeCmd.Flags().BoolVarP(&treeSize, "size", "s", false, "显文件大小(字节数)")
-	treeCmd.Flags().BoolVar(&treeHuman, "human", false, "人类可读大小(隐含 -s)")
+	treeCmd.Flags().IntVarP(&treeDepth, "level", "L", 0, "maximum depth (0 = unlimited)")
+	treeCmd.Flags().BoolVarP(&treeDirsOnly, "dir", "d", false, "show directories only")
+	treeCmd.Flags().BoolVarP(&treeSize, "size", "s", false, "show file size (in bytes)")
+	treeCmd.Flags().BoolVar(&treeHuman, "human", false, "human-readable sizes (implies -s)")
 }

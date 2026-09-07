@@ -1,8 +1,11 @@
 package s3path
 
 import (
+	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/BeCrafter/sail/internal/i18n"
 )
 
 // S3Path 表示一个 s3://bucket/key 路径
@@ -15,14 +18,14 @@ type S3Path struct {
 // 允许只有 s3://bucket (Key 为空,用于 ls 桶根)。
 func Parse(s string) (*S3Path, error) {
 	if s == "" {
-		return nil, fmt.Errorf("路径为空")
+		return nil, errors.New(i18n.T("empty path"))
 	}
 	if !strings.HasPrefix(s, "s3://") {
-		return nil, fmt.Errorf("路径 %q 必须以 s3:// 开头", s)
+		return nil, fmt.Errorf(i18n.T("path %q must start with s3://"), s)
 	}
 	rest := strings.TrimPrefix(s, "s3://")
 	if rest == "" {
-		return nil, fmt.Errorf("缺少 bucket")
+		return nil, errors.New(i18n.T("missing bucket"))
 	}
 	idx := strings.Index(rest, "/")
 	if idx < 0 {

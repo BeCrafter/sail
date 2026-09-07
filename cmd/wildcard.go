@@ -2,11 +2,13 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 
 	"github.com/BeCrafter/sail/internal/config"
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
@@ -57,7 +59,7 @@ func expandWildcards(ctx context.Context, s3c *s3.Client, r *config.Resolved, ar
 		return nil, "", "", err
 	}
 	if p.Key == "" {
-		return nil, "", "", fmt.Errorf("缺少 key,需指定 s3://bucket/prefix")
+		return nil, "", "", errors.New(i18n.T("missing key; specify s3://bucket/prefix"))
 	}
 	objs, err := collectAllObjects(ctx, s3c, p.Bucket, staticPrefix(p.Key))
 	if err != nil {
@@ -71,7 +73,7 @@ func expandWildcards(ctx context.Context, s3c *s3.Client, r *config.Resolved, ar
 		}
 	}
 	if len(matched) == 0 {
-		return nil, "", "", fmt.Errorf("无匹配对象: %s", arg)
+		return nil, "", "", fmt.Errorf(i18n.T("no matching objects: %s"), arg)
 	}
 	return matched, strings.TrimSuffix(staticPrefix(p.Key), "/"), p.Bucket, nil
 }

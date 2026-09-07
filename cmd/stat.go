@@ -9,19 +9,21 @@ import (
 	"strings"
 
 	"github.com/BeCrafter/sail/internal/client"
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
 	"github.com/spf13/cobra"
 )
 
 var statCmd = &cobra.Command{
-	Use:   "stat <s3://bucket/key | 本地路径>",
-	Short: "查看对象/文件元信息",
-	Long: `查看对象/文件的元信息:s3 路径走 HeadObject,本地路径走 os.Stat。
-输出 key、大小、content-type、最后修改时间、etag、存储类型、版本号与自定义 metadata。
-本地路径列出文件名、大小、权限位、修改时间与是否目录。
+	Use:   "stat <s3://bucket/key | LOCAL_PATH>",
+	Short: "Show object/file metadata",
+	Long: `Show metadata for an object or file: s3 paths use HeadObject, local paths use os.Stat.
+Outputs key, size, content-type, last-modified time, etag, storage class,
+version-id and custom metadata.
+For local paths, prints file name, size, mode bits, mod time and whether it is a directory.
 
-示例:
+Examples:
   sail stat s3://bucket/config.json
   sail stat ./local.log`,
 	Args: cobra.ExactArgs(1),
@@ -45,7 +47,7 @@ func statS3(ctx context.Context, arg string) error {
 		return err
 	}
 	if p.Key == "" {
-		return fmt.Errorf("缺少 key,需指定 s3://bucket/key")
+		return errors.New(i18n.T("missing key; use s3://bucket/key"))
 	}
 	s3c, err := client.New(ctx, r)
 	if err != nil {
@@ -58,14 +60,14 @@ func statS3(ctx context.Context, arg string) error {
 	if err != nil {
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) && (apiErr.ErrorCode() == "NotFound" || apiErr.ErrorCode() == "NoSuchKey") {
-			return fmt.Errorf("对象不存在: s3://%s/%s", p.Bucket, p.Key)
+			return fmt.Errorf(i18n.T("object not found: s3://%s/%s"), p.Bucket, p.Key)
 		}
-		return fmt.Errorf("查询失败: %w", err)
+		return fmt.Errorf(i18n.T("query failed: %w"), err)
 	}
 	// 部分服务 quirk:HEAD 可能返回 200 但元信息全空(对象其实不存在)
 	if resp.ContentLength == nil && resp.ETag == nil && resp.LastModified == nil {
-		fmt.Fprintf(os.Stderr, "警告: HeadObject 返回 200 但元信息为空,对象可能不存在: s3://%s/%s\n", p.Bucket, p.Key)
-		return fmt.Errorf("对象不存在: s3://%s/%s", p.Bucket, p.Key)
+		fmt.Fprintf(os.Stderr, i18n.T("warning: HeadObject returned 200 but metadata is empty; object may not exist: s3://%s/%s\n"), p.Bucket, p.Key)
+		return fmt.Errorf(i18n.T("object not found: s3://%s/%s"), p.Bucket, p.Key)
 	}
 	fmt.Printf("key: s3://%s/%s\n", p.Bucket, p.Key)
 	if resp.ContentLength != nil {
@@ -98,7 +100,7 @@ func statS3(ctx context.Context, arg string) error {
 func statLocal(arg string) error {
 	info, err := os.Stat(arg)
 	if err != nil {
-		return fmt.Errorf("读取本地文件失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to read local file: %w"), err)
 	}
 	fmt.Printf("name: %s\n", filepath.Base(arg))
 	fmt.Printf("size: %s (%d bytes)\n", humanBytes(info.Size()), info.Size())

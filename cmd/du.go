@@ -2,11 +2,13 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/BeCrafter/sail/internal/client"
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/spf13/cobra"
 )
 
@@ -18,11 +20,13 @@ var (
 
 var duCmd = &cobra.Command{
 	Use:   "du [s3://bucket/prefix]",
-	Short: "统计前缀下的对象占用大小",
-	Long: `按目录层级统计前缀下对象的大小总和(各层级为累计值,根为总计行)。
-0 个参数时统计默认桶;--max-depth 限制打印层级;-s 只打印总计。
+	Short: "Summarize object size under a prefix",
+	Long: `Sum the size of objects under a prefix, broken down by directory level
+(each level is cumulative; the root is the grand total).
+With no arguments, sums the default bucket; --max-depth limits the printed levels;
+-s prints only the total.
 
-示例:
+Examples:
   sail du -h s3://bucket/logs
   sail du -h --max-depth 1 s3://bucket`,
 	Args: cobra.MaximumNArgs(1),
@@ -34,7 +38,7 @@ var duCmd = &cobra.Command{
 		var bucket, prefix string
 		if len(args) == 0 {
 			if r.Bucket == "" {
-				return fmt.Errorf("未指定 bucket,请用 s3://bucket/prefix 或在配置中设置默认 bucket")
+				return errors.New(i18n.T("no bucket specified; use s3://bucket/prefix or set a default bucket in config"))
 			}
 			bucket = r.Bucket
 		} else {
@@ -45,7 +49,7 @@ var duCmd = &cobra.Command{
 			bucket, prefix = p.Bucket, p.Key
 		}
 		if duMaxDepth < 0 {
-			return fmt.Errorf("--max-depth 不能为负数")
+			return errors.New(i18n.T("--max-depth cannot be negative"))
 		}
 
 		ctx := context.Background()
@@ -125,7 +129,7 @@ func printDULine(size int64, display string) {
 }
 
 func init() {
-	duCmd.Flags().BoolVarP(&duSummarize, "summarize", "s", false, "只打印总计")
-	duCmd.Flags().BoolVar(&duHuman, "human", false, "人类可读大小")
-	duCmd.Flags().IntVar(&duMaxDepth, "max-depth", 0, "最大打印层级,0 表示不限")
+	duCmd.Flags().BoolVarP(&duSummarize, "summarize", "s", false, "print only the total")
+	duCmd.Flags().BoolVar(&duHuman, "human", false, "human-readable sizes")
+	duCmd.Flags().IntVar(&duMaxDepth, "max-depth", 0, "maximum print depth, 0 means unlimited")
 }

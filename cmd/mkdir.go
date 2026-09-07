@@ -3,10 +3,12 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/BeCrafter/sail/internal/client"
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spf13/cobra"
@@ -14,11 +16,11 @@ import (
 
 var mkdirCmd = &cobra.Command{
 	Use:   "mkdir <s3://bucket/prefix/>...",
-	Short: "创建目录占位对象",
-	Long: `创建目录占位对象(0 字节、key 以 / 结尾)。
-S3 没有真实目录,占位对象是约定俗成的目录标记;mkdir 天然幂等,重复执行只是覆盖占位对象。
+	Short: "Create directory placeholder objects",
+	Long: `Create directory placeholder objects (zero bytes, key ending in /).
+S3 has no real directories; placeholder objects are the conventional directory marker. mkdir is naturally idempotent — rerunning simply overwrites the placeholder.
 
-示例:
+Examples:
   sail mkdir s3://bucket/videos/2026/
   sail mkdir s3://bucket/a s3://bucket/b`,
 	Args: cobra.MinimumNArgs(1),
@@ -39,7 +41,7 @@ S3 没有真实目录,占位对象是约定俗成的目录标记;mkdir 天然幂
 			}
 			key := strings.TrimSuffix(p.Key, "/") + "/"
 			if key == "/" {
-				return fmt.Errorf("缺少目录名,需指定 s3://bucket/prefix/")
+				return errors.New(i18n.T("missing directory name; specify s3://bucket/prefix/"))
 			}
 			_, err = s3c.PutObject(ctx, &s3.PutObjectInput{
 				Bucket:        &p.Bucket,
@@ -49,9 +51,9 @@ S3 没有真实目录,占位对象是约定俗成的目录标记;mkdir 天然幂
 				ContentType:   aws.String("application/x-directory"),
 			})
 			if err != nil {
-				return fmt.Errorf("创建 s3://%s/%s 失败: %w", p.Bucket, key, err)
+				return fmt.Errorf(i18n.T("failed to create s3://%s/%s: %w"), p.Bucket, key, err)
 			}
-			fmt.Printf("已创建 s3://%s/%s\n", p.Bucket, key)
+			fmt.Printf(i18n.T("created s3://%s/%s\n"), p.Bucket, key)
 		}
 		return nil
 	},

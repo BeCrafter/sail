@@ -5,11 +5,14 @@ import (
 	"testing"
 
 	"github.com/BeCrafter/sail/internal/config"
+	"github.com/BeCrafter/sail/internal/i18n"
 )
 
 // TestSetupSummary 校验写盘后的配置摘要:
 // 留空密钥显示派生变量名与 export 指引;明文密钥不回显值(安全);空字段标注。
 func TestSetupSummary(t *testing.T) {
+	i18n.SetLang(i18n.Zh)
+	defer i18n.SetLang(i18n.En)
 	// 密钥留空:含变量名、(需先 export)、export 指引与未设置后果
 	out := setupSummary("prod", true, config.Profile{Endpoint: "https://s3.example.com", Bucket: "b1"})
 	for _, want := range []string{
@@ -132,7 +135,7 @@ func TestRenderConfigFileCDNBucketPath(t *testing.T) {
 	}
 
 	// nil(自动检测):注释行 + 说明
-	if out := render(nil); !strings.Contains(out, "# cdn-bucket-path: false") || !strings.Contains(out, "自动检测") {
+	if out := render(nil); !strings.Contains(out, "# cdn-bucket-path: false") || !strings.Contains(out, "auto-detect") {
 		t.Errorf("nil 应输出注释行(含说明):\n%s", out)
 	}
 
@@ -149,9 +152,32 @@ func TestRenderConfigFileCDNBucketPath(t *testing.T) {
 	}
 
 	// 说明注释应解释用途(避免用户不理解)
-	for _, want := range []string{"已含", "不再追加", "未含", "总是追加"} {
+	for _, want := range []string{"do not append", "always append"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("说明注释应包含 %q:\n%s", want, out)
 		}
+	}
+}
+
+// TestRenderConfigFileLang 校验 lang 字段按配置输出。
+func TestRenderConfigFileLang(t *testing.T) {
+	cfg := &config.Config{
+		DefaultProfile: "prod",
+		Lang:           "zh",
+		Profiles: map[string]config.Profile{
+			"prod": {
+				Endpoint: "https://s3.example.com", AccessKey: "ak", SecretKey: "sk",
+				Bucket: "b", Region: "us-east-1", PathStyle: true,
+			},
+		},
+	}
+	out := renderConfigFile(cfg)
+	if !strings.Contains(out, "lang: zh") {
+		t.Errorf("lang: zh 应输出:\n%s", out)
+	}
+	cfg.Lang = ""
+	out = renderConfigFile(cfg)
+	if strings.Contains(out, "lang:") {
+		t.Errorf("lang 为空时不应输出 lang 行:\n%s", out)
 	}
 }

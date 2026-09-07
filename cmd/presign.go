@@ -2,10 +2,12 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/BeCrafter/sail/internal/client"
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spf13/cobra"
 )
@@ -14,12 +16,12 @@ var presignExpires int
 
 var presignCmd = &cobra.Command{
 	Use:   "presign s3://bucket/key",
-	Short: "生成预签名下载 URL",
-	Long: `生成预签名下载 URL(GET,默认有效 1 小时),无需凭证即可在有效期内访问。
-注意:部分自建 S3 兼容服务不支持 query string 认证(返回 "Authorization empty"),
-此时请改用 CDN 域名访问公开对象:sail url s3://bucket/key。
+	Short: "Generate a presigned download URL",
+	Long: `Generate a presigned download URL (GET, valid for 1 hour by default) that can be accessed without credentials until it expires.
+Note: some self-hosted S3-compatible services do not support query string authentication (returning "Authorization empty").
+In that case, use a CDN domain to access a public object instead: sail url s3://bucket/key.
 
-示例:
+Examples:
   sail presign s3://bucket/data.bin --expires 3600`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -32,7 +34,7 @@ var presignCmd = &cobra.Command{
 			return err
 		}
 		if p.Key == "" {
-			return fmt.Errorf("缺少 key,需指定 s3://bucket/key")
+			return errors.New(i18n.T("missing key; specify s3://bucket/key"))
 		}
 		ctx := context.Background()
 		s3c, err := client.New(ctx, r)
@@ -47,7 +49,7 @@ var presignCmd = &cobra.Command{
 			Key:    &p.Key,
 		}, s3.WithPresignExpires(dur))
 		if err != nil {
-			return fmt.Errorf("生成预签名失败: %w", err)
+			return fmt.Errorf(i18n.T("failed to generate presigned URL: %w"), err)
 		}
 		fmt.Println(req.URL)
 		return nil
@@ -55,5 +57,5 @@ var presignCmd = &cobra.Command{
 }
 
 func init() {
-	presignCmd.Flags().IntVar(&presignExpires, "expires", 3600, "URL 有效期(秒)")
+	presignCmd.Flags().IntVar(&presignExpires, "expires", 3600, "URL lifetime in seconds")
 }

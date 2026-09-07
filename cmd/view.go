@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/BeCrafter/sail/internal/client"
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/BeCrafter/sail/internal/view"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spf13/cobra"
@@ -21,19 +22,19 @@ var (
 )
 
 var viewCmd = &cobra.Command{
-	Use:     "view <s3://bucket/key | 本地文件路径>",
+	Use:     "view <s3://bucket/key | LOCAL_FILE_PATH>",
 	Aliases: []string{"cat"},
-	Short:   "查看对象/文件内容",
-	Long: `智能查看 S3 对象或本地文件,按格式渲染:
-  文本/代码 → 原文输出
-  JSON → 缩进美化
-  YAML → 重新格式化
-  CSV → 表格对齐
-  XML → 缩进美化
-  图片 → 终端字符画(半块字符,任何终端可见,不依赖终端图形协议)
-  二进制 → 元信息 + 前 256 字节 hex dump
+	Short:   "View object/file contents",
+	Long: `Smart-render an S3 object or local file based on its format:
+  text/code -> output as-is
+  JSON      -> pretty-print
+  YAML      -> reformat
+  CSV       -> aligned table
+  XML       -> pretty-print
+  image     -> terminal ASCII art (half-block characters, visible in any terminal, no graphics protocol needed)
+  binary    -> metadata + first 256 bytes hex dump
 
-示例:
+Examples:
   sail view s3://bucket/config.json
   sail view ./local.log
   sail view s3://bucket/data.json --raw | jq .
@@ -68,14 +69,14 @@ var viewCmd = &cobra.Command{
 
 		if viewRaw {
 			if _, err := io.Copy(os.Stdout, src.Reader); err != nil {
-				return fmt.Errorf("查看失败: %w", err)
+				return fmt.Errorf(i18n.T("view failed: %w"), err)
 			}
 			return nil
 		}
 
 		f, ok := view.ParseFormat(viewAs)
 		if !ok {
-			return fmt.Errorf("不支持的格式 --as %q", viewAs)
+			return fmt.Errorf(i18n.T("unsupported format --as %q"), viewAs)
 		}
 		opts := &view.Options{
 			Force:         viewForce,
@@ -83,15 +84,15 @@ var viewCmd = &cobra.Command{
 			Width:         viewWidth,
 		}
 		if err := view.Render(src, f, opts); err != nil {
-			return fmt.Errorf("查看失败: %w", err)
+			return fmt.Errorf(i18n.T("view failed: %w"), err)
 		}
 		return nil
 	},
 }
 
 func init() {
-	viewCmd.Flags().StringVar(&viewAs, "as", "", "强制格式: text|json|yaml|csv|xml|image|binary")
-	viewCmd.Flags().BoolVar(&viewRaw, "raw", false, "原样输出(跳过格式化和字符画,适合管道)")
-	viewCmd.Flags().BoolVar(&viewForce, "force", false, "跳过大小限制")
-	viewCmd.Flags().IntVar(&viewWidth, "width", 0, "字符画列宽(0=自动探测)")
+	viewCmd.Flags().StringVar(&viewAs, "as", "", "force format: text|json|yaml|csv|xml|image|binary")
+	viewCmd.Flags().BoolVar(&viewRaw, "raw", false, "raw output (skip formatting and ASCII art; good for piping)")
+	viewCmd.Flags().BoolVar(&viewForce, "force", false, "skip size limit")
+	viewCmd.Flags().IntVar(&viewWidth, "width", 0, "ASCII art column width (0=auto-detect)")
 }

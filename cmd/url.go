@@ -1,21 +1,23 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/spf13/cobra"
 )
 
 var urlCmd = &cobra.Command{
 	Use:   "url s3://bucket/key",
-	Short: "生成文件的 CDN 访问地址",
-	Long: `根据配置的 cdn-domain 拼接文件的公开访问地址。
+	Short: "Generate a CDN access URL for a file",
+	Long: `Build a public access URL for a file from the configured cdn-domain.
 
-要求 bucket 为 public-read 权限,且配置中设置了 cdn-domain。
+Requires the bucket to be public-read and a cdn-domain set in the config.
 
-示例:
+Examples:
   sail url s3://mybucket/path/file.jpg
   sail url s3://mybucket/path/file.jpg --cdn https://<your-cdn-domain>`,
 	Args: cobra.ExactArgs(1),
@@ -29,7 +31,7 @@ var urlCmd = &cobra.Command{
 			return err
 		}
 		if p.Key == "" {
-			return fmt.Errorf("缺少 key,需指定 s3://bucket/key")
+			return errors.New(i18n.T("missing key; specify s3://bucket/key"))
 		}
 
 		domain := r.CDNDomain
@@ -37,7 +39,7 @@ var urlCmd = &cobra.Command{
 			domain = flagCDN
 		}
 		if domain == "" {
-			return fmt.Errorf("未配置 cdn-domain,请在配置文件中设置或用 --cdn 指定")
+			return errors.New(i18n.T("cdn-domain is not configured; set it in the config file or pass --cdn"))
 		}
 
 		// bucketInPath 优先级:--no-bucket flag > 配置 cdn-bucket-path > 自动检测。
@@ -62,8 +64,8 @@ var (
 )
 
 func init() {
-	urlCmd.Flags().StringVar(&flagCDN, "cdn", "", "覆盖 CDN 域名 (如 https://<your-cdn-domain>)")
-	urlCmd.Flags().BoolVar(&flagNoBucket, "no-bucket", false, "CDN 域名已含 bucket 路径,不再追加 bucket")
+	urlCmd.Flags().StringVar(&flagCDN, "cdn", "", "override CDN domain (e.g. https://<your-cdn-domain>)")
+	urlCmd.Flags().BoolVar(&flagNoBucket, "no-bucket", false, "CDN domain already includes the bucket path; do not append the bucket")
 }
 
 // buildCDNURL 拼接 CDN 域名与 bucket/key 生成公开访问地址。

@@ -3,10 +3,12 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/spf13/cobra"
 )
 
@@ -16,12 +18,12 @@ var (
 )
 
 var headCmd = &cobra.Command{
-	Use:   "head [-n N | --bytes N] <s3://bucket/key|本地路径>",
-	Short: "查看对象/文件开头内容",
-	Long: `流式读取对象/文件开头内容,不落盘。
--n 显示前 N 行(默认 10);--bytes 显示前 N 字节;两者互斥。
+	Use:   "head [-n N | --bytes N] <s3://bucket/key|LOCAL_PATH>",
+	Short: "Output the first part of object/file",
+	Long: `Stream-read the head of an object/file without downloading it to disk.
+-n shows the first N lines (default 10); --bytes shows the first N bytes; the two are mutually exclusive.
 
-示例:
+Examples:
   sail head -n 20 s3://bucket/logs/app.log
   sail head --bytes 4096 s3://bucket/data.bin`,
 	Args: cobra.ExactArgs(1),
@@ -29,10 +31,10 @@ var headCmd = &cobra.Command{
 		nChanged := cmd.Flags().Changed("lines")
 		cChanged := cmd.Flags().Changed("bytes")
 		if nChanged && cChanged {
-			return fmt.Errorf("-n 与 --bytes 不能同时使用")
+			return errors.New(i18n.T("-n and --bytes cannot be used together"))
 		}
 		if headLines < 0 || headBytes < 0 {
-			return fmt.Errorf("-n 与 --bytes 不能为负数")
+			return errors.New(i18n.T("-n and --bytes cannot be negative"))
 		}
 		ctx := context.Background()
 		src, err := openSourceArg(ctx, args[0])
@@ -43,7 +45,7 @@ var headCmd = &cobra.Command{
 		if cChanged {
 			_, err := io.CopyN(os.Stdout, src.Reader, headBytes)
 			if err != nil && err != io.EOF {
-				return fmt.Errorf("读取失败: %w", err)
+				return fmt.Errorf(i18n.T("read failed: %w"), err)
 			}
 			return nil
 		}
@@ -66,13 +68,13 @@ func headLinesFromReader(r io.Reader, n int64) error {
 			if err == io.EOF {
 				return nil
 			}
-			return fmt.Errorf("读取失败: %w", err)
+			return fmt.Errorf(i18n.T("read failed: %w"), err)
 		}
 	}
 	return nil
 }
 
 func init() {
-	headCmd.Flags().Int64VarP(&headLines, "lines", "n", 10, "显示前 N 行")
-	headCmd.Flags().Int64Var(&headBytes, "bytes", 0, "显示前 N 字节")
+	headCmd.Flags().Int64VarP(&headLines, "lines", "n", 10, "show first N lines")
+	headCmd.Flags().Int64Var(&headBytes, "bytes", 0, "show first N bytes")
 }

@@ -3,12 +3,14 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/BeCrafter/sail/internal/client"
 	"github.com/BeCrafter/sail/internal/config"
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/BeCrafter/sail/internal/s3path"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spf13/cobra"
@@ -18,12 +20,12 @@ var rmRecursive bool
 
 var rmCmd = &cobra.Command{
 	Use:   "rm <s3://bucket/key>...",
-	Short: "删除对象",
-	Long: `删除对象,支持多个参数;-r 递归删除前缀下所有对象(批量删除,每次最多 1000 个)。
-参数含通配符(*、?)时按模式匹配删除(基于列举 + 客户端匹配),如 s3://bucket/logs/*.log。
+	Short: "Delete objects",
+	Long: `Delete objects; accepts multiple arguments. -r recursively deletes every object under the prefix (batch deletes of up to 1000 at a time).
+Arguments with wildcards (*, ?) are matched against patterns (listing + client-side matching), e.g. s3://bucket/logs/*.log.
 
-参数为 "-" 时从 stdin 逐行读取 key(每行一个,支持 s3://bucket/key 或裸 key,
-裸 key 使用默认桶,也支持通配符),可与 -r 组合成管道式批量操作:
+When an argument is "-", keys are read line by line from stdin (one per line; s3://bucket/key or a bare key are accepted,
+bare keys use the default bucket, and wildcards are supported). This composes with -r into piped batch operations:
   sail ls s3://bucket/prefix/ | sail rm -r -
   sail ls s3://bucket | sail rm 's3://bucket/*.tmp' -`,
 	Args: cobra.MinimumNArgs(1),
@@ -54,7 +56,7 @@ var rmCmd = &cobra.Command{
 			}
 			// 递归模式允许桶根(s3://bucket/),通配符分支在下方独立处理
 			if p.Key == "" && !rmRecursive {
-				return fmt.Errorf("缺少 key,需指定 s3://bucket/key")
+				return errors.New(i18n.T("missing key; specify s3://bucket/key"))
 			}
 			// 通配符路径:展开为匹配对象后删除(独立于 -r)
 			if hasWildcard(p.Key) {
@@ -78,7 +80,7 @@ var rmCmd = &cobra.Command{
 			}
 			total++
 		}
-		fmt.Printf("共删除 %d 个对象\n", total)
+		fmt.Printf(i18n.T("deleted %d objects\n"), total)
 		return nil
 	},
 }
@@ -115,12 +117,12 @@ func rmFromStdin(ctx context.Context, s3c *s3.Client, r *config.Resolved, recurs
 			p = parsed
 		} else {
 			if r == nil || r.Bucket == "" {
-				return total, fmt.Errorf("stdin 行 %q 不是 s3:// 路径且未配置默认 bucket", line)
+				return total, fmt.Errorf(i18n.T("stdin line %q is not an s3:// path and no default bucket is configured"), line)
 			}
 			p = &s3path.S3Path{Bucket: r.Bucket, Key: line}
 		}
 		if p.Key == "" && !recursive {
-			return total, fmt.Errorf("缺少 key,需指定 s3://bucket/key")
+			return total, errors.New(i18n.T("missing key; specify s3://bucket/key"))
 		}
 		if hasWildcard(p.Key) {
 			n, err := rmWildcard(ctx, s3c, r, p.Format())
@@ -153,9 +155,9 @@ func deleteOne(ctx context.Context, s3c *s3.Client, bucket, key string) error {
 		Key:    &key,
 	})
 	if err != nil {
-		return fmt.Errorf("删除失败: %w", err)
+		return fmt.Errorf(i18n.T("delete failed: %w"), err)
 	}
-	fmt.Printf("已删除 s3://%s/%s\n", bucket, key)
+	fmt.Printf(i18n.T("deleted s3://%s/%s\n"), bucket, key)
 	return nil
 }
 
@@ -173,5 +175,5 @@ func deleteRecursive(ctx context.Context, s3c *s3.Client, bucket, prefix string)
 }
 
 func init() {
-	rmCmd.Flags().BoolVarP(&rmRecursive, "recursive", "r", false, "递归删除前缀下所有对象")
+	rmCmd.Flags().BoolVarP(&rmRecursive, "recursive", "r", false, "recursively delete all objects under the prefix")
 }

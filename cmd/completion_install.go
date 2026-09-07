@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/BeCrafter/sail/internal/i18n"
 )
 
 // detectShell 返回当前用户的 shell 类型 (zsh/bash/fish)。
@@ -47,13 +49,13 @@ func installCompletion(shell string) error {
 	case "fish":
 		return installFish()
 	}
-	return fmt.Errorf("不支持的 shell: %s", shell)
+	return fmt.Errorf(i18n.T("unsupported shell: %s"), shell)
 }
 
 func installZsh() error {
 	dir := filepath.Join(os.Getenv("HOME"), ".zsh", "completion")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("创建目录失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to create directory: %w"), err)
 	}
 	target := filepath.Join(dir, "_sail")
 	if err := genCompletionToFile("zsh", target); err != nil {
@@ -72,7 +74,7 @@ func installZsh() error {
 	if needSource || needCompdef {
 		f, err := os.OpenFile(rcPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 		if err != nil {
-			return fmt.Errorf("写入 .zshrc 失败: %w", err)
+			return fmt.Errorf(i18n.T("failed to write .zshrc: %w"), err)
 		}
 		defer f.Close()
 		if needSource {
@@ -83,9 +85,9 @@ func installZsh() error {
 		}
 	}
 
-	fmt.Printf("补全已安装: %s\n", target)
-	fmt.Printf("已写入 .zshrc: %s\n", sourceLine)
-	fmt.Printf("请重新加载配置: source ~/.zshrc (或重新打开终端)\n")
+	fmt.Printf(i18n.T("completion installed: %s\n"), target)
+	fmt.Printf(i18n.T("written to .zshrc: %s\n"), sourceLine)
+	fmt.Print(i18n.T("reload your config: source ~/.zshrc (or reopen the terminal)\n"))
 	return nil
 }
 
@@ -111,18 +113,18 @@ func installBash() error {
 		// XDG 兜底路径
 		dir = filepath.Join(os.Getenv("HOME"), ".local", "share", "bash-completion", "completions")
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return fmt.Errorf("创建目录失败: %w", err)
+			return fmt.Errorf(i18n.T("failed to create directory: %w"), err)
 		}
 	}
 	target := filepath.Join(dir, "sail")
 	if err := genCompletionToFile("bash", target); err != nil {
 		return err
 	}
-	fmt.Printf("补全已安装: %s\n", target)
-	fmt.Println("重新打开终端即可生效(需已安装 bash-completion)。")
+	fmt.Printf(i18n.T("completion installed: %s\n"), target)
+	fmt.Println(i18n.T("reopen the terminal to take effect (requires bash-completion)."))
 	// bash 版本提示
 	if v := bashMajorVersion(); v > 0 && v < 4 {
-		fmt.Printf("提示: 当前 bash 版本 %d.x,部分高级补全功能受限。建议升级: brew install bash\n", v)
+		fmt.Printf(i18n.T("hint: current bash version is %d.x, some advanced completion features are limited; consider upgrading: brew install bash\n"), v)
 	}
 	return nil
 }
@@ -130,14 +132,14 @@ func installBash() error {
 func installFish() error {
 	dir := filepath.Join(os.Getenv("HOME"), ".config", "fish", "completions")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("创建目录失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to create directory: %w"), err)
 	}
 	target := filepath.Join(dir, "sail.fish")
 	if err := genCompletionToFile("fish", target); err != nil {
 		return err
 	}
-	fmt.Printf("补全已安装: %s\n", target)
-	fmt.Println("重新打开终端即可生效。")
+	fmt.Printf(i18n.T("completion installed: %s\n"), target)
+	fmt.Println(i18n.T("reopen the terminal to take effect."))
 	return nil
 }
 
@@ -146,7 +148,7 @@ func installFish() error {
 func genCompletionToFile(shell, path string) error {
 	f, err := os.Create(path)
 	if err != nil {
-		return fmt.Errorf("创建文件失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to create file: %w"), err)
 	}
 	defer f.Close()
 	switch shell {
@@ -159,7 +161,7 @@ func genCompletionToFile(shell, path string) error {
 	case "fish":
 		return rootCmd.GenFishCompletion(f, true)
 	}
-	return fmt.Errorf("不支持的 shell: %s", shell)
+	return fmt.Errorf(i18n.T("unsupported shell: %s"), shell)
 }
 
 // lineInFile 检查文件中是否已存在某行内容。

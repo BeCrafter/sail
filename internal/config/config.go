@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/spf13/viper"
 )
 
@@ -27,6 +28,7 @@ type Profile struct {
 // Config 是 ~/.sail/config.yaml 的整体结构
 type Config struct {
 	DefaultProfile string             `mapstructure:"default-profile"`
+	Lang           string             `mapstructure:"lang"`
 	Profiles       map[string]Profile `mapstructure:"profiles"`
 }
 
@@ -90,11 +92,11 @@ func Load(path string) (*Config, error) {
 	v := viper.New()
 	v.SetConfigFile(path)
 	if err := v.ReadInConfig(); err != nil {
-		return nil, fmt.Errorf("读取配置 %s 失败: %w", path, err)
+		return nil, fmt.Errorf(i18n.T("read config %s failed: %w"), path, err)
 	}
 	var c Config
 	if err := v.Unmarshal(&c); err != nil {
-		return nil, fmt.Errorf("解析配置失败: %w", err)
+		return nil, fmt.Errorf(i18n.T("parse config failed: %w"), err)
 	}
 	return &c, nil
 }
@@ -110,7 +112,7 @@ func (c *Config) Resolve(profile string) (*Resolved, error) {
 	}
 	p, ok := c.Profiles[profile]
 	if !ok {
-		return nil, fmt.Errorf("profile %q 不存在于配置文件中", profile)
+		return nil, fmt.Errorf(i18n.T("profile %q not found in config file"), profile)
 	}
 
 	r := &Resolved{
@@ -143,10 +145,10 @@ func (c *Config) Resolve(profile string) (*Resolved, error) {
 	}
 
 	if r.Endpoint == "" {
-		return nil, fmt.Errorf("profile %q 缺少 endpoint", profile)
+		return nil, fmt.Errorf(i18n.T("profile %q missing endpoint"), profile)
 	}
 	if r.AccessKey == "" || r.SecretKey == "" {
-		return nil, fmt.Errorf("profile %q 缺少 access-key/secret-key", profile)
+		return nil, fmt.Errorf(i18n.T("profile %q missing access-key/secret-key"), profile)
 	}
 	// path-style 默认 true (自建 S3 兼容服务常用)
 	if !r.PathStyle {
