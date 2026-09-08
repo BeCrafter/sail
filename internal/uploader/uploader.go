@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -41,13 +42,13 @@ func New(s3c *s3.Client) *Uploader {
 func (u *Uploader) UploadFile(ctx context.Context, localPath, bucket, key string) error {
 	f, err := os.Open(localPath)
 	if err != nil {
-		return fmt.Errorf("打开文件失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to open file: %w"), err)
 	}
 	defer f.Close()
 
 	info, err := f.Stat()
 	if err != nil {
-		return fmt.Errorf("读取文件信息失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to read file info: %w"), err)
 	}
 
 	pr := newProgressReader(f, info.Size())
@@ -60,7 +61,7 @@ func (u *Uploader) UploadFile(ctx context.Context, localPath, bucket, key string
 		Body:   pr,
 	})
 	if err != nil {
-		return fmt.Errorf("上传失败: %w", err)
+		return fmt.Errorf(i18n.T("upload failed: %w"), err)
 	}
 	return nil
 }
@@ -71,7 +72,7 @@ func (u *Uploader) UploadFile(ctx context.Context, localPath, bucket, key string
 func (u *Uploader) UploadStream(ctx context.Context, r io.Reader, bucket, key string) error {
 	buf, err := io.ReadAll(r)
 	if err != nil {
-		return fmt.Errorf("读取输入失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to read input: %w"), err)
 	}
 	_, err = u.uploader.Upload(ctx, &s3.PutObjectInput{
 		Bucket: &bucket,
@@ -79,7 +80,7 @@ func (u *Uploader) UploadStream(ctx context.Context, r io.Reader, bucket, key st
 		Body:   bytes.NewReader(buf),
 	})
 	if err != nil {
-		return fmt.Errorf("上传失败: %w", err)
+		return fmt.Errorf(i18n.T("upload failed: %w"), err)
 	}
 	return nil
 }
@@ -103,7 +104,7 @@ func (u *Uploader) UploadDir(ctx context.Context, localDir, bucket, prefix strin
 		if prefix != "" {
 			key = prefix + "/" + rel
 		}
-		fmt.Printf("上传 %s -> s3://%s/%s\n", path, bucket, key)
+		fmt.Printf(i18n.T("uploading %s -> s3://%s/%s\n"), path, bucket, key)
 		return u.UploadFile(ctx, path, bucket, key)
 	})
 	return err
@@ -165,7 +166,7 @@ func (p *progressReader) print(final bool) {
 		pct = float64(read) / float64(total) * 100
 	}
 	if final {
-		fmt.Printf("\r\033[K%s / %s  %.1f%% 完成\n", humanBytes(read), humanBytes(total), pct)
+		fmt.Printf(i18n.T("\r\033[K%s / %s  %.1f%% done\n"), humanBytes(read), humanBytes(total), pct)
 	} else {
 		fmt.Printf("\r\033[K%s / %s  %.1f%%", humanBytes(read), humanBytes(total), pct)
 	}

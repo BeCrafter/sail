@@ -13,6 +13,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/BeCrafter/sail/internal/i18n"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -147,7 +148,7 @@ func mimeFormat(ct string) (Format, bool) {
 // readBounded 读取受 max 限制的全部内容;force 时无限制。Size 已知且超限则先报错。
 func readBounded(s *Source, max int64, force bool) ([]byte, error) {
 	if !force && s.Size > 0 && s.Size > max {
-		return nil, fmt.Errorf("文件过大: %s 超过 %s 限制,使用 --force 跳过", humanBytes(s.Size), humanBytes(max))
+		return nil, fmt.Errorf(i18n.T("file too large: %s exceeds the %s limit; use --force to override"), humanBytes(s.Size), humanBytes(max))
 	}
 	var r io.Reader = s.Reader
 	if !force {
@@ -155,10 +156,10 @@ func readBounded(s *Source, max int64, force bool) ([]byte, error) {
 	}
 	b, err := io.ReadAll(r)
 	if err != nil {
-		return nil, fmt.Errorf("读取失败: %w", err)
+		return nil, fmt.Errorf(i18n.T("read failed: %w"), err)
 	}
 	if !force && int64(len(b)) > max {
-		return nil, fmt.Errorf("文件过大: %s 超过 %s 限制,使用 --force 跳过", humanBytes(int64(len(b))), humanBytes(max))
+		return nil, fmt.Errorf(i18n.T("file too large: %s exceeds the %s limit; use --force to override"), humanBytes(int64(len(b))), humanBytes(max))
 	}
 	return b, nil
 }
@@ -170,7 +171,7 @@ func renderText(s *Source) error {
 		fmt.Println(scanner.Text())
 	}
 	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("读取失败: %w", err)
+		return fmt.Errorf(i18n.T("read failed: %w"), err)
 	}
 	return nil
 }
@@ -182,11 +183,11 @@ func renderJSON(s *Source, opts *Options) error {
 	}
 	var v interface{}
 	if err := json.Unmarshal(b, &v); err != nil {
-		return fmt.Errorf("解析 JSON 失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to parse JSON: %w"), err)
 	}
 	out, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		return fmt.Errorf("格式化 JSON 失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to format JSON: %w"), err)
 	}
 	fmt.Println(string(out))
 	return nil
@@ -199,11 +200,11 @@ func renderYAML(s *Source, opts *Options) error {
 	}
 	var v interface{}
 	if err := yaml.Unmarshal(b, &v); err != nil {
-		return fmt.Errorf("解析 YAML 失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to parse YAML: %w"), err)
 	}
 	out, err := yaml.Marshal(v)
 	if err != nil {
-		return fmt.Errorf("格式化 YAML 失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to format YAML: %w"), err)
 	}
 	fmt.Print(string(out))
 	return nil
@@ -228,7 +229,7 @@ func prettyXML(b []byte) error {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("解析 XML 失败: %w", err)
+			return fmt.Errorf(i18n.T("failed to parse XML: %w"), err)
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
@@ -272,7 +273,7 @@ func renderCSV(s *Source) error {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("解析 CSV 失败: %w", err)
+			return fmt.Errorf(i18n.T("failed to parse CSV: %w"), err)
 		}
 		fmt.Fprintln(w, strings.Join(rec, "\t"))
 	}
@@ -283,7 +284,7 @@ func renderBinary(s *Source) error {
 	head := make([]byte, 256)
 	n, err := io.ReadFull(s.Reader, head)
 	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
-		return fmt.Errorf("读取失败: %w", err)
+		return fmt.Errorf(i18n.T("read failed: %w"), err)
 	}
 	head = head[:n]
 
@@ -291,12 +292,12 @@ func renderBinary(s *Source) error {
 	if s.Size >= 0 {
 		fmt.Printf("size: %s\n", humanBytes(s.Size))
 	} else {
-		fmt.Println("size: 未知")
+		fmt.Println(i18n.T("size: unknown"))
 	}
 	if s.ContentType != "" {
 		fmt.Printf("type: %s\n", s.ContentType)
 	}
-	fmt.Println("--- hex dump (前 256 字节) ---")
+	fmt.Println(i18n.T("--- hex dump (first 256 bytes) ---"))
 	for i := 0; i < len(head); i += 16 {
 		chunk := head[i:min(i+16, len(head))]
 		hexParts := make([]string, 0, 16)

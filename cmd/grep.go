@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/spf13/cobra"
 )
 
@@ -22,12 +23,12 @@ var (
 
 var grepCmd = &cobra.Command{
 	Use:   "grep [options] <pattern> <src>...",
-	Short: "在对象/文件内容中搜索",
-	Long: `流式按行正则搜索对象/文件内容,不落盘。
--i 忽略大小写;-v 反向(输出不匹配的行);-l 只列出有匹配的源;-c 输出匹配行数;-n 显示行号。
-单源输出裸匹配行;多源带 "源:行" 前缀。全部源无匹配时退出码为 1(GNU grep 惯例)。
+	Short: "Search object/file contents",
+	Long: `Stream-search object/file contents line by line with a regex, without downloading to disk.
+-i ignore case; -v invert (print non-matching lines); -l list only sources with matches; -c print match count; -n show line numbers.
+A single source prints bare matching lines; multiple sources prefix each line with "source:line". Exit code 1 when no source matches (GNU grep convention).
 
-示例:
+Examples:
   sail grep -n "ERROR" s3://bucket/logs/app.log
   sail grep -ic "timeout" s3://bucket/a.json ./b.txt`,
 	Args: cobra.MinimumNArgs(2),
@@ -39,7 +40,7 @@ var grepCmd = &cobra.Command{
 		}
 		re, err := regexp.Compile(pattern)
 		if err != nil {
-			return fmt.Errorf("无效的正则: %w", err)
+			return fmt.Errorf(i18n.T("invalid regex: %w"), err)
 		}
 		ctx := context.Background()
 		multi := len(sources) > 1
@@ -97,7 +98,7 @@ func grepOne(ctx context.Context, arg string, re *regexp.Regexp, multi bool) (bo
 					if binary {
 						// 二进制内容:只提示一次,不再输出原文
 						if !binaryReported {
-							fmt.Printf("%s: 二进制文件匹配\n", arg)
+							fmt.Printf(i18n.T("%s: binary file matches\n"), arg)
 							binaryReported = true
 						}
 						continue
@@ -117,7 +118,7 @@ func grepOne(ctx context.Context, arg string, re *regexp.Regexp, multi bool) (bo
 			if rerr == io.EOF {
 				break
 			}
-			return matched, fmt.Errorf("读取失败: %w", rerr)
+			return matched, fmt.Errorf(i18n.T("read failed: %w"), rerr)
 		}
 	}
 	if grepFilesOnly && matched {
@@ -133,9 +134,9 @@ func grepOne(ctx context.Context, arg string, re *regexp.Regexp, multi bool) (bo
 }
 
 func init() {
-	grepCmd.Flags().BoolVarP(&grepIgnoreCase, "ignore-case", "i", false, "忽略大小写")
-	grepCmd.Flags().BoolVarP(&grepInvert, "invert-match", "v", false, "反向匹配(输出不匹配的行)")
-	grepCmd.Flags().BoolVarP(&grepFilesOnly, "files-with-matches", "l", false, "只列出有匹配的源")
-	grepCmd.Flags().BoolVar(&grepCount, "count", false, "输出匹配行数")
-	grepCmd.Flags().BoolVarP(&grepLineNo, "line-number", "n", false, "显示行号")
+	grepCmd.Flags().BoolVarP(&grepIgnoreCase, "ignore-case", "i", false, "ignore case")
+	grepCmd.Flags().BoolVarP(&grepInvert, "invert-match", "v", false, "invert match (print non-matching lines)")
+	grepCmd.Flags().BoolVarP(&grepFilesOnly, "files-with-matches", "l", false, "list only sources with matches")
+	grepCmd.Flags().BoolVar(&grepCount, "count", false, "print match count")
+	grepCmd.Flags().BoolVarP(&grepLineNo, "line-number", "n", false, "show line numbers")
 }

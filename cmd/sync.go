@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/BeCrafter/sail/internal/client"
 	"github.com/BeCrafter/sail/internal/config"
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/BeCrafter/sail/internal/s3path"
 	"github.com/BeCrafter/sail/internal/uploader"
 	"github.com/BeCrafter/sail/internal/view"
@@ -52,7 +54,7 @@ func newSyncPath(r *config.Resolved, arg string) (*syncPath, error) {
 			return nil, err
 		}
 		if p.Key == "" {
-			return nil, fmt.Errorf("目标缺少 key,需指定 s3://bucket/prefix")
+			return nil, errors.New(i18n.T("destination missing key, specify s3://bucket/prefix"))
 		}
 		return &syncPath{isS3: true, bucket: p.Bucket, keyBase: strings.TrimSuffix(p.Key, "/")}, nil
 	}
@@ -79,21 +81,21 @@ func (sp *syncPath) display(relKey string) string {
 
 var syncCmd = &cobra.Command{
 	Use:   "sync <src> <dst>",
-	Short: "rsync 式增量同步(本地↔s3, s3↔s3)",
-	Long: `rsync 式增量同步:默认以大小 + 修改时间比对,只传输有差异的条目。
-支持本地→s3、s3→本地、s3→s3(服务端复制);本地↔本地请用系统 rsync。
+	Short: "rsync-style incremental sync (local↔s3, s3↔s3)",
+	Long: `rsync-style incremental sync: by default it compares by size + mtime and transfers only entries that differ.
+Supports local→s3, s3→local, and s3→s3 (server-side copy); for local↔local use the system rsync.
 
-比对模式(S3 LastModified 秒级精度,比对容差 1s):
-  (默认)   目标缺失 / 大小不同 / 源修改时间晚于目标 1s 以上 → 传输
-  --update 只传输比目标新的条目(目标较新时即使大小不同也跳过)
-  --checksum 大小相同时按内容 md5 校验(ETag 单分片快路径,否则流式计算)
+Comparison modes (S3 LastModified has second precision, with a 1s tolerance):
+  (default)    destination missing / different size / source mtime newer than destination by more than 1s → transfer
+  --update transfer only entries newer than the destination (skip when the destination is newer even if the size differs)
+  --checksum verify content by md5 when sizes match (ETag single-part fast path, otherwise streaming)
 
-过滤(--exclude 与 --include 组合,被过滤条目双向不可见:既不传输也不被 --delete 删除):
-  --exclude 通配符(可重复),同时匹配相对路径与文件名;尾 / 的目录模式排除整个目录
-  --include 白名单(可重复);提供后只有命中的条目参与同步
-  --delete 删除目标端多余条目(s3 侧批量删除,本地侧删除文件并清理空目录)
+Filtering (--exclude and --include combine; filtered entries are invisible in both directions — neither transferred nor removed by --delete):
+  --exclude wildcard (repeatable), matches both the relative path and the file name; a trailing-/ directory pattern excludes the whole directory
+  --include allowlist (repeatable); once provided, only matching entries take part in the sync
+  --delete delete extraneous entries on the destination side (batch deletes on the s3 side; deletes files and cleans empty dirs on the local side)
 
-示例:
+Examples:
   sail sync ./dir s3://bucket/mirror/
   sail sync --exclude '*.tmp' --delete ./dir s3://bucket/mirror/
   sail sync --checksum ./dir s3://bucket/mirror/
@@ -102,7 +104,7 @@ var syncCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		srcArg, dstArg := args[0], args[1]
 		if !strings.HasPrefix(srcArg, "s3://") && !strings.HasPrefix(dstArg, "s3://") {
-			return fmt.Errorf("本地到本地的同步请使用系统 rsync")
+			return errors.New(i18n.T("local-to-local sync should use the system rsync"))
 		}
 		ctx := context.Background()
 		r, _, err := loadResolved()
@@ -129,14 +131,14 @@ func runSync(ctx context.Context, s3c *s3.Client, r *config.Resolved, srcArg, ds
 	if !src.isS3 {
 		info, err := os.Stat(srcArg)
 		if err != nil {
-			return fmt.Errorf("读取本地路径失败: %w", err)
+			return fmt.Errorf(i18n.T("failed to read local path: %w"), err)
 		}
 		if !info.IsDir() {
-			return fmt.Errorf("源 %s 不是目录", srcArg)
+			return fmt.Errorf(i18n.T("source %s is not a directory"), srcArg)
 		}
 	}
 	if src.isS3 && dst.isS3 && src.bucket == dst.bucket && prefixOverlap(src.keyBase, dst.keyBase) {
-		return fmt.Errorf("源与目标前缀重叠,不能同步")
+		return errors.New(i18n.T("source and destination prefixes overlap, cannot sync"))
 	}
 
 	srcIndex, err := src.index(ctx, s3c)
@@ -165,7 +167,7 @@ func runSync(ctx context.Context, s3c *s3.Client, r *config.Resolved, srcArg, ds
 		}
 		transfer++
 		if syncDryRun {
-			fmt.Printf("将同步 %s -> %s\n", src.display(relKey), dst.display(relKey))
+			fmt.Printf(i18n.T("would sync %s -> %s\n"), src.display(relKey), dst.display(relKey))
 			continue
 		}
 		if err := syncTransfer(ctx, s3c, src, dst, relKey, se); err != nil {
@@ -185,7 +187,7 @@ func runSync(ctx context.Context, s3c *s3.Client, r *config.Resolved, srcArg, ds
 			}
 			deleted++
 			if syncDryRun {
-				fmt.Printf("将删除 %s\n", dst.display(relKey))
+				fmt.Printf(i18n.T("would delete %s\n"), dst.display(relKey))
 				continue
 			}
 			if dst.isS3 {
@@ -193,7 +195,7 @@ func runSync(ctx context.Context, s3c *s3.Client, r *config.Resolved, srcArg, ds
 			} else {
 				localPath := filepath.Join(dst.localDir, filepath.FromSlash(relKey))
 				if err := os.Remove(localPath); err != nil {
-					return fmt.Errorf("删除 %s 失败: %w", localPath, err)
+					return fmt.Errorf(i18n.T("failed to delete %s: %w"), localPath, err)
 				}
 				// 自底向上清理空目录(忽略非空/权限错误)
 				dir := filepath.Dir(localPath)
@@ -211,7 +213,7 @@ func runSync(ctx context.Context, s3c *s3.Client, r *config.Resolved, srcArg, ds
 			}
 		}
 	}
-	fmt.Printf("同步完成: 传输 %d 个, 删除 %d 个, 跳过 %d 个\n", transfer, deleted, skipped)
+	fmt.Printf(i18n.T("sync complete: transferred %d, deleted %d, skipped %d\n"), transfer, deleted, skipped)
 	return nil
 }
 
@@ -270,19 +272,19 @@ func hashSyncSide(ctx context.Context, s3c *s3.Client, r *config.Resolved, side 
 		defer src.Close()
 		h := md5.New()
 		if _, err := io.Copy(h, src.Reader); err != nil {
-			return "", fmt.Errorf("读取 %s 失败: %w", side.uri(relKey), err)
+			return "", fmt.Errorf(i18n.T("failed to read %s: %w"), side.uri(relKey), err)
 		}
 		return hex.EncodeToString(h.Sum(nil)), nil
 	}
 	localPath := filepath.Join(side.localDir, filepath.FromSlash(relKey))
 	f, err := os.Open(localPath)
 	if err != nil {
-		return "", fmt.Errorf("打开 %s 失败: %w", localPath, err)
+		return "", fmt.Errorf(i18n.T("failed to open %s: %w"), localPath, err)
 	}
 	defer f.Close()
 	h := md5.New()
 	if _, err := io.Copy(h, f); err != nil {
-		return "", fmt.Errorf("读取 %s 失败: %w", localPath, err)
+		return "", fmt.Errorf(i18n.T("failed to read %s: %w"), localPath, err)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
@@ -306,7 +308,7 @@ func syncTransfer(ctx context.Context, s3c *s3.Client, src, dst *syncPath, relKe
 		if err := u.UploadFile(ctx, localPath, dst.bucket, key); err != nil {
 			return err
 		}
-		fmt.Printf("同步 %s -> s3://%s/%s\n", localPath, dst.bucket, key)
+		fmt.Printf(i18n.T("syncing %s -> s3://%s/%s\n"), localPath, dst.bucket, key)
 	case src.isS3 && !dst.isS3: // s3 → 本地
 		key := s3path.JoinKey(src.keyBase, relKey)
 		localPath := filepath.Join(dst.localDir, filepath.FromSlash(relKey))
@@ -428,35 +430,35 @@ func syncDownload(ctx context.Context, s3c *s3.Client, bucket, key, localPath st
 		Key:    &key,
 	})
 	if err != nil {
-		return fmt.Errorf("下载 s3://%s/%s 失败: %w", bucket, key, err)
+		return fmt.Errorf(i18n.T("download s3://%s/%s failed: %w"), bucket, key, err)
 	}
 	defer resp.Body.Close()
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
-		return fmt.Errorf("创建目录失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to create directory: %w"), err)
 	}
 	f, err := os.Create(localPath)
 	if err != nil {
-		return fmt.Errorf("创建本地文件失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to create local file: %w"), err)
 	}
 	if _, err := io.Copy(f, resp.Body); err != nil {
 		f.Close()
-		return fmt.Errorf("写入文件失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to write file: %w"), err)
 	}
 	f.Close()
 	if !mtime.IsZero() {
 		if err := os.Chtimes(localPath, mtime, mtime); err != nil {
-			fmt.Fprintf(os.Stderr, "警告: 设置修改时间失败: %v\n", err)
+			fmt.Fprintf(os.Stderr, i18n.T("warning: failed to set modification time: %v\n"), err)
 		}
 	}
-	fmt.Printf("同步 s3://%s/%s -> %s\n", bucket, key, localPath)
+	fmt.Printf(i18n.T("syncing s3://%s/%s -> %s\n"), bucket, key, localPath)
 	return nil
 }
 
 func init() {
-	syncCmd.Flags().BoolVar(&syncDelete, "delete", false, "删除目标端多余的条目")
-	syncCmd.Flags().BoolVar(&syncDryRun, "dry-run", false, "只显示将执行的操作,不实际同步")
-	syncCmd.Flags().StringSliceVar(&syncExclude, "exclude", nil, "排除通配符(可重复,匹配相对路径或文件名)")
-	syncCmd.Flags().StringSliceVar(&syncInclude, "include", nil, "包含白名单通配符(可重复,提供后只同步命中条目)")
-	syncCmd.Flags().BoolVar(&syncChecksum, "checksum", false, "大小相同时按内容 md5 校验差异")
-	syncCmd.Flags().BoolVar(&syncUpdate, "update", false, "只传输比目标新的条目")
+	syncCmd.Flags().BoolVar(&syncDelete, "delete", false, "delete extraneous entries on the destination side")
+	syncCmd.Flags().BoolVar(&syncDryRun, "dry-run", false, "show what would be done without actually syncing")
+	syncCmd.Flags().StringSliceVar(&syncExclude, "exclude", nil, "exclude wildcard (repeatable, matches relative path or file name)")
+	syncCmd.Flags().StringSliceVar(&syncInclude, "include", nil, "include allowlist wildcard (repeatable, only matching entries are synced once provided)")
+	syncCmd.Flags().BoolVar(&syncChecksum, "checksum", false, "verify content by md5 when sizes match")
+	syncCmd.Flags().BoolVar(&syncUpdate, "update", false, "transfer only entries newer than the destination")
 }

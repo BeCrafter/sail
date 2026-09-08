@@ -3,6 +3,7 @@ package view
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/BeCrafter/sail/internal/s3path"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -54,7 +56,7 @@ func OpenSourceRange(ctx context.Context, arg string, s3c *s3.Client, defaultBuc
 
 func openS3(ctx context.Context, arg string, s3c *s3.Client, defaultBucket, rng string) (*Source, error) {
 	if s3c == nil {
-		return nil, fmt.Errorf("缺少 S3 客户端(本地路径无需 s3://)")
+		return nil, errors.New(i18n.T("missing S3 client (local paths do not need s3://)"))
 	}
 	p, err := s3path.Parse(arg)
 	if err != nil {
@@ -62,12 +64,12 @@ func openS3(ctx context.Context, arg string, s3c *s3.Client, defaultBucket, rng 
 	}
 	if p.Bucket == "" {
 		if defaultBucket == "" {
-			return nil, fmt.Errorf("未指定 bucket,请用 s3://bucket/key 或 s3:///key(用配置默认 bucket)")
+			return nil, errors.New(i18n.T("no bucket specified, use s3://bucket/key or s3:///key (uses the configured default bucket)"))
 		}
 		p.Bucket = defaultBucket
 	}
 	if p.Key == "" {
-		return nil, fmt.Errorf("缺少 key,需指定 s3://bucket/key")
+		return nil, errors.New(i18n.T("missing key; specify s3://bucket/key"))
 	}
 	in := &s3.GetObjectInput{
 		Bucket: &p.Bucket,
@@ -78,7 +80,7 @@ func openS3(ctx context.Context, arg string, s3c *s3.Client, defaultBucket, rng 
 	}
 	resp, err := s3c.GetObject(ctx, in)
 	if err != nil {
-		return nil, fmt.Errorf("读取对象失败: %w", err)
+		return nil, fmt.Errorf(i18n.T("failed to read object: %w"), err)
 	}
 	s := &Source{
 		Reader: resp.Body,
@@ -99,14 +101,14 @@ func openS3(ctx context.Context, arg string, s3c *s3.Client, defaultBucket, rng 
 func openLocal(arg string) (*Source, error) {
 	info, err := os.Stat(arg)
 	if err != nil {
-		return nil, fmt.Errorf("读取本地文件失败: %w", err)
+		return nil, fmt.Errorf(i18n.T("failed to read local file: %w"), err)
 	}
 	if info.IsDir() {
-		return nil, fmt.Errorf("%s 是目录", arg)
+		return nil, fmt.Errorf(i18n.T("%s is a directory"), arg)
 	}
 	f, err := os.Open(arg)
 	if err != nil {
-		return nil, fmt.Errorf("打开本地文件失败: %w", err)
+		return nil, fmt.Errorf(i18n.T("failed to open local file: %w"), err)
 	}
 	return &Source{
 		Reader: f,
@@ -121,14 +123,14 @@ func openLocal(arg string) (*Source, error) {
 func openLocalRange(arg, rng string) (*Source, error) {
 	info, err := os.Stat(arg)
 	if err != nil {
-		return nil, fmt.Errorf("读取本地文件失败: %w", err)
+		return nil, fmt.Errorf(i18n.T("failed to read local file: %w"), err)
 	}
 	if info.IsDir() {
-		return nil, fmt.Errorf("%s 是目录", arg)
+		return nil, fmt.Errorf(i18n.T("%s is a directory"), arg)
 	}
 	f, err := os.Open(arg)
 	if err != nil {
-		return nil, fmt.Errorf("打开本地文件失败: %w", err)
+		return nil, fmt.Errorf(i18n.T("failed to open local file: %w"), err)
 	}
 	n, err := parseSuffixRange(rng)
 	if err != nil {
@@ -143,7 +145,7 @@ func openLocalRange(arg, rng string) (*Source, error) {
 	}
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		f.Close()
-		return nil, fmt.Errorf("定位文件失败: %w", err)
+		return nil, fmt.Errorf(i18n.T("failed to seek file: %w"), err)
 	}
 	return &Source{
 		Reader: f,
@@ -156,11 +158,11 @@ func openLocalRange(arg, rng string) (*Source, error) {
 // parseSuffixRange 解析 "bytes=-N" 后缀窗口,返回 N。
 func parseSuffixRange(rng string) (int64, error) {
 	if !strings.HasPrefix(rng, "bytes=-") {
-		return 0, fmt.Errorf("仅支持后缀 Range: %q", rng)
+		return 0, fmt.Errorf(i18n.T("only suffix Range is supported: %q"), rng)
 	}
 	n, err := strconv.ParseInt(strings.TrimPrefix(rng, "bytes=-"), 10, 64)
 	if err != nil || n < 0 {
-		return 0, fmt.Errorf("无效的 Range: %q", rng)
+		return 0, fmt.Errorf(i18n.T("invalid Range: %q"), rng)
 	}
 	return n, nil
 }
@@ -174,7 +176,7 @@ func SniffContentType(s *Source) error {
 	buf := make([]byte, 512)
 	n, err := io.ReadFull(s.Reader, buf)
 	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
-		return fmt.Errorf("嗅探内容类型失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to sniff content type: %w"), err)
 	}
 	s.ContentType = http.DetectContentType(buf[:n])
 	s.Reader = io.NopCloser(io.MultiReader(bytes.NewReader(buf[:n]), s.Reader))

@@ -3,12 +3,14 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
 	"github.com/BeCrafter/sail/internal/client"
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/BeCrafter/sail/internal/view"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spf13/cobra"
@@ -20,13 +22,13 @@ var (
 )
 
 var tailCmd = &cobra.Command{
-	Use:   "tail [-n N | --bytes N] <s3://bucket/key|本地路径>",
-	Short: "查看对象/文件结尾内容",
-	Long: `读取对象/文件结尾内容。s3 路径通过 Range 只取尾部窗口,不下载全量;
-Range 不可用时(服务不支持/对象过小)自动退化为全量流式读取。
--n 显示最后 N 行(默认 10);--bytes 显示最后 N 字节;两者互斥。
+	Use:   "tail [-n N | --bytes N] <s3://bucket/key|LOCAL_PATH>",
+	Short: "Output the last part of object/file",
+	Long: `Read the tail of an object/file. For s3 paths only the trailing window is fetched via Range, so the whole object is not downloaded;
+when Range is unavailable (unsupported service or tiny object) it automatically falls back to a full streaming read.
+-n shows the last N lines (default 10); --bytes shows the last N bytes; the two are mutually exclusive.
 
-示例:
+Examples:
   sail tail -n 50 s3://bucket/logs/app.log
   sail tail --bytes 4096 s3://bucket/data.bin`,
 	Args: cobra.ExactArgs(1),
@@ -34,10 +36,10 @@ Range 不可用时(服务不支持/对象过小)自动退化为全量流式读�
 		nChanged := cmd.Flags().Changed("lines")
 		cChanged := cmd.Flags().Changed("bytes")
 		if nChanged && cChanged {
-			return fmt.Errorf("-n 与 --bytes 不能同时使用")
+			return errors.New(i18n.T("-n and --bytes cannot be used together"))
 		}
 		if tailLines < 0 || tailBytes < 0 {
-			return fmt.Errorf("-n 与 --bytes 不能为负数")
+			return errors.New(i18n.T("-n and --bytes cannot be negative"))
 		}
 		ctx := context.Background()
 		arg := args[0]
@@ -62,7 +64,7 @@ func tailS3(ctx context.Context, arg string, byBytes bool) error {
 		return err
 	}
 	if p.Key == "" {
-		return fmt.Errorf("缺少 key,需指定 s3://bucket/key")
+		return errors.New(i18n.T("missing key; specify s3://bucket/key"))
 	}
 	// 探测大小用于窗口估算;Head 失败/无 Content-Length 时大小未知,走全量路径
 	size := int64(-1)
@@ -143,7 +145,7 @@ func tailBytesWindow(size, n int64, openWindow func(int64) (io.ReadCloser, int64
 	defer r.Close()
 	buf, err := io.ReadAll(r)
 	if err != nil {
-		return fmt.Errorf("读取失败: %w", err)
+		return fmt.Errorf(i18n.T("read failed: %w"), err)
 	}
 	// 服务忽略 Range 返回了全量(got/长度超窗口):输出最后 N 字节
 	if got > window || int64(len(buf)) > window {
@@ -174,7 +176,7 @@ func tailLinesWindow(size, n int64, openWindow func(int64) (io.ReadCloser, int64
 		buf, err := io.ReadAll(r)
 		r.Close()
 		if err != nil {
-			return fmt.Errorf("读取失败: %w", err)
+			return fmt.Errorf(i18n.T("read failed: %w"), err)
 		}
 		if got > window || int64(len(buf)) > window {
 			return tailLinesFromBuffer(buf, n) // 服务忽略 Range,拿到的是全量
@@ -262,7 +264,7 @@ func tailLinesFull(n int64, openFull func() (io.ReadCloser, error)) error {
 			if err == io.EOF {
 				break
 			}
-			return fmt.Errorf("读取失败: %w", err)
+			return fmt.Errorf(i18n.T("read failed: %w"), err)
 		}
 	}
 	start := idx - filled
@@ -299,7 +301,7 @@ func tailBytesFull(n int64, openFull func() (io.ReadCloser, error)) error {
 			if err == io.EOF {
 				break
 			}
-			return fmt.Errorf("读取失败: %w", err)
+			return fmt.Errorf(i18n.T("read failed: %w"), err)
 		}
 	}
 	out := make([]byte, 0, filled)
@@ -315,6 +317,6 @@ func tailBytesFull(n int64, openFull func() (io.ReadCloser, error)) error {
 }
 
 func init() {
-	tailCmd.Flags().Int64VarP(&tailLines, "lines", "n", 10, "显示最后 N 行")
-	tailCmd.Flags().Int64Var(&tailBytes, "bytes", 0, "显示最后 N 字节")
+	tailCmd.Flags().Int64VarP(&tailLines, "lines", "n", 10, "show last N lines")
+	tailCmd.Flags().Int64Var(&tailBytes, "bytes", 0, "show last N bytes")
 }

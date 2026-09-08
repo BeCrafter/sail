@@ -1,69 +1,71 @@
-# sail — S3 对象存储 CLI
+# sail — S3 Object Storage CLI
 
-> 基于标准 S3 协议的命令行工具。单个静态二进制,零运行时依赖,跨平台开箱即用。
+**[简体中文](./README.zh-CN.md) · English**
 
-`sail` 面向任何兼容 S3 协议的对象存储服务(AWS S3、MinIO、阿里云 OSS 以及各类自建 S3 兼容服务),提供上传/下载、列举、删除、复制/移动、内容查看、预签名 URL 等日常操作。它不绑定任何特定云厂商,配置即用。
+> A command-line tool built on the standard S3 protocol. A single static binary, zero runtime dependencies, cross-platform out of the box.
 
-- 开源地址:<https://github.com/BeCrafter/sail>
-- 问题反馈:<https://github.com/BeCrafter/sail/issues>
+`sail` works with any S3-compatible object storage service (AWS S3, MinIO, Alibaba Cloud OSS, and various self-hosted S3-compatible services), providing everyday operations such as upload/download, listing, deletion, copy/move, content viewing, and presigned URLs. It isn't tied to any specific cloud vendor — configure and go.
 
-## 特性
+- Open source: <https://github.com/BeCrafter/sail>
+- Issues: <https://github.com/BeCrafter/sail/issues>
 
-- **标准 S3 协议**:path-style + SigV4 签名,兼容 AWS S3 / MinIO / 阿里云 OSS 及各类自建 S3 兼容服务
-- **丰富的传输**:单文件、目录递归、管道流式上传,大文件自动分片(5MB/16 并发)
-- **批量操作**:URL 通配符(`cp/rm 's3://b/*.log'` 展开)、批量删除(DeleteObjects 每批 1000)、管道逐行删除(`ls | rm -r -`)
-- **对象与桶管理**:下载、列举(长格式/目录视图/树形/排序/列桶)、目录占位对象(mkdir/rmdir)、桶管理(mb/rb)、删除(批量/管道)、复制/移动(本地↔s3、s3↔s3 服务端复制零带宽)
-- **增量同步**:rsync 式 `sync`(大小+时间比对,`--checksum` 内容校验、`--update`、`--exclude/--include` 过滤、`--delete`、`--dry-run`),本地↔s3↔s3
-- **检索统计**:`find`(名称/大小/时间过滤)、`du`(按前缀层级统计占用)
-- **内容查看**:多格式智能渲染——文本/JSON/YAML/CSV/XML/图片终端字符画/二进制;`head`/`tail`/`wc`/`grep` 流式读写不落盘
-- **校验与鉴权**:`checksum`(md5/sha256 计算与比对)、`presign` 预签名 URL、基于 CDN 域名的公开访问地址
-- **多 profile 配置**:prod / test / staging 等多环境切换,密钥可引用环境变量避免明文
-- **跨平台**:macOS / Linux,单二进制下载即用;支持 shell 自动补全(zsh / bash / fish)
+## Features
 
-## 安装
+- **Standard S3 protocol**: path-style + SigV4 signing, compatible with AWS S3 / MinIO / Alibaba Cloud OSS and various self-hosted S3-compatible services
+- **Rich transfer modes**: single files, recursive directories, piped streaming upload; large files auto-chunked (5MB / 16 concurrent)
+- **Batch operations**: URL globbing (`cp/rm 's3://b/*.log'` expansion), batch delete (DeleteObjects, 1000 per batch), line-by-line piped delete (`ls | rm -r -`)
+- **Object & bucket management**: download, listing (long format / directory view / tree / sort / list buckets), directory placeholder objects (mkdir/rmdir), bucket management (mb/rb), delete (batch/piped), copy/move (local↔s3, s3↔s3 server-side copy with zero bandwidth)
+- **Incremental sync**: rsync-style `sync` (size + mtime comparison, `--checksum` content verification, `--update`, `--exclude/--include` filtering, `--delete`, `--dry-run`), local↔s3↔s3
+- **Search & statistics**: `find` (name/size/time filtering), `du` (prefix-level usage)
+- **Content viewing**: multi-format smart rendering — text/JSON/YAML/CSV/XML/image terminal ASCII art/binary; `head`/`tail`/`wc`/`grep` stream without writing to disk
+- **Checksum & auth**: `checksum` (md5/sha256 computation and comparison), `presign` presigned URLs, public access URLs based on a CDN domain
+- **Multi-profile config**: prod / test / staging environment switching, keys can reference env vars to avoid plaintext
+- **Cross-platform**: macOS / Linux, single binary, download and use; shell auto-completion (zsh / bash / fish)
 
-### 方式一:npm 安装(推荐,跨平台)
+## Install
+
+### Method 1: npm install (recommended, cross-platform)
 
 ```bash
 npm install -g @becrafter/sail
 ```
 
-npm 会按操作系统和 CPU 架构自动只下载一个匹配的平台二进制,`sail` 命令开箱即用。支持 macOS(arm64/x64)、Linux(arm64/x64),二进制托管在 npm registry,无需额外联网下载。
+npm automatically downloads a single binary matching your OS and CPU architecture — the `sail` command works out of the box. Supports macOS (arm64/x64) and Linux (arm64/x64). Binaries are hosted on the npm registry, so no additional download is needed.
 
-### 方式二:下载二进制
+### Method 2: Download a binary
 
-到 [Releases 页面](https://github.com/BeCrafter/sail/releases)下载对应平台的二进制,放入 `PATH` 即可。
+Download the binary for your platform from the [Releases page](https://github.com/BeCrafter/sail/releases) and place it in your `PATH`.
 
-### 方式三:go install
+### Method 3: go install
 
 ```bash
 go install github.com/BeCrafter/sail@latest
 ```
 
-### 方式四:源码构建
+### Method 4: Build from source
 
 ```bash
 git clone https://github.com/BeCrafter/sail.git
 cd sail && go build -o sail .
 ```
 
-## 配置
+## Config
 
-### 快速初始化
+### Quick init
 
 ```bash
 sail config setup
 ```
 
-交互式生成或更新 `~/.sail/config.yaml`(`--reset` 重置为全新配置;文件已存在时新增或重配一个 profile,保留其它),并可选安装 shell 自动补全。向导要点:
+Interactively generates or updates `~/.sail/config.yaml` (`--reset` resets to a fresh config; if the file exists, adds or reconfigures a profile while keeping the others), and optionally installs shell auto-completion. Wizard highlights:
 
-- `endpoint` 为必填项,留空会原地重问
-- `access-key` / `secret-key` 可直接输入明文;回车留空则引用按 profile 派生的环境变量(机制见下方"密钥安全"),写盘后会打印需要 `export` 的变量名
-- 重配已有 profile 时,已配置的明文密钥不回显,回车即保留
-- 写盘后输出配置摘要,空字段明确标注,便于核对缺失项
+- `endpoint` is required — leaving it empty re-prompts in place
+- `access-key` / `secret-key` can be entered in plaintext; press Enter on empty to reference per-profile env vars (see "Key security" below). After writing, it prints the variable names you need to `export`
+- When reconfiguring an existing profile, already-configured plaintext keys are not echoed — press Enter to keep them
+- After writing, prints a config summary with empty fields clearly marked, for easy review of missing items
 
 ```yaml
-# 密钥可用 ${VAR} 引用环境变量,避免明文。
+# Keys can reference environment variables via ${VAR} to avoid plaintext.
 default-profile: prod
 profiles:
   prod:
@@ -74,7 +76,7 @@ profiles:
     region: ""
     path-style: true
     cdn-domain: <your-cdn-domain>
-    # cdn-bucket-path: false  # CDN 域名是否已含 bucket 路径;注释掉则自动检测
+    # cdn-bucket-path: false  # whether the CDN domain already contains the bucket path; comment out to auto-detect
   test:
     endpoint: <your-s3-endpoint-test>
     access-key: ${SAIL_TEST_ACCESS_KEY}
@@ -93,213 +95,213 @@ profiles:
     cdn-domain: <your-cdn-domain-staging>
 ```
 
-向导中留空 `access-key`/`secret-key` 时,会自动写入按 profile 派生的占位符 `SAIL_<PROFILE>_(ACCESS|SECRET)_KEY`(profile 名大写、连字符等非字母数字字符转下划线,清洗后为空则回退 `SAIL_ACCESS_KEY` 全局名);配置文件中也可手动改为任意 `${VAR}`。
+Leaving `access-key`/`secret-key` empty in the wizard automatically writes per-profile placeholders `SAIL_<PROFILE>_(ACCESS|SECRET)_KEY` (profile name uppercased, non-alphanumeric characters such as hyphens converted to underscores; if the sanitized name is empty, falls back to the global `SAIL_ACCESS_KEY` name). You can also manually change it to any `${VAR}` in the config file.
 
-### cdn-domain 说明
+### cdn-domain notes
 
-`cdn-domain` 用于 `sail url` 命令生成文件的公开访问地址,填入你的存储服务对应的 CDN 域名即可。
+`cdn-domain` is used by `sail url` to generate public access URLs for files — fill in the CDN domain of your storage service.
 
-**bucket 去重**:`sail url` 会检查 `cdn-domain` 的路径是否已包含 bucket 段(路径式 `.../bucket/`),若已包含则不再重复拼接,避免生成 `.../bucket/bucket/key` 这类失效链接。自动检测仅按路径段判断、不做子域推断;若自动检测失效或有特殊映射(如域名直接映射到 bucket、URL 不含 bucket),可用配置项 `cdn-bucket-path` 显式声明:`true` 表示域名已含 bucket(不再追加),`false` 表示未含(总是追加),注释掉则自动检测;也可用 `--no-bucket` 单次指定。
+**Bucket dedup**: `sail url` checks whether the `cdn-domain` path already contains a bucket segment (path-style `.../bucket/`); if so, it doesn't append it again, avoiding broken links like `.../bucket/bucket/key`. Auto-detection only inspects path segments and does not infer subdomains. If auto-detection fails or you have a special mapping (e.g. the domain maps directly to a bucket, or the URL doesn't contain the bucket), use the `cdn-bucket-path` config option to declare it explicitly: `true` means the domain already contains the bucket (do not append), `false` means it does not (always append), and commenting it out enables auto-detection. You can also use `--no-bucket` to specify it once.
 
-**注意**:只有 `public-read` 权限的 bucket 的文件才能通过 CDN 域名访问;私有 bucket 只能通过鉴权的 GetObject 访问。
+**Note**: only files in buckets with `public-read` permission can be accessed via the CDN domain; private buckets can only be accessed through authenticated GetObject.
 
-### region 与 path-style 说明
+### region & path-style notes
 
-这两个是 S3 协议的通用参数,根据你接入的存储服务选择:
+These two are common S3 protocol parameters — choose based on the storage service you connect to:
 
-| 参数 | 含义 | AWS S3 | MinIO / 自建 | 阿里云 OSS |
+| Parameter | Meaning | AWS S3 | MinIO / self-hosted | Alibaba Cloud OSS |
 |------|------|--------|-------------|-----------|
-| `region` | 数据中心区域 | 填实际值如 `us-east-1` | 留空 | 填如 `oss-cn-hangzhou` |
-| `path-style` | URL 寻址方式 | `false`(virtual-hosted) | `true` | `false` |
+| `region` | Data center region | Fill in the actual value, e.g. `us-east-1` | Leave empty | Fill in e.g. `oss-cn-hangzhou` |
+| `path-style` | URL addressing style | `false` (virtual-hosted) | `true` | `false` |
 
-- **path-style**:`true` 时 URL 为 `endpoint/bucket/key`;`false` 时 URL 为 `bucket.endpoint/key`。自建 S3 兼容服务通常只支持 path-style。
-- **region**:自建服务通常留空。AWS SDK 内部规则要求 region 非空,留空时代码自动用 `us-east-1` 占位(不影响实际请求目标,因 endpoint 已被覆盖)。
+- **path-style**: when `true` the URL is `endpoint/bucket/key`; when `false` the URL is `bucket.endpoint/key`. Self-hosted S3-compatible services usually only support path-style.
+- **region**: usually left empty for self-hosted services. AWS SDK internal rules require a non-empty region; when empty, the code uses `us-east-1` as a placeholder (it doesn't affect the actual request target, since endpoint is overridden).
 
-### 密钥安全
+### Key security
 
-配置文件中的密钥有两种写法:直接明文,或用 `${VAR}` 引用环境变量(避免明文落盘):
+Keys in the config file can be written two ways: plaintext, or `${VAR}` referencing an environment variable (to avoid plaintext on disk):
 
 ```yaml
-access-key: my-plain-access-key        # 写法一:明文
-access-key: ${SAIL_TEST_ACCESS_KEY}    # 写法二:引用环境变量
+access-key: my-plain-access-key        # Option 1: plaintext
+access-key: ${SAIL_TEST_ACCESS_KEY}    # Option 2: reference an environment variable
 ```
 
-`sail config setup` 中回车留空密钥时,自动采用写法二并按 profile 派生变量名(profile `test` → `SAIL_TEST_ACCESS_KEY`,`staging-eu` → `SAIL_STAGING_EU_ACCESS_KEY`,即大写、连字符等非字母数字字符转下划线;清洗后为空回退 `SAIL_ACCESS_KEY`),各环境互不共享。向导结束时会打印需要 export 的变量名,例如:
+In `sail config setup`, leaving the key empty on Enter automatically uses option 2 and derives the variable name per profile (profile `test` → `SAIL_TEST_ACCESS_KEY`, `staging-eu` → `SAIL_STAGING_EU_ACCESS_KEY`, i.e. uppercased, non-alphanumeric characters such as hyphens converted to underscores; falls back to `SAIL_ACCESS_KEY` if the sanitized name is empty), so environments don't share. At the end of the wizard it prints the variable names to export, for example:
 
 ```bash
 export SAIL_TEST_ACCESS_KEY="your-access-key"
 export SAIL_TEST_SECRET_KEY="your-secret-key"
 ```
 
-未设置这些变量时,sail 命令启动会报 `缺少 access-key/secret-key`。
+When these variables are not set, sail reports `missing access-key/secret-key` on startup.
 
-注意区分两类环境变量:文件内 `${VAR}` 引用的变量(按 profile 派生,如 `SAIL_TEST_ACCESS_KEY`)负责给密钥赋值;下方"环境变量覆盖"表中的 `SAIL_ACCESS_KEY` 等是**运行时全局覆盖**,一旦设置会无视配置文件直接生效。生效优先级:全局覆盖环境变量 > 配置文件内 `${VAR}` 展开 > 空(启动报缺少密钥)。
+Note the distinction between two kinds of env vars: the variables referenced inside the file via `${VAR}` (per-profile, e.g. `SAIL_TEST_ACCESS_KEY`) assign the key values; the `SAIL_ACCESS_KEY` etc. in the "Environment variable overrides" table below are runtime global overrides — once set they take effect directly, ignoring the config file. Precedence: global override env vars > `${VAR}` expansion in config > empty (startup reports missing keys).
 
-### 环境变量覆盖
+### Environment variable overrides
 
-| 变量 | 作用 |
+| Variable | Effect |
 |------|------|
-| `SAIL_ENDPOINT` | 覆盖 endpoint |
-| `SAIL_ACCESS_KEY` | 覆盖 access key |
-| `SAIL_SECRET_KEY` | 覆盖 secret key |
-| `SAIL_BUCKET` | 覆盖默认 bucket |
-| `SAIL_CDN_DOMAIN` | 覆盖 CDN 域名 |
+| `SAIL_ENDPOINT` | Override endpoint |
+| `SAIL_ACCESS_KEY` | Override access key |
+| `SAIL_SECRET_KEY` | Override secret key |
+| `SAIL_BUCKET` | Override default bucket |
+| `SAIL_CDN_DOMAIN` | Override CDN domain |
 
-## 使用
+## Usage
 
-> **路径语法**:`s3://bucket/key` 显式指定 bucket;`s3:///key`(空 bucket 段)用配置的默认 bucket;`s3://bucket` 仅 `ls` 列桶。跨桶同步仍用显式 `s3://bucket/key`。
+> **Path syntax**: `s3://bucket/key` explicitly specifies the bucket; `s3:///key` (empty bucket segment) uses the configured default bucket; `s3://bucket` (with `ls` only) lists buckets. Cross-bucket sync still uses explicit `s3://bucket/key`.
 
 ```bash
-# 查看版本
-sail --version          # 或 sail -v
+# Show version
+sail --version          # or sail -v
 
-# 复制(本地↔s3、s3↔s3);upload/download 为 cp 的别名
+# Copy (local↔s3, s3↔s3); upload/download are aliases for cp
 sail cp local.txt s3://mybucket/path/local.txt
-sail cp local.txt s3:///path/local.txt           # s3:/// 用配置默认 bucket
-sail upload local.txt                            # 1 参:上传到默认 bucket,key 用文件名
-sail cp -r ./dir s3://mybucket/prefix/           # 递归镜像目录
-sail cp 's3://mybucket/logs/*.log' s3://mybucket/archive/   # 通配符批复制(* 跨 /,保留层级)
-sail cp 's3://mybucket/*.json' ./download-dir/   # 通配符批量下载
-cat file | sail upload - s3://mybucket/key       # 管道输入
+sail cp local.txt s3:///path/local.txt           # s3:/// uses the configured default bucket
+sail upload local.txt                            # 1 arg: upload to default bucket, key uses the filename
+sail cp -r ./dir s3://mybucket/prefix/           # recursively mirror a directory
+sail cp 's3://mybucket/logs/*.log' s3://mybucket/archive/   # glob batch copy (* crosses /, preserves hierarchy)
+sail cp 's3://mybucket/*.json' ./download-dir/   # glob batch download
+cat file | sail upload - s3://mybucket/key       # pipe input
 
-# 桶管理(mb/rb 与 ls --buckets)
+# Bucket management (mb/rb and ls --buckets)
 sail mb s3://my-new-bucket
-sail rb s3://my-old-bucket                       # 仅删空桶;非空先 sail rm -r s3://my-old-bucket/
-sail ls --buckets                                # 列出所有桶
+sail rb s3://my-old-bucket                       # deletes only empty buckets; for non-empty, run sail rm -r s3://my-old-bucket/ first
+sail ls --buckets                                # list all buckets
 
-# 下载(s3→本地);download 为 cp 的别名
+# Download (s3→local); download is an alias for cp
 sail cp s3://mybucket/key local.txt
-sail download s3://mybucket/key                  # 1 参:下载到当前目录
+sail download s3://mybucket/key                  # 1 arg: download to current directory
 
-# 列举
+# List
 sail ls s3://mybucket/prefix/
-sail ls -l s3://mybucket/                        # 长格式:大小+修改时间
-sail ls -l -t s3://mybucket/                     # 按修改时间排序(新→旧),--human 人类可读大小
-sail ls -l -S -r s3://mybucket/                  # 按大小排序(大→小)再逆序
-sail ls -d s3://mybucket/prefix/                 # 只列该层子目录(不含文件),对齐 ls -d
+sail ls -l s3://mybucket/                        # long format: size + modified time
+sail ls -l -t s3://mybucket/                     # sort by modified time (new→old), --human for human-readable sizes
+sail ls -l -S -r s3://mybucket/                  # sort by size (large→small), then reverse
+sail ls -d s3://mybucket/prefix/                 # list only sub-directories at this level (no files), like ls -d
 
-# 查找与统计
-sail find s3://mybucket/logs --name '*.log' -l   # 按文件名通配(可重复多个)
-sail find s3://mybucket --size +1M --newer 2026-01-01   # 大小/时间过滤
-sail du -h s3://mybucket/prefix/                 # 按前缀层级统计占用
-sail du -h --max-depth 1 s3://mybucket           # 只显示 1 层 + 总计
-sail du -s s3://mybucket/prefix/                 # 只打印总计
+# Find and statistics
+sail find s3://mybucket/logs --name '*.log' -l   # glob by filename (repeatable)
+sail find s3://mybucket --size +1M --newer 2026-01-01   # size/time filters
+sail du -h s3://mybucket/prefix/                 # prefix-level usage
+sail du -h --max-depth 1 s3://mybucket           # show only 1 level + total
+sail du -s s3://mybucket/prefix/                 # print only the total
 
-# 树形查看(S3 前缀或本地目录)
-sail tree s3://mybucket/prefix/                  # 完整树
-sail tree -L 2 s3://mybucket/prefix/             # 限深度 2
-sail tree -d s3://mybucket/prefix/               # 只显目录
-sail tree -s --human s3://mybucket/prefix/      # 文件附人类可读大小
-sail tree ./cmd                                  # 本地目录树
+# Tree view (S3 prefix or local directory)
+sail tree s3://mybucket/prefix/                  # full tree
+sail tree -L 2 s3://mybucket/prefix/             # limit depth to 2
+sail tree -d s3://mybucket/prefix/               # directories only
+sail tree -s --human s3://mybucket/prefix/      # files with human-readable sizes
+sail tree ./cmd                                  # local directory tree
 
-# 删除与目录占位对象
+# Delete and directory placeholder objects
 sail rm s3://mybucket/key
-sail rm -r s3://mybucket/prefix/                 # 递归删除(批量 DeleteObjects,每批 1000)
-sail rm key1 key2 key3                          # 多参数批量
-sail rm 's3://mybucket/logs/*.tmp'              # 通配符匹配删除
-sail ls s3://mybucket/prefix/ | sail rm -r -    # 管道逐行读取 key(xargs 式)
-sail mkdir s3://mybucket/new/dir/               # 目录占位对象(天然 -p 语义)
-sail rmdir s3://mybucket/new/dir/               # 只删空目录;非空请用 rm -r
+sail rm -r s3://mybucket/prefix/                 # recursive delete (batch DeleteObjects, 1000 per batch)
+sail rm key1 key2 key3                          # multi-arg batch
+sail rm 's3://mybucket/logs/*.tmp'              # glob match delete
+sail ls s3://mybucket/prefix/ | sail rm -r -    # read keys line-by-line from pipe (xargs-style)
+sail mkdir s3://mybucket/new/dir/               # directory placeholder object (inherent -p semantics)
+sail rmdir s3://mybucket/new/dir/               # deletes only empty directories; use rm -r for non-empty
 
-# 增量同步(rsync 式:大小+修改时间比对,幂等;--help 查看全部选项)
+# Incremental sync (rsync-style: size + modified-time comparison, idempotent; see --help for all options)
 sail sync ./dir s3://mybucket/mirror/
 sail sync --exclude '*.tmp' --delete ./dir s3://mybucket/mirror/
-sail sync --include '*.json' s3://mybucket/mirror/ ./dir2 --dry-run   # 白名单 + 预演
-sail sync --checksum ./dir s3://mybucket/mirror/  # 大小相同时按内容 md5 校验
-sail sync --update ./dir s3://mybucket/mirror/    # 只传输比目标新的条目
+sail sync --include '*.json' s3://mybucket/mirror/ ./dir2 --dry-run   # whitelist + dry run
+sail sync --checksum ./dir s3://mybucket/mirror/  # when sizes match, verify by content md5
+sail sync --update ./dir s3://mybucket/mirror/    # transfer only entries newer than the target
 
-# 预签名 URL(部分服务不支持,见下方"限制")
+# Presigned URL (some services don't support it, see Limitations below)
 sail presign s3://mybucket/key --expires 3600
 
-# 生成 CDN 访问地址
+# Generate a CDN access URL
 sail url s3://mybucket/path/file.jpg
 sail url s3://mybucket/path/file.jpg --cdn https://<your-cdn-domain>
-sail url s3://mybucket/path/file.jpg --no-bucket   # CDN 域名已含 bucket 路径,不再重复追加
+sail url s3://mybucket/path/file.jpg --no-bucket   # CDN domain already contains the bucket path, don't append again
 
-# 查看对象/文件内容(按格式智能渲染,本地文件免配置)
-sail view s3://mybucket/config.json              # JSON 自动美化缩进
-sail view ./local.log                            # 文本/代码直出
-sail view s3://mybucket/data.csv                # CSV 表格对齐
-sail view s3://mybucket/photo.png               # 图片终端字符画(半块字符,任意终端可见)
-sail view s3://mybucket/data.json --raw         # 原样输出,适合管道:sail view ... --raw | jq .
-sail cat s3://mybucket/data.json                 # cat 是 view --raw 的别名
-sail view s3://mybucket/big.json --force        # 跳过大小限制
-sail view s3://mybucket/photo.png --width 60    # 指定字符画列宽
+# View object/file content (smart rendering by format, no config needed for local files)
+sail view s3://mybucket/config.json              # JSON auto pretty-printed
+sail view ./local.log                            # text/code output directly
+sail view s3://mybucket/data.csv                # CSV aligned table
+sail view s3://mybucket/photo.png               # image terminal ASCII art (half-block chars, visible in any terminal)
+sail view s3://mybucket/data.json --raw         # raw output, good for piping: sail view ... --raw | jq .
+sail cat s3://mybucket/data.json                 # cat is an alias for view --raw
+sail view s3://mybucket/big.json --force        # skip the size limit
+sail view s3://mybucket/photo.png --width 60    # set ASCII art column width
 
-# 流式读取内容(s3 路径走 Range 只取需要的部分,不下载全量)
-sail head -n 20 s3://mybucket/logs/app.log      # 开头 N 行
-sail head --bytes 4096 s3://mybucket/data.bin   # 开头 N 字节
-sail tail -n 50 s3://mybucket/logs/app.log      # 结尾 N 行(Range 尾部窗口)
-sail wc -l s3://mybucket/logs/app.log           # 行数(默认三列:行 词 字节)
-sail grep -n "ERROR" s3://mybucket/logs/app.log # 正则逐行搜索(支持 -i/-v/-l/-n)
+# Stream content (s3 paths use Range to fetch only the needed portion, not the whole object)
+sail head -n 20 s3://mybucket/logs/app.log      # first N lines
+sail head --bytes 4096 s3://mybucket/data.bin   # first N bytes
+sail tail -n 50 s3://mybucket/logs/app.log      # last N lines (Range tail window)
+sail wc -l s3://mybucket/logs/app.log           # line count (default three columns: lines words bytes)
+sail grep -n "ERROR" s3://mybucket/logs/app.log # regex line-by-line search (supports -i/-v/-l/-n)
 
-# 校验和(md5/sha256 流式计算与比对,本地文件免配置)
-sail checksum s3://mybucket/data.bin            # 默认 md5
+# Checksum (md5/sha256 streaming computation and comparison, no config needed for local files)
+sail checksum s3://mybucket/data.bin            # default md5
 sail checksum --algo sha256 --compare ./local.bin s3://mybucket/data.bin
-sail checksum --etag s3://mybucket/data.bin     # 展示原始 ETag(注意:分片对象 ETag≠内容 md5)
+sail checksum --etag s3://mybucket/data.bin     # show the raw ETag (note: multipart object ETag ≠ content md5)
 
-# 复制对象/文件(本地↔s3、s3↔s3 走服务端 CopyObject 零带宽)
+# Copy objects/files (local↔s3, s3↔s3 uses server-side CopyObject with zero bandwidth)
 sail cp ./local.txt s3://mybucket/path/copied.txt
-sail cp ./local.txt s3://mybucket/path/          # 尾 / 表示进目录
+sail cp ./local.txt s3://mybucket/path/          # trailing / means into a directory
 sail cp s3://mybucket/a.txt ./out.txt
-sail cp -r ./dir s3://mybucket/mirror/           # 递归镜像本地目录
-sail cp -r s3://mybucket/prefix/ s3://mybucket/dest/   # 服务端递归复制
-sail cp --dry-run ./local.txt s3://mybucket/x   # 预演,不实际复制
+sail cp -r ./dir s3://mybucket/mirror/           # recursively mirror a local directory
+sail cp -r s3://mybucket/prefix/ s3://mybucket/dest/   # server-side recursive copy
+sail cp --dry-run ./local.txt s3://mybucket/x   # dry run, no actual copy
 
-# 移动对象/文件(复制后删除源)
-sail mv s3://mybucket/a.txt s3://mybucket/moved.txt     # 单对象,无确认
+# Move objects/files (copy then delete source)
+sail mv s3://mybucket/a.txt s3://mybucket/moved.txt     # single object, no confirmation
 sail mv ./local.txt s3://mybucket/uploaded.txt
-sail mv -r s3://mybucket/src/ s3://mybucket/dst/         # 递归,交互确认 [y/N]
-sail mv -r --yes s3://mybucket/src/ s3://mybucket/dst/   # 跳过确认
+sail mv -r s3://mybucket/src/ s3://mybucket/dst/         # recursive, interactive confirmation [y/N]
+sail mv -r --yes s3://mybucket/src/ s3://mybucket/dst/   # skip confirmation
 
-# 查看对象/文件元信息(HeadObject / os.Stat)
+# View object/file metadata (HeadObject / os.Stat)
 sail stat s3://mybucket/config.json             # size/content-type/last-modified/etag
-sail stat ./local.log                           # 本地文件元信息
+sail stat ./local.log                           # local file metadata
 
-# 切换 profile
+# Switch profile
 sail -p test upload local.txt s3://testbucket/local.txt
 ```
 
-## 与 AWS CLI 对照验证
+## Cross-check with AWS CLI
 
-行为与 `aws s3` 一致,可用 AWS CLI 对照:
+Behavior matches `aws s3`; you can cross-check with the AWS CLI:
 
 ```bash
 aws s3 ls --endpoint-url <your-s3-endpoint> s3://mybucket/
 ```
 
-## 限制
+## Limitations
 
-- Bucket 与 Object key 的命名规则、长度上限取决于所接入的 S3 服务,遵循各服务约束。
-- **部分 S3 兼容服务不支持预签名 URL**:某些自建 S3 服务不支持 query string 认证(返回 "Authorization empty"),只支持 Authorization header 认证。如需公开访问,请通过 CDN 域名访问已设置为公开的文件。
+- Bucket and object key naming rules and length limits depend on the connected S3 service; follow each service's constraints.
+- **Some S3-compatible services don't support presigned URLs**: certain self-hosted S3 services don't support query string auth (returning "Authorization empty") and only support Authorization header auth. For public access, use a CDN domain to access files that are already set public.
 
-## 实现细节
+## Implementation details
 
-### S3 兼容性适配
+### S3 compatibility adaptations
 
-部分自建 S3 兼容服务与标准 AWS S3 存在差异,工具已做适配:
+Some self-hosted S3-compatible services differ from standard AWS S3; the tool adapts accordingly:
 
-1. **checksum 禁用**:AWS SDK v2 默认在上传时使用 `aws-chunked` content encoding + CRC32 trailing checksum。部分 S3 兼容服务端不解码 `aws-chunked`,导致存储的数据被 trailer 污染(大文件 multipart upload 尤其严重)。工具在 client 和 uploader 两处均设置了 `RequestChecksumCalculation = WhenRequired` 和 `ResponseChecksumValidation = WhenRequired` 来禁用此行为。
-2. **region 占位**:部分 S3 服务 region 为空,但 AWS SDK v2 的 endpoint 规则要求 region 非空。工具用 `us-east-1` 作为占位值(endpoint 已被 BaseEndpoint 覆盖,实际不影响请求)。
-3. **CopyObject 回退**:部分 S3 兼容服务的 `CopyObject` 返回成功但生成 0 字节对象。`cp`/`mv` 的 s3↔s3 路径在 CopyObject 后用 HEAD 校验目标大小与源一致;不一致时自动回退到 `download→re-upload`,保证数据正确。标准 S3(AWS/MinIO)上 CopyObject 校验通过,仍走零带宽服务端复制。
+1. **Checksum disabled**: AWS SDK v2 uses `aws-chunked` content encoding + CRC32 trailing checksum by default on upload. Some S3-compatible servers don't decode `aws-chunked`, corrupting stored data with the trailer (especially severe for large multipart uploads). The tool sets `RequestChecksumCalculation = WhenRequired` and `ResponseChecksumValidation = WhenRequired` in both the client and the uploader to disable this behavior.
+2. **Region placeholder**: some S3 services have an empty region, but AWS SDK v2's endpoint rules require a non-empty region. The tool uses `us-east-1` as the placeholder (endpoint is overridden by BaseEndpoint, so it doesn't affect the actual request).
+3. **CopyObject fallback**: some S3-compatible services' `CopyObject` returns success but produces a 0-byte object. The `cp`/`mv` s3↔s3 path does a HEAD check after CopyObject to verify the target size matches the source; if it doesn't, it automatically falls back to `download→re-upload` to guarantee data correctness. On standard S3 (AWS/MinIO), the CopyObject check passes and zero-bandwidth server-side copy is still used.
 
-## 发布
+## Release
 
-发布走 GitHub Actions 自动化:推送形如 `vX.Y.Z` 的 tag 即触发交叉编译 + 发布到 npm,无需本地登录。
+Releases go through GitHub Actions automation: pushing a tag like `vX.Y.Z` triggers cross-compilation + publish to npm, no local login needed.
 
-1. 在仓库 **Settings → Secrets and variables → Actions** 添加 `NPM_TOKEN`(npm automation token,需有 `@becrafter` scope 发布权)。
-2. 打 tag 并推送:
+1. Add `NPM_TOKEN` (npm automation token with `@becrafter` scope publish permission) in the repo's **Settings → Secrets and variables → Actions**.
+2. Tag and push:
    ```bash
    git tag v0.1.0 && git push origin v0.1.0
    ```
-3. workflow 跑完,4 个平台子包 + 主包即发布到 `registry.npmjs.org`。也可在 Actions 页面手动触发并填版本号。
+3. After the workflow finishes, the 4 platform sub-packages + main package are published to `registry.npmjs.org`. You can also trigger it manually from the Actions page and fill in the version.
 
-本地发布(无 CI 时)仍可用:`make release VERSION=0.1.0`(未登录会引导 `npm login`)。
+Local release (without CI) still works: `make release VERSION=0.1.0` (prompts `npm login` if not logged in).
 
-## 贡献
+## Contributing
 
-欢迎提 Issue 或 Pull Request:<https://github.com/BeCrafter/sail/pulls>
+Issues and Pull Requests welcome: <https://github.com/BeCrafter/sail/pulls>
 
-## 许可证
+## License
 
 [MIT](./LICENSE)

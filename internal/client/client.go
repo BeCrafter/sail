@@ -10,6 +10,7 @@ import (
 	"regexp"
 
 	"github.com/BeCrafter/sail/internal/config"
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awscfg "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -35,7 +36,7 @@ func New(ctx context.Context, r *config.Resolved) (*s3.Client, error) {
 		awscfg.WithRegion(region),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("加载 AWS 配置失败: %w", err)
+		return nil, fmt.Errorf(i18n.T("failed to load AWS config: %w"), err)
 	}
 
 	c := s3.NewFromConfig(cfg, func(o *s3.Options) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -20,7 +21,7 @@ func collectAllObjects(ctx context.Context, s3c *s3.Client, bucket, prefix strin
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("列举失败: %w", err)
+			return nil, fmt.Errorf(i18n.T("list failed: %w"), err)
 		}
 		objs = append(objs, page.Contents...)
 	}
@@ -69,7 +70,7 @@ func deleteKeysOneByOne(ctx context.Context, s3c *s3.Client, bucket string, keys
 			Key:    &k,
 		})
 		if err != nil {
-			return count, fmt.Errorf("删除 s3://%s/%s 失败: %w", bucket, k, err)
+			return count, fmt.Errorf(i18n.T("failed to delete s3://%s/%s: %w"), bucket, k, err)
 		}
 		count++
 	}

@@ -2,12 +2,14 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/BeCrafter/sail/internal/client"
 	"github.com/BeCrafter/sail/internal/config"
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -21,33 +23,33 @@ var (
 
 var mvCmd = &cobra.Command{
 	Use:   "mv <src> <dst>",
-	Short: "移动对象/文件(复制后删除源)",
-	Long: `移动对象/文件,等于复制后删除源。s3↔s3 走服务端 CopyObject+Delete,零带宽。
+	Short: "Move objects/files (copy then delete source)",
+	Long: `Move objects/files: copy then delete the source. s3-to-s3 uses server-side CopyObject + Delete with zero bandwidth.
 
-示例:
-  sail mv s3://bucket/a.txt s3://bucket/moved.txt     # 单对象,无确认
+Examples:
+  sail mv s3://bucket/a.txt s3://bucket/moved.txt     # single object, no confirm
   sail mv ./local.txt s3://bucket/uploaded.txt
   sail mv s3://bucket/file.txt ./retrieved.txt
-  sail mv -r s3://bucket/src/ s3://bucket/dst/         # 递归,交互确认
-  sail mv -r --yes s3://bucket/src/ s3://bucket/dst/   # 跳过确认
+  sail mv -r s3://bucket/src/ s3://bucket/dst/         # recursive, interactive confirm
+  sail mv -r --yes s3://bucket/src/ s3://bucket/dst/   # skip confirm
   sail mv -r --yes ./dir s3://bucket/mirror/`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		srcIsS3 := strings.HasPrefix(args[0], "s3://")
 		dstIsS3 := strings.HasPrefix(args[1], "s3://")
 		if !srcIsS3 && !dstIsS3 {
-			return fmt.Errorf("本地到本地的移动请使用系统 mv 命令")
+			return errors.New(i18n.T("local-to-local move should use the system mv command"))
 		}
 
 		// 递归移动有破坏性:复制静默失败后再删源会丢数据,故递归需确认。
 		// 单对象无确认(对齐 rm 单删,快、可恢复)。
 		if mvRecursive && !mvDryRun && !mvYes {
 			if !isTTY(os.Stdin) {
-				return fmt.Errorf("递归移动有破坏性,非交互环境请加 --yes 确认")
+				return errors.New(i18n.T("recursive move is destructive, add --yes to confirm in non-interactive environments"))
 			}
-			fmt.Printf("将递归移动 %s -> %s,确认? [y/N] ", args[0], args[1])
+			fmt.Printf(i18n.T("would recursively move %s -> %s, confirm? [y/N] "), args[0], args[1])
 			if !confirm() {
-				fmt.Println("已取消")
+				fmt.Println(i18n.T("canceled"))
 				return nil
 			}
 		}
@@ -101,7 +103,7 @@ func isTTY(f *os.File) bool {
 }
 
 func init() {
-	mvCmd.Flags().BoolVarP(&mvRecursive, "recursive", "r", false, "递归移动")
-	mvCmd.Flags().BoolVar(&mvYes, "yes", false, "跳过确认提示")
-	mvCmd.Flags().BoolVar(&mvDryRun, "dry-run", false, "只显示将执行的操作,不实际移动")
+	mvCmd.Flags().BoolVarP(&mvRecursive, "recursive", "r", false, "move recursively")
+	mvCmd.Flags().BoolVar(&mvYes, "yes", false, "skip the confirmation prompt")
+	mvCmd.Flags().BoolVar(&mvDryRun, "dry-run", false, "show what would be done without actually moving")
 }

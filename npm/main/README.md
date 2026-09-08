@@ -1,41 +1,42 @@
 # @becrafter/sail
 
-> S3 协议对象存储 CLI —— 单个静态二进制,零运行时依赖。
+> S3 object storage CLI — a single static binary, zero runtime dependencies.
 
-`sail` 面向任何兼容 S3 协议的对象存储服务(AWS S3、MinIO、阿里云 OSS 及各类自建 S3 兼容服务),提供上传/下载、列举、删除、复制/移动、内容查看、预签名 URL 等日常操作。本 npm 包是跨平台安装器,负责按平台拉取对应的静态二进制。
+`sail` works with any S3-compatible object storage service (AWS S3, MinIO, Alibaba Cloud OSS, and various self-hosted S3-compatible services), providing everyday operations such as upload/download, listing, deletion, copy/move, content viewing, and presigned URLs. This npm package is a cross-platform installer: it fetches the matching static binary for your platform.
 
-## 安装
+## Install
 
 ```bash
 npm install -g @becrafter/sail
 ```
 
-## 环境要求
+## Requirements
 
-- Node.js `>= 18`(仅用于安装器分发二进制,`sail` 本身无运行时依赖)
-- 支持平台:
+- Node.js `>= 18` (only used by the installer to distribute the binary; `sail` itself has no runtime dependencies)
+- Supported platforms:
 
-| OS | Arch | 平台子包 |
-|----|------|----------|
+| OS | Arch | Platform subpackage |
+|----|------|---------------------|
 | macOS | arm64 (Apple Silicon) | `@becrafter/sail-darwin-arm64` |
 | macOS | x64 (Intel) | `@becrafter/sail-darwin-x64` |
 | Linux | arm64 | `@becrafter/sail-linux-arm64` |
 | Linux | x64 | `@becrafter/sail-linux-x64` |
 
-安装后 npm 会按你的操作系统和 CPU 架构自动只下载一个匹配的平台二进制子包,`sail` 命令开箱即用。
+After install, npm automatically downloads only the one platform binary matching your OS and CPU architecture — the `sail` command works out of the box.
 
-## 快速开始
+## Quick start
 
 ```bash
-sail config setup                               # 交互式生成/更新 ~/.sail/config.yaml
-sail cp local.txt s3://mybucket/path/local.txt  # 上传
-sail ls s3://mybucket/                          # 列举
-sail cp s3://mybucket/key local.txt             # 下载
+sail config setup                               # interactively generate/update ~/.sail/config.yaml
+sail cp local.txt s3://mybucket/path/local.txt  # upload
+sail ls s3://mybucket/                          # list
+sail cp s3://mybucket/key local.txt             # download
 ```
 
-配置示例:
+Example config:
 
 ```yaml
+lang: en
 default-profile: prod
 profiles:
   prod:
@@ -46,31 +47,31 @@ profiles:
     region: ""
     path-style: true
     cdn-domain: <your-cdn-domain>
-    # cdn-bucket-path: false  # CDN 域名是否已含 bucket 路径;注释掉则自动检测
+    # cdn-bucket-path: false  # whether the CDN domain already includes the bucket path; comment out to auto-detect
 ```
 
-密钥用 `${VAR}` 引用环境变量,避免在配置文件中明文存储。
+Keys reference environment variables via `${VAR}`, avoiding plaintext storage in the config file.
 
-## 常用命令
+## Common commands
 
-| 命令 | 说明 |
-|------|------|
-| `sail cp` / `upload` / `download` | 上传/下载(本地↔s3、s3↔s3) |
-| `sail ls` / `tree` | 列举与树形查看 |
-| `sail rm` | 删除对象 |
-| `sail mv` | 移动对象(复制后删源) |
-| `sail stat` | 查看对象元信息 |
-| `sail view` / `cat` | 查看对象内容(多格式智能渲染) |
-| `sail presign` | 生成预签名 URL |
-| `sail url` | 生成 CDN 访问地址 |
+| Command | Description |
+|---------|-------------|
+| `sail cp` / `upload` / `download` | Upload/download (local↔s3, s3↔s3) |
+| `sail ls` / `tree` | List and tree view |
+| `sail rm` | Delete objects |
+| `sail mv` | Move objects (copy then delete source) |
+| `sail stat` | View object metadata |
+| `sail view` / `cat` | View object contents (multi-format smart rendering) |
+| `sail presign` | Generate presigned URLs |
+| `sail url` | Generate a CDN access URL |
 
-## 文档
+## Documentation
 
-完整文档、配置说明、路径语法、与 AWS CLI 对照、实现细节等,见[仓库 README](https://github.com/BeCrafter/sail#readme)。
+Full documentation — config guide, path syntax, AWS CLI cross-check, implementation details, and more — see the [repo README](https://github.com/BeCrafter/sail#readme).
 
-- 源码:<https://github.com/BeCrafter/sail>
-- 问题反馈:<https://github.com/BeCrafter/sail/issues>
+- Source: <https://github.com/BeCrafter/sail>
+- Issues: <https://github.com/BeCrafter/sail/issues>
 
-## 许可证
+## License
 
 MIT

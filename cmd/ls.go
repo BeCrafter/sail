@@ -2,12 +2,14 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/BeCrafter/sail/internal/client"
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
@@ -26,13 +28,17 @@ var (
 
 var lsCmd = &cobra.Command{
 	Use:   "ls [s3://bucket/prefix]",
-	Short: "列举对象或桶",
-	Long: `列举对象或桶。0 个参数时列举默认桶(s3://bucket 合法但无谓);
--l 长格式(大小+修改时间),可叠加 -t 按时间、-S 按大小、-r 逆序、--human 人类可读;
--d 只列子目录(逗号分隔前缀,不含文件),对齐 ls -d;--buckets 列出所有桶。
-不带排序 flag 时流式输出(大桶低内存),带排序 flag 时全量收集后打印。
+	Short: "List objects or buckets",
+	Long: `List objects or buckets. With no arguments, lists the default bucket
+(s3://bucket is accepted but pointless);
+-l long format (size + last-modified time), combinable with -t to sort by time,
+-S by size, -r to reverse, and --human for human-readable sizes;
+-d lists sub-directories only (comma-separated prefixes, no files), mirroring ls -d;
+--buckets lists all buckets.
+Without sorting flags, output is streamed (low memory on large buckets);
+with sorting flags, all objects are collected first and then printed.
 
-示例:
+Examples:
   sail ls s3://bucket/prefix/
   sail ls -l -t --human s3://bucket/
   sail ls -d s3://bucket/prefix/
@@ -56,7 +62,7 @@ var lsCmd = &cobra.Command{
 		var bucket, prefix string
 		if len(args) == 0 {
 			if r.Bucket == "" {
-				return fmt.Errorf("未指定 bucket,请用 s3://bucket/prefix 或在配置中设置默认 bucket")
+				return errors.New(i18n.T("no bucket specified; use s3://bucket/prefix or set a default bucket in config"))
 			}
 			bucket = r.Bucket
 		} else {
@@ -80,7 +86,7 @@ var lsCmd = &cobra.Command{
 
 func listObjects(ctx context.Context, s3c *s3.Client, bucket, prefix string, long bool) error {
 	if bucket == "" {
-		return fmt.Errorf("未指定 bucket")
+		return errors.New(i18n.T("no bucket specified"))
 	}
 	paginator := s3.NewListObjectsV2Paginator(s3c, &s3.ListObjectsV2Input{
 		Bucket: &bucket,
@@ -89,7 +95,7 @@ func listObjects(ctx context.Context, s3c *s3.Client, bucket, prefix string, lon
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
-			return fmt.Errorf("列举失败: %w", err)
+			return fmt.Errorf(i18n.T("list failed: %w"), err)
 		}
 		for _, obj := range page.Contents {
 			printObject(obj, bucket, long)
@@ -102,7 +108,7 @@ func listObjects(ctx context.Context, s3c *s3.Client, bucket, prefix string, lon
 // 未开启排序 flag 时 listObjects 保持流式路径,避免大桶无谓内存。
 func listObjectsSorted(ctx context.Context, s3c *s3.Client, bucket, prefix string, long bool) error {
 	if bucket == "" {
-		return fmt.Errorf("未指定 bucket")
+		return errors.New(i18n.T("no bucket specified"))
 	}
 	objs, err := collectAllObjects(ctx, s3c, bucket, prefix)
 	if err != nil {
@@ -170,7 +176,7 @@ func objTime(o types.Object) time.Time {
 
 func listDirs(ctx context.Context, s3c *s3.Client, bucket, prefix string) error {
 	if bucket == "" {
-		return fmt.Errorf("未指定 bucket")
+		return errors.New(i18n.T("no bucket specified"))
 	}
 	// delimiter 模式下,prefix 必须以 "/" 结尾。否则 S3 会把本层所有 key 汇总成
 	// 单个 "prefix/" 的 CommonPrefix(如 "pdf/"),去前缀后变成空串,导致无输出。
@@ -186,7 +192,7 @@ func listDirs(ctx context.Context, s3c *s3.Client, bucket, prefix string) error 
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
-			return fmt.Errorf("列举失败: %w", err)
+			return fmt.Errorf(i18n.T("list failed: %w"), err)
 		}
 		for _, cp := range page.CommonPrefixes {
 			if cp.Prefix == nil {
@@ -201,11 +207,11 @@ func listDirs(ctx context.Context, s3c *s3.Client, bucket, prefix string) error 
 }
 
 func init() {
-	lsCmd.Flags().BoolVarP(&lsLong, "long", "l", false, "显示大小和修改时间")
-	lsCmd.Flags().BoolVarP(&lsDirsOnly, "dir", "d", false, "只列目录(子前缀,不含文件)")
-	lsCmd.Flags().BoolVarP(&lsTime, "time", "t", false, "按修改时间排序(新→旧)")
-	lsCmd.Flags().BoolVarP(&lsBySize, "size", "S", false, "按大小排序(大→小)")
-	lsCmd.Flags().BoolVarP(&lsReverse, "reverse", "r", false, "逆序输出")
-	lsCmd.Flags().BoolVar(&lsHuman, "human", false, "人类可读大小(配合 -l)")
-	lsCmd.Flags().BoolVar(&lsBuckets, "buckets", false, "列出所有桶(ListBuckets)")
+	lsCmd.Flags().BoolVarP(&lsLong, "long", "l", false, "show size and last-modified time")
+	lsCmd.Flags().BoolVarP(&lsDirsOnly, "dir", "d", false, "list sub-directories only (no files)")
+	lsCmd.Flags().BoolVarP(&lsTime, "time", "t", false, "sort by last-modified time (newest first)")
+	lsCmd.Flags().BoolVarP(&lsBySize, "size", "S", false, "sort by size (largest first)")
+	lsCmd.Flags().BoolVarP(&lsReverse, "reverse", "r", false, "reverse output order")
+	lsCmd.Flags().BoolVar(&lsHuman, "human", false, "human-readable sizes (with -l)")
+	lsCmd.Flags().BoolVar(&lsBuckets, "buckets", false, "list all buckets (ListBuckets)")
 }

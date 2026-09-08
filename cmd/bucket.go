@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/BeCrafter/sail/internal/client"
+	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
 	"github.com/spf13/cobra"
@@ -14,11 +15,11 @@ import (
 
 var mbCmd = &cobra.Command{
 	Use:   "mb <s3://bucket>...",
-	Short: "创建桶",
-	Long: `创建桶(CreateBucket)。桶名需符合所接入 S3 服务的命名规则。
-重复创建同一桶可能被服务拒绝(取决于服务实现),失败时提示改用已存在的桶。
+	Short: "Create buckets",
+	Long: `Create buckets (CreateBucket). Bucket names must follow the naming rules of the S3 service you connect to.
+Recreating the same bucket may be rejected by the service (implementation-dependent); on failure you are prompted to use the existing bucket instead.
 
-示例:
+Examples:
   sail mb s3://my-new-bucket`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -37,13 +38,13 @@ var mbCmd = &cobra.Command{
 				return err
 			}
 			if p.Key != "" {
-				return fmt.Errorf("mb 只接受桶级路径(不带 key): %s", arg)
+				return fmt.Errorf(i18n.T("mb only accepts bucket-level paths (without key): %s"), arg)
 			}
 			_, err = s3c.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: &p.Bucket})
 			if err != nil {
-				return fmt.Errorf("创建桶失败: %w", err)
+				return fmt.Errorf(i18n.T("failed to create bucket: %w"), err)
 			}
-			fmt.Printf("已创建桶 s3://%s\n", p.Bucket)
+			fmt.Printf(i18n.T("created bucket s3://%s\n"), p.Bucket)
 		}
 		return nil
 	},
@@ -51,11 +52,11 @@ var mbCmd = &cobra.Command{
 
 var rbCmd = &cobra.Command{
 	Use:   "rb <s3://bucket>...",
-	Short: "删除空桶",
-	Long: `删除空桶(DeleteBucket)。桶内仍有对象或占位对象时服务会拒绝,
-需先清空(如 sail rm -r s3://bucket/)。删除后再次创建通常有延迟,请稍候重试。
+	Short: "Delete empty buckets",
+	Long: `Delete empty buckets (DeleteBucket). The service rejects the call when the bucket still holds objects or placeholder objects;
+empty it first (e.g. sail rm -r s3://bucket/). Recreation after deletion usually has a delay — wait and retry.
 
-示例:
+Examples:
   sail rb s3://my-old-bucket`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -74,16 +75,16 @@ var rbCmd = &cobra.Command{
 				return err
 			}
 			if p.Key != "" {
-				return fmt.Errorf("rb 只接受桶级路径(不带 key): %s", arg)
+				return fmt.Errorf(i18n.T("rb only accepts bucket-level paths (without key): %s"), arg)
 			}
 			_, err = s3c.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: &p.Bucket})
 			if err != nil {
 				if isBucketNotEmpty(err) {
-					return fmt.Errorf("桶非空,请先用 sail rm -r s3://%s/ 清空: %w", p.Bucket, err)
+					return fmt.Errorf(i18n.T("bucket not empty; empty it first with sail rm -r s3://%s/: %w"), p.Bucket, err)
 				}
-				return fmt.Errorf("删除桶失败: %w", err)
+				return fmt.Errorf(i18n.T("failed to delete bucket: %w"), err)
 			}
-			fmt.Printf("已删除桶 s3://%s\n", p.Bucket)
+			fmt.Printf(i18n.T("deleted bucket s3://%s\n"), p.Bucket)
 		}
 		return nil
 	},
@@ -110,7 +111,7 @@ func isBucketNotEmpty(err error) bool {
 func listBuckets(ctx context.Context, s3c *s3.Client) error {
 	resp, err := s3c.ListBuckets(ctx, &s3.ListBucketsInput{})
 	if err != nil {
-		return fmt.Errorf("列举桶失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to list buckets: %w"), err)
 	}
 	for _, b := range resp.Buckets {
 		name := "<unknown>"
