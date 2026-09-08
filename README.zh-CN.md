@@ -32,6 +32,16 @@ npm install -g @becrafter/sail
 
 npm 会按操作系统和 CPU 架构自动只下载一个匹配的平台二进制,`sail` 命令开箱即用。支持 macOS(arm64/x64)、Linux(arm64/x64),二进制托管在 npm registry,无需额外联网下载。
 
+**免安装、临时直用(npx)**:无需全局安装,直接用最新发布版:
+
+```bash
+npx -y @becrafter/sail@latest <命令>
+npx -y @becrafter/sail@latest --help
+npx -y @becrafter/sail@latest config setup
+```
+
+`-y` 自动确认下载该包;`@latest` 固定拉取最新发布版(而非可能过期的本地缓存),确保始终运行当前版本。
+
 ### 方式二:下载二进制
 
 到 [Releases 页面](https://github.com/BeCrafter/sail/releases)下载对应平台的二进制,放入 `PATH` 即可。

@@ -32,6 +32,16 @@ npm install -g @becrafter/sail
 
 npm automatically downloads a single binary matching your OS and CPU architecture — the `sail` command works out of the box. Supports macOS (arm64/x64) and Linux (arm64/x64). Binaries are hosted on the npm registry, so no additional download is needed.
 
+**No-install one-off run via npx** — grab and run the latest published version without a global install:
+
+```bash
+npx -y @becrafter/sail@latest <command>
+npx -y @becrafter/sail@latest --help
+npx -y @becrafter/sail@latest config setup
+```
+
+`-y` auto-confirms downloading the package; `@latest` pins the most recent published release instead of a stale cached one, so you always run the current version.
+
 ### Method 2: Download a binary
 
 Download the binary for your platform from the [Releases page](https://github.com/BeCrafter/sail/releases) and place it in your `PATH`.

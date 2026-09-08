@@ -6,9 +6,23 @@
 
 ## Install
 
+### Global install
+
 ```bash
 npm install -g @becrafter/sail
 ```
+
+### No-install one-off run via npx
+
+Run the latest published version directly, without a global install:
+
+```bash
+npx -y @becrafter/sail@latest <command>
+npx -y @becrafter/sail@latest --help
+npx -y @becrafter/sail@latest config setup
+```
+
+`-y` auto-confirms downloading the package; `@latest` pins the most recent published release instead of a stale cached one, so you always run the current version.
 
 ## Requirements
 
@@ -54,16 +68,29 @@ Keys reference environment variables via `${VAR}`, avoiding plaintext storage in
 
 ## Common commands
 
-| Command | Description |
-|---------|-------------|
-| `sail cp` / `upload` / `download` | Upload/download (local↔s3, s3↔s3) |
-| `sail ls` / `tree` | List and tree view |
-| `sail rm` | Delete objects |
-| `sail mv` | Move objects (copy then delete source) |
-| `sail stat` | View object metadata |
-| `sail view` / `cat` | View object contents (multi-format smart rendering) |
-| `sail presign` | Generate presigned URLs |
-| `sail url` | Generate a CDN access URL |
+| Group | Command | Description |
+|-------|---------|-------------|
+| Transfer | `sail cp` / `upload` / `download` | Upload/download; s3↔s3 uses server-side copy (zero bandwidth) |
+| Transfer | `sail mv` | Move objects/files (copy then delete source) |
+| Transfer | `sail rm` | Delete objects (multi-arg / glob / recursive / piped) |
+| Transfer | `sail sync` | rsync-style incremental sync (size + mtime, `--checksum`, filters, `--delete`) |
+| Transfer | `sail mb` / `rb` | Create / delete buckets |
+| Transfer | `sail mkdir` / `rmdir` | Create / delete directory placeholder objects |
+| List & stats | `sail ls` | List objects or buckets (long format / sort / dirs) |
+| List & stats | `sail tree` | Show object/file tree |
+| List & stats | `sail find` | Find objects by name/size/time |
+| List & stats | `sail du` | Summarize object size under a prefix |
+| List & stats | `sail stat` | View object/file metadata |
+| Content | `sail view` / `cat` | View contents (multi-format smart rendering / raw) |
+| Content | `sail head` / `tail` | Read the head / tail of an object/file (Range) |
+| Content | `sail wc` | Count lines, words, and bytes |
+| Content | `sail grep` | Regex line-by-line search |
+| Checksum & access | `sail checksum` | Compute md5/sha256 or show the raw ETag |
+| Checksum & access | `sail presign` | Generate a presigned download URL |
+| Checksum & access | `sail url` | Generate a CDN access URL |
+| Config | `sail config` | Manage configuration (`config setup` wizard) |
+
+All commands support `--help` for detailed usage and examples.
 
 ## Documentation
 
