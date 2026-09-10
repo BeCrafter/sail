@@ -20,8 +20,10 @@ import (
 const partSize = 5 * 1024 * 1024 // 5MB,S3 multipart 最小分片大小
 
 // Uploader 包装 s3manager,提供单文件/目录上传。
+// s3 字段声明为 manager.UploadAPIClient 接口(而非具体 *s3.Client),
+// 使上传路径可在测试中用 mock 覆盖;真实客户端天然满足该接口。
 type Uploader struct {
-	s3       *s3.Client
+	s3       manager.UploadAPIClient
 	uploader *manager.Uploader
 }
 
@@ -87,7 +89,6 @@ func (u *Uploader) UploadStream(ctx context.Context, r io.Reader, bucket, key st
 
 // UploadDir 递归上传本地目录到 bucket 下的 prefix。
 func (u *Uploader) UploadDir(ctx context.Context, localDir, bucket, prefix string) error {
-	prefix = strings.Trim(prefix, "/")
 	err := filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -99,15 +100,22 @@ func (u *Uploader) UploadDir(ctx context.Context, localDir, bucket, prefix strin
 		if err != nil {
 			return err
 		}
-		rel = filepath.ToSlash(rel)
-		key := rel
-		if prefix != "" {
-			key = prefix + "/" + rel
-		}
+		key := buildKey(prefix, filepath.ToSlash(rel))
 		fmt.Printf(i18n.T("uploading %s -> s3://%s/%s\n"), path, bucket, key)
 		return u.UploadFile(ctx, path, bucket, key)
 	})
 	return err
+}
+
+// buildKey 在 S3 key 的 base prefix 之上追加子路径 rel。
+// prefix 首尾的 / 会被裁掉(空 prefix 直接返回 rel),避免拼出形如
+// "prefix//rel" 或 "/rel" 的脏 key。
+func buildKey(prefix, rel string) string {
+	prefix = strings.Trim(prefix, "/")
+	if prefix == "" {
+		return rel
+	}
+	return prefix + "/" + rel
 }
 
 // progressReader 跟踪读取字节数并周期性打印进度。

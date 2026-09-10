@@ -106,3 +106,227 @@ profiles:
 		t.Errorf("cdn-bucket-path: false 应为 *false,got %v", r.CDNBucketPath)
 	}
 }
+
+// TestResolveDefaultProfile 校验 profile 为空时的回退链:default-profile → "prod"。
+func TestResolveDefaultProfile(t *testing.T) {
+	// 配置了 default-profile:用默认
+	cfg, err := Load(writeConfig(t, `default-profile: test
+profiles:
+  prod:
+    endpoint: https://p.example.com
+    access-key: ak
+    secret-key: sk
+  test:
+    endpoint: https://t.example.com
+    access-key: ak
+    secret-key: sk
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	r, err := cfg.Resolve("") // 空 profile → default-profile
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if r.ProfileName != "test" || r.Endpoint != "https://t.example.com" {
+		t.Errorf("应回退到 default-profile test,got %q %q", r.ProfileName, r.Endpoint)
+	}
+
+	// 无 default-profile:回退 prod
+	cfg, err = Load(writeConfig(t, `profiles:
+  prod:
+    endpoint: https://p.example.com
+    access-key: ak
+    secret-key: sk
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	r, err = cfg.Resolve("")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if r.ProfileName != "prod" {
+		t.Errorf("无 default 应回退 prod,got %q", r.ProfileName)
+	}
+}
+
+func TestResolveProfileNotFound(t *testing.T) {
+	cfg, err := Load(writeConfig(t, `profiles:
+  prod:
+    endpoint: https://p.example.com
+    access-key: ak
+    secret-key: sk
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, err := cfg.Resolve("ghost"); err == nil {
+		t.Errorf("Resolve(ghost) 期望报错")
+	}
+}
+
+func TestResolveMissingKeys(t *testing.T) {
+	// 缺 endpoint
+	cfg, err := Load(writeConfig(t, `profiles:
+  prod:
+    access-key: ak
+    secret-key: sk
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, err := cfg.Resolve("prod"); err == nil {
+		t.Errorf("缺 endpoint 应报错")
+	}
+
+	// 缺 access-key/secret-key
+	cfg, err = Load(writeConfig(t, `profiles:
+  prod:
+    endpoint: https://p.example.com
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, err := cfg.Resolve("prod"); err == nil {
+		t.Errorf("缺密钥应报错")
+	}
+}
+
+// TestResolvePathStyleDefaultTrue 校验 path-style 缺省及显式 false 都被强制为 true。
+func TestResolvePathStyleDefaultTrue(t *testing.T) {
+	// 缺省:应为 true
+	r := resolveFrom(t, `default-profile: prod
+profiles:
+  prod:
+    endpoint: https://p.example.com
+    access-key: ak
+    secret-key: sk
+`)
+	if !r.PathStyle {
+		t.Errorf("缺省 path-style 应为 true")
+	}
+
+	// 显式 false:仍强制为 true
+	r = resolveFrom(t, `default-profile: prod
+profiles:
+  prod:
+    endpoint: https://p.example.com
+    access-key: ak
+    secret-key: sk
+    path-style: false
+`)
+	if !r.PathStyle {
+		t.Errorf("path-style: false 应被强制为 true(自建 S3 兼容服务默认)")
+	}
+
+	// 显式 true:保持 true
+	r = resolveFrom(t, `default-profile: prod
+profiles:
+  prod:
+    endpoint: https://p.example.com
+    access-key: ak
+    secret-key: sk
+    path-style: true
+`)
+	if !r.PathStyle {
+		t.Errorf("path-style: true 应保持 true")
+	}
+}
+
+// TestResolveExpandEnv 校验 ${VAR} 在配置值中被展开;未设置则置空。
+func TestResolveExpandEnv(t *testing.T) {
+	t.Setenv("SAIL_TEST_AK", "from-env-ak")
+	t.Setenv("SAIL_TEST_SK", "from-env-sk")
+	// endpoint 混用文本 + 占位符
+	t.Setenv("SAIL_TEST_HOST", "s3.example.com")
+	r := resolveFrom(t, `default-profile: prod
+profiles:
+  prod:
+    endpoint: https://${SAIL_TEST_HOST}:9000
+    access-key: ${SAIL_TEST_AK}
+    secret-key: ${SAIL_TEST_SK}
+`)
+	if r.Endpoint != "https://s3.example.com:9000" {
+		t.Errorf("endpoint 展开 = %q,期望 https://s3.example.com:9000", r.Endpoint)
+	}
+	if r.AccessKey != "from-env-ak" || r.SecretKey != "from-env-sk" {
+		t.Errorf("密钥展开错误: %q/%q", r.AccessKey, r.SecretKey)
+	}
+
+	// 占位符未设置 → 空串 → 触发缺密钥报错
+	cfg, err := Load(writeConfig(t, `default-profile: prod
+profiles:
+  prod:
+    endpoint: https://p.example.com
+    access-key: ${SAIL_UNSET_AK_XYZ}
+    secret-key: ${SAIL_UNSET_SK_XYZ}
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, err := cfg.Resolve("prod"); err == nil {
+		t.Errorf("占位符未设置导致密钥为空,应报错")
+	}
+}
+
+// TestResolveEnvOverride 校验 SAIL_* 环境变量优先于配置文件。
+func TestResolveEnvOverride(t *testing.T) {
+	t.Setenv("SAIL_ENDPOINT", "https://env.example.com")
+	t.Setenv("SAIL_ACCESS_KEY", "env-ak")
+	t.Setenv("SAIL_SECRET_KEY", "env-sk")
+	t.Setenv("SAIL_BUCKET", "env-bucket")
+	t.Setenv("SAIL_CDN_DOMAIN", "https://env-cdn.example.com")
+	r := resolveFrom(t, `default-profile: prod
+profiles:
+  prod:
+    endpoint: https://cfg.example.com
+    access-key: cfg-ak
+    secret-key: cfg-sk
+    bucket: cfg-bucket
+    cdn-domain: https://cfg-cdn.example.com
+`)
+	if r.Endpoint != "https://env.example.com" || r.AccessKey != "env-ak" ||
+		r.SecretKey != "env-sk" || r.Bucket != "env-bucket" || r.CDNDomain != "https://env-cdn.example.com" {
+		t.Errorf("环境变量应覆盖配置文件: %+v", r)
+	}
+}
+
+func TestResolveFieldPassthrough(t *testing.T) {
+	r := resolveFrom(t, `default-profile: prod
+profiles:
+  prod:
+    endpoint: https://p.example.com
+    access-key: ak
+    secret-key: sk
+    bucket: mybucket
+    region: us-west-2
+    path-style: true
+    cdn-domain: https://cdn.example.com
+`)
+	if r.Bucket != "mybucket" || r.Region != "us-west-2" || r.CDNDomain != "https://cdn.example.com" {
+		t.Errorf("字段透传错误: %+v", r)
+	}
+}
+
+// TestLoadErrors 校验 Load 对缺失文件 / 非法 YAML 的报错。
+func TestLoadErrors(t *testing.T) {
+	if _, err := Load(filepath.Join(t.TempDir(), "nope.yaml")); err == nil {
+		t.Errorf("缺失文件应报错")
+	}
+	if _, err := Load(writeConfig(t, ":\n  bad: [yaml")); err == nil {
+		t.Errorf("非法 YAML 应报错")
+	}
+}
+
+// TestConfigPath 校验 ConfigPath 拼接 ~/.sail/config.yaml。
+func TestConfigPath(t *testing.T) {
+	t.Setenv("HOME", "/tmp/fake-home")
+	p, err := ConfigPath()
+	if err != nil {
+		t.Fatalf("ConfigPath: %v", err)
+	}
+	if p != "/tmp/fake-home/.sail/config.yaml" {
+		t.Errorf("ConfigPath = %q,期望 /tmp/fake-home/.sail/config.yaml", p)
+	}
+}
