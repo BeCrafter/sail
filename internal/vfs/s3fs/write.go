@@ -1,12 +1,18 @@
 package s3fs
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
+	"io"
 	"mime"
 	"os"
 	"path"
+	"sync"
 	"syscall"
 	"time"
 
@@ -41,6 +47,8 @@ func (f *FS) OpenWrite(ctx context.Context, p string) (vfs.WriteHandle, error) {
 		// 未声明长度时必须是 -1(未知),不能是 0——0 会被当成"声明了 0 字节",
 		// 让 Commit 把正常写入判成长度不符。
 		opts: vfs.WriteOptions{ContentLength: -1},
+		// 暂存时顺手算 SHA-256 作为分片版本号,零额外 IO。
+		sum: sha256.New(),
 	}, nil
 }
 
@@ -55,6 +63,8 @@ type writeFile struct {
 
 	tmp     *os.File
 	tmpPath string
+	// sum 是暂存内容的 SHA-256,作为分片版本号;Commit 后置 nil。
+	sum hash.Hash
 
 	opts         vfs.WriteOptions
 	size         int64
@@ -96,6 +106,9 @@ func (w *writeFile) Write(p []byte) (int, error) {
 	}
 	n, err := w.tmp.Write(p)
 	w.size += int64(n)
+	if n > 0 && w.sum != nil {
+		w.sum.Write(p[:n])
+	}
 	if err != nil {
 		if errors.Is(err, syscall.ENOSPC) {
 			w.writeErr = fmt.Errorf("s3fs: 暂存目录空间不足: %w", vfs.ErrInsufficientStorage)
@@ -126,8 +139,12 @@ func (w *writeFile) reserve() error {
 	return nil
 }
 
-// Commit 关闭暂存,按显式 PartSize/Concurrency 切块上传,再回读一次
-// HeadObject 拿权威 ETag——PUT/GET/PROPFIND 三处 ETag 必须一致。
+// Commit 关闭暂存,选择存储表示后提交:
+//   - 未开分片,或文件不超过 --chunk-size:1 文件 = 1 对象(P1 现状)。
+//   - 开启分片且超过 --chunk-size:片全部写完 → manifest 最后写,唯一提交点。
+//
+// 两条路都以「回读一次 HeadObject 拿权威 ETag」收尾,保证 PUT/GET/PROPFIND
+// 三处 ETag 一致。
 func (w *writeFile) Commit(ctx context.Context) (vfs.FileInfo, error) {
 	if w.committed {
 		return w.info, nil
@@ -152,6 +169,35 @@ func (w *writeFile) Commit(ctx context.Context) (vfs.FileInfo, error) {
 		}
 		w.tmp = nil
 	}
+
+	contentType := w.opts.ContentType
+	if contentType == "" {
+		contentType = mime.TypeByExtension(path.Ext(w.logical))
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	var (
+		info vfs.FileInfo
+		err  error
+	)
+	if w.fs.chunkedUpload && w.fs.chunkSize > 0 && w.size > w.fs.chunkSize {
+		info, err = w.commitChunked(ctx, contentType)
+	} else {
+		info, err = w.commitPlain(ctx, contentType)
+	}
+	if err != nil {
+		return vfs.FileInfo{}, err
+	}
+	w.committed = true
+	w.info = info
+	return info, nil
+}
+
+// commitPlain 是 P1 的存储表示:1 文件 = 1 对象,按显式 PartSize/Concurrency 走
+// multipart 上传。
+func (w *writeFile) commitPlain(ctx context.Context, contentType string) (vfs.FileInfo, error) {
 	body, err := os.Open(w.tmpPath)
 	if err != nil {
 		return vfs.FileInfo{}, fmt.Errorf("s3fs: 读取暂存文件失败: %w", err)
@@ -169,13 +215,6 @@ func (w *writeFile) Commit(ctx context.Context) (vfs.FileInfo, error) {
 		// 会导致存储内容被 trailer 污染(与 internal/uploader 同因)。
 		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
 	})
-	contentType := w.opts.ContentType
-	if contentType == "" {
-		contentType = mime.TypeByExtension(path.Ext(w.logical))
-	}
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
 	if _, err := uploader.Upload(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(w.fs.bucket),
 		Key:         aws.String(w.key),
@@ -203,9 +242,128 @@ func (w *writeFile) Commit(ctx context.Context) (vfs.FileInfo, error) {
 		// 退化为启发式(客户端至多多校验一次)。
 		fmt.Fprintf(os.Stderr, "警告: 上传成功但回读 %s 元信息失败: %v\n", w.logical, err)
 	}
-	w.committed = true
-	w.info = info
 	return info, nil
+}
+
+// commitChunked 是 P2 的存储表示:暂存按 --chunk-size 切片上传到
+// .sail/parts/<version>/,最后把 manifest 写到逻辑 key —— 那一刻才是提交点。
+// 提交前逻辑 key 上仍是旧对象(或不存在),客户端看不到半成品。
+func (w *writeFile) commitChunked(ctx context.Context, contentType string) (vfs.FileInfo, error) {
+	version := hex.EncodeToString(w.sum.Sum(nil))
+	w.sum = nil
+
+	m := &manifest{
+		SailManifest: manifestMagic,
+		Version:      version,
+		Size:         w.size,
+		ChunkSize:    w.fs.chunkSize,
+		ContentType:  contentType,
+	}
+	var (
+		offset int64
+		idx    int
+	)
+	for offset < w.size {
+		length := w.fs.chunkSize
+		if rem := w.size - offset; rem < length {
+			length = rem
+		}
+		m.Chunks = append(m.Chunks, manifestChunk{Offset: offset, Length: length})
+		offset += length
+		idx++
+	}
+
+	etags, err := w.uploadParts(ctx, version, m.Chunks)
+	if err != nil {
+		// 片已写了一半:逻辑 key 未被触碰,分片目录是孤儿(对列目录不可见),
+		// 由 GC 收口。这里只如实报错,不掩盖。
+		return vfs.FileInfo{}, fmt.Errorf("s3fs: %s 上传分片失败: %w", w.logical, err)
+	}
+	for i := range m.Chunks {
+		m.Chunks[i].ETag = etags[i]
+	}
+
+	// 先记下旧版本:manifest 写完后再读就是新版本了。
+	old, _ := w.oldVersion(ctx)
+
+	body, err := m.encode()
+	if err != nil {
+		return vfs.FileInfo{}, err
+	}
+	out, err := w.fs.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(w.fs.bucket),
+		Key:    aws.String(w.key),
+		Body:   bytes.NewReader(body),
+		// manifest 对象自身的 Content-Type 必须是原文件类型(不是 application/json),
+		// 否则 Finder / Office 直开会当成 JSON。
+		ContentType: aws.String(contentType),
+		Metadata: map[string]string{
+			"sail-manifest-key": version,
+			"sail-total-size":   fmt.Sprintf("%d", w.size),
+		},
+	})
+	if err != nil {
+		return vfs.FileInfo{}, fmt.Errorf("s3fs: 提交 %s 的 manifest 失败: %w", w.logical, err)
+	}
+	// 提交点已过:新版本对客户端可见。此后才尽力清理旧版本的片。
+	if old != "" && old != version {
+		w.fs.cleanupVersion(ctx, old)
+	}
+	fmt.Fprintf(os.Stderr, "sail: %s 已分片存储: %d 片,片大小 %d 字节\n", w.logical, len(m.Chunks), w.fs.chunkSize)
+	return manifestInfo(w.logical, m, aws.ToString(out.ETag), time.Now()), nil
+}
+
+// uploadParts 并发上传全部片,返回与 parts 同序的 ETag。并发度取
+// concurrency,内存预算 ≈ (concurrency+1) × chunkSize。
+func (w *writeFile) uploadParts(ctx context.Context, version string, parts []manifestChunk) ([]string, error) {
+	etags := make([]string, len(parts))
+	sem := make(chan struct{}, w.fs.concurrency)
+	errCh := make(chan error, len(parts))
+	var wg sync.WaitGroup
+
+	for i := range parts {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			etag, err := w.uploadPart(ctx, version, i, parts[i])
+			if err != nil {
+				errCh <- err
+				return
+			}
+			etags[i] = etag
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return etags, nil
+}
+
+func (w *writeFile) uploadPart(ctx context.Context, version string, idx int, c manifestChunk) (string, error) {
+	sec, err := os.Open(w.tmpPath)
+	if err != nil {
+		return "", fmt.Errorf("读取暂存文件失败: %w", err)
+	}
+	defer sec.Close()
+	// SectionReader 既限定本片区间,又是 io.ReadSeeker —— SDK 计算 payload 时
+	// 会回卷重读,不可 seek 的 body 会直接报 "request stream is not seekable"。
+	out, err := w.fs.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(w.fs.bucket),
+		Key:    aws.String(partKey(version, idx)),
+		Body:   io.NewSectionReader(sec, c.Offset, c.Length),
+		// 片是内部对象,固定 octet-stream;原文件类型记在 manifest 上。
+		ContentType: aws.String("application/octet-stream"),
+	})
+	if err != nil {
+		return "", fmt.Errorf("上传片 %d 失败: %w", idx, err)
+	}
+	return aws.ToString(out.ETag), nil
 }
 
 // Abort 丢弃暂存,幂等。

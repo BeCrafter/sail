@@ -30,6 +30,8 @@ type serveWebdavFlags struct {
 	backendMaxSize    string
 	maxUploadSize     string
 	stagingDir        string
+	chunkedUpload     bool
+	chunkSize         string
 	printWindowsSetup bool
 }
 
@@ -58,6 +60,10 @@ Design boundaries:
     client-side procedure.
   - LOCK is an in-process lock, lost on restart and not shared across instances.
   - Directory-level MOVE/COPY returns 501, leaving the client to fall back to "copy + delete".
+  - With --chunked-upload on, files larger than --chunk-size are stored as chunks under the
+    reserved .sail/ prefix plus a small manifest object at the logical key: the bucket then
+    contains .sail/ objects, and "sail presign" fails loud on such a bucket because a presigned
+    URL would hand out the manifest instead of the file.
 
 Examples:
   sail serve webdav --bucket mybucket --listen :8443 \
@@ -95,6 +101,10 @@ func runServeWebdav(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf(i18n.T("invalid --max-upload-size: %w"), err)
 		}
 	}
+	chunkSize, err := parseChunkSize(o.chunkedUpload, o.chunkSize, backendMax)
+	if err != nil {
+		return err
+	}
 
 	r, _, err := loadResolved()
 	if err != nil {
@@ -112,6 +122,8 @@ func runServeWebdav(cmd *cobra.Command, _ []string) error {
 		Prefix:        o.prefix,
 		StagingDir:    o.stagingDir,
 		MaxUploadSize: maxUpload,
+		ChunkedUpload: o.chunkedUpload,
+		ChunkSize:     chunkSize,
 	})
 	if err != nil {
 		return err
@@ -141,8 +153,8 @@ func runServeWebdav(cmd *cobra.Command, _ []string) error {
 		scheme = "https"
 	}
 	fmt.Fprint(os.Stderr, i18n.Tf(
-		"sail webdav started: %s://%s  bucket=%s prefix=%q user=%s max-object-size=%s staging=%s\n",
-		scheme, o.listen, cfgBucket, corePrefix(o.prefix), o.user, humanSize(maxUpload), stagingDirOf(o.stagingDir)))
+		"sail webdav started: %s://%s  bucket=%s prefix=%q user=%s max-object-size=%s staging=%s chunked=%s\n",
+		scheme, o.listen, cfgBucket, corePrefix(o.prefix), o.user, humanSize(maxUpload), stagingDirOf(o.stagingDir), chunkedText(o.chunkedUpload, chunkSize)))
 
 	if o.tlsCert != "" {
 		return httpSrv.ListenAndServeTLS(o.tlsCert, o.tlsKey)
@@ -152,6 +164,45 @@ func runServeWebdav(cmd *cobra.Command, _ []string) error {
 
 func corePrefix(p string) string {
 	return strings.Trim(p, "/")
+}
+
+// 分片阈值的最小/最大允许值:下限是 S3 multipart 最小片,上限是单次
+// PutObject 的 5GiB 硬顶。
+const (
+	minChunkSize = 5 << 20
+	maxChunkSize = 5 << 30
+)
+
+// parseChunkSize 解析并校验 --chunk-size。未开分片时返回 0(不参与校验);
+// 开启时必须是 [5MiB, 5GiB],且不超过声明的后端单对象上限 —— 越界拒绝启动,
+// 不在运行期炸。同时受两道上限约束:L 与 S3 单次 PutObject 的 5GiB。
+func parseChunkSize(enabled bool, raw string, backendMax int64) (int64, error) {
+	if !enabled {
+		return 0, nil
+	}
+	size, err := parseSize(raw)
+	if err != nil {
+		return 0, errors.New(i18n.Tf("invalid --chunk-size: %v", err))
+	}
+	if size < minChunkSize || size > maxChunkSize {
+		return 0, errors.New(i18n.Tf(
+			"--chunk-size must be between %s and %s, got %s",
+			humanSize(minChunkSize), humanSize(int64(maxChunkSize)), humanSize(size)))
+	}
+	if backendMax > 0 && size > backendMax {
+		return 0, errors.New(i18n.Tf(
+			"--chunk-size (%s) exceeds --backend-max-object-size (%s): raise the backend limit or lower the chunk size",
+			humanSize(size), humanSize(backendMax)))
+	}
+	return size, nil
+}
+
+// chunkedText 渲染启动横幅里的分片状态。
+func chunkedText(enabled bool, chunkSize int64) string {
+	if !enabled {
+		return "off"
+	}
+	return "on(" + humanSize(chunkSize) + ")"
 }
 
 func stagingDirOf(dir string) string {
@@ -277,6 +328,8 @@ func init() {
 	serveWebdavCmd.Flags().StringVar(&serveWebdavOpts.backendMaxSize, "backend-max-object-size", "5TiB", "declared backend per-object limit (S3 has no capability negotiation, it can't be probed)")
 	serveWebdavCmd.Flags().StringVar(&serveWebdavOpts.maxUploadSize, "max-upload-size", "", "request body limit, defaults to --backend-max-object-size; over the limit returns 413")
 	serveWebdavCmd.Flags().StringVar(&serveWebdavOpts.stagingDir, "staging-dir", "", "write staging directory, defaults to the system temp dir; peak is about one file's size x concurrent uploads")
+	serveWebdavCmd.Flags().BoolVar(&serveWebdavOpts.chunkedUpload, "chunked-upload", false, "store files larger than --chunk-size as chunks plus a manifest (default off: 1 file = 1 object)")
+	serveWebdavCmd.Flags().StringVar(&serveWebdavOpts.chunkSize, "chunk-size", "4GiB", "max physical chunk size and the chunked-storage threshold (5MiB ~ 5GiB); requires --chunked-upload")
 	serveWebdavCmd.Flags().BoolVar(&serveWebdavOpts.printWindowsSetup, "print-windows-setup", false, "print the Windows client registry setup and mount command, then exit")
 
 	serveCmd.AddCommand(serveWebdavCmd)

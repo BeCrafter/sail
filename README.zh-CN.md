@@ -308,6 +308,8 @@ sail serve webdav --print-windows-setup
 | `--backend-max-object-size` | `5TiB` | 声明的后端单对象上限(S3 无能力协商,不可探测) |
 | `--max-upload-size` | 跟随上一项 | 请求体上限,超限在读满请求体前返回 413 + 可操作指引 |
 | `--staging-dir` | 系统临时目录 | 写暂存目录;峰值 ≈ 单文件最大值 × 并发上传数 |
+| `--chunked-upload` | `false` | 把超过 `--chunk-size` 的文件拆成分片 + manifest 存储(关:1 文件 = 1 对象) |
+| `--chunk-size` | `4GiB` | 单个物理片上限,同时是分片阈值(5MiB ~ 5GiB);需配合 `--chunked-upload` |
 | `--print-windows-setup` | — | 打印 `.reg` 内容 + PowerShell + 「必须重启 WebClient 服务」提醒后退出 |
 
 ### 客户端挂载
@@ -330,6 +332,30 @@ Windows 默认把单次上传卡在约 50MB,这道闸门在**客户端注册表*
 
 其他取舍:目录级 `MOVE`/`COPY` 返回 **501**,由客户端退化为「复制 + 删除」(P1 只做对象级移动);
 `.sail/` 为保留前缀,列目录时会过滤掉。
+
+### 分片存储(`--chunked-upload`)
+
+默认关:1 文件 = 1 对象,既有桶与第三方 S3 工具零感知。当后端存在较小的单对象上限时(例如桶
+前面挂了一道会拒绝大对象的网关)再打开:超过 `--chunk-size` 的文件会被拆成若干片,存在保留前缀
+`.sail/parts/<版本>/` 下,逻辑 key 上只放一个几百字节的 JSON **manifest**。
+
+```bash
+# 超过 100MiB 的文件拆片;片在 .sail/ 下,key 上是 manifest
+sail serve webdav --bucket mybucket --user alice --password '***' \
+  --chunked-upload --chunk-size 100MiB
+```
+
+打开后成立的几条规则:
+
+- **manifest 是唯一提交点**。片先全部写完,才覆盖逻辑 key,客户端看不到写了一半的文件;
+  读取按 manifest 定位,**Range 只取命中的片**,不整文件入内存、不落盘。
+- `--chunk-size` 必须在 `5MiB` ~ `5GiB`(S3 单次 `PutObject` 的硬顶)之间,且不超过
+  `--backend-max-object-size`;越界直接拒绝启动,不在运行期炸。
+- **`sail presign` 对分片 key 直接报错**:预签名 URL 只会返回 manifest 而不是文件本身。
+  这类文件请用 `sail serve webdav` 或 `sail cp` 读取(确实只想要 manifest 时加 `--allow-chunked`)。
+- **桶内会出现 `.sail/` 对象**。WebDAV 列目录会过滤掉,但 `sail ls` 等其他客户端会看到它。
+  删除或覆盖中途失败可能留下孤儿片:它们对列目录不可见、不影响数据一致性,但目前还没有
+  `sail gc` 子命令来回收。
 
 ## 限制
 
