@@ -178,6 +178,92 @@ func TestChunkedMoveThroughGateway(t *testing.T) {
 	}
 }
 
+// DELETE 分片文件必须回收片目录。webdav 的 DELETE 一律走 RemoveAll →
+// Remove(recursive=true),此前该分支不回收片,留下永久孤儿。
+func TestChunkedDeleteThroughGatewayReclaimsParts(t *testing.T) {
+	g := newChunkedGateway(t)
+	data := gwSeq(gwThreeChunk)
+	if resp := g.do(t, "PUT", "/big.bin", string(data), true, map[string]string{"Content-Type": "application/octet-stream"}); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT 期望 201,实际 %d", resp.StatusCode)
+	}
+
+	resp := g.do(t, "DELETE", "/big.bin", "", true, nil)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE 期望 204,实际 %d", resp.StatusCode)
+	}
+	if got := g.do(t, "GET", "/big.bin", "", true, nil); got.StatusCode != http.StatusNotFound {
+		t.Fatalf("删除后 GET 期望 404,实际 %d", got.StatusCode)
+	}
+	if left := keysWithPrefixS3(g, ".sail/parts/"); len(left) != 0 {
+		t.Fatalf("片目录应被回收,残留 %v", left)
+	}
+}
+
+// 经挂载点删除目录时,子树内所有分片文件的片都要回收。
+func TestChunkedDeleteDirectoryThroughGatewayReclaimsParts(t *testing.T) {
+	g := newChunkedGateway(t)
+	if resp := g.do(t, "PUT", "/d/one.bin", string(gwSeq(gwThreeChunk)), true, map[string]string{"Content-Type": "application/octet-stream"}); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT 期望 201,实际 %d", resp.StatusCode)
+	}
+	if resp := g.do(t, "PUT", "/d/two.bin", string(gwSeq(gwThreeChunk)), true, map[string]string{"Content-Type": "application/octet-stream"}); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT 期望 201,实际 %d", resp.StatusCode)
+	}
+	if got := keysWithPrefixS3(g, ".sail/parts/d/"); len(got) != 6 {
+		t.Fatalf("目录下应有 6 片,实际 %d", len(got))
+	}
+
+	resp := g.do(t, "DELETE", "/d", "", true, nil)
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE 目录期望 204,实际 %d", resp.StatusCode)
+	}
+	if left := keysWithPrefixS3(g, ".sail/parts/d/"); len(left) != 0 {
+		t.Fatalf("目录删除后子树内的片应全部回收,残留 %v", left)
+	}
+}
+
+// 两路径传同一内容 → 覆盖其一 → 另一路径逐字节可读、PROPFIND 大小不变。
+// 片目录名曾取自内容哈希,覆盖写会把另一路径共享同哈希的片一起删掉。
+func TestChunkedSameContentPathsIsolatedThroughGateway(t *testing.T) {
+	g := newChunkedGateway(t)
+	data := gwSeq(gwThreeChunk)
+	for _, p := range []string{"/colA.bin", "/colB.bin"} {
+		if resp := g.do(t, "PUT", p, string(data), true, map[string]string{"Content-Type": "application/octet-stream"}); resp.StatusCode != http.StatusCreated {
+			t.Fatalf("PUT %s 期望 201,实际 %d", p, resp.StatusCode)
+		}
+	}
+
+	if resp := g.do(t, "PUT", "/colA.bin", string(gwSeq(2*gwChunkSize)), true, map[string]string{"Content-Type": "application/octet-stream"}); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("覆盖 PUT 期望 201,实际 %d", resp.StatusCode)
+	}
+
+	resp := g.do(t, "GET", "/colB.bin", "", true, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET colB 期望 200,实际 %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("读取 colB 失败: %v", err)
+	}
+	if !bytes.Equal(body, data) {
+		t.Fatalf("覆盖 colA 后 colB 内容被破坏(读回 %d 字节,期望 %d)", len(body), len(data))
+	}
+
+	pf := g.do(t, "PROPFIND", "/colB.bin", propfindAll, true, map[string]string{"Depth": "0"})
+	ms := parseMulti(t, pf)
+	if len(ms.Responses) == 0 {
+		t.Fatal("PROPFIND 无响应条目")
+	}
+	var size string
+	for _, ps := range ms.Responses[0].Propstat {
+		if ps.Prop.ContentLength != "" {
+			size = ps.Prop.ContentLength
+		}
+	}
+	if size != fmt.Sprintf("%d", gwThreeChunk) {
+		t.Fatalf("colB 的 getcontentlength 应为 %d,实际 %q", gwThreeChunk, size)
+	}
+}
+
 func keysWithPrefixS3(g *gateway, prefix string) []string {
 	var out []string
 	for _, k := range g.s3.Keys(bucket) {

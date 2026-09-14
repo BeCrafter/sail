@@ -21,7 +21,9 @@ type chunkedReader struct {
 	ctx    context.Context
 	client *s3.Client
 	bucket string
-	// version 是片目录名,取自 manifest。
+	// partsPath 是本逻辑路径的片命名空间前缀(带尾随 "/"),见 f.partsPath。
+	partsPath string
+	// version 是片目录内的代际名,取自 manifest。
 	version string
 	// sizes 是每片的逻辑长度,与 chunkedReader 的片序号一一对应。
 	sizes []int64
@@ -40,7 +42,7 @@ type chunkedReader struct {
 
 var _ vfs.ReadSeekCloser = (*chunkedReader)(nil)
 
-func newChunkedReader(ctx context.Context, client *s3.Client, bucket string, m *manifest, info vfs.FileInfo) *chunkedReader {
+func newChunkedReader(ctx context.Context, client *s3.Client, bucket, partsPath string, m *manifest, info vfs.FileInfo) *chunkedReader {
 	sizes := make([]int64, len(m.Chunks))
 	starts := make([]int64, len(m.Chunks))
 	for i, c := range m.Chunks {
@@ -48,15 +50,16 @@ func newChunkedReader(ctx context.Context, client *s3.Client, bucket string, m *
 		starts[i] = c.Offset
 	}
 	return &chunkedReader{
-		ctx:     ctx,
-		client:  client,
-		bucket:  bucket,
-		version: m.Version,
-		sizes:   sizes,
-		starts:  starts,
-		size:    m.Size,
-		info:    info,
-		idx:     -1,
+		ctx:       ctx,
+		client:    client,
+		bucket:    bucket,
+		partsPath: partsPath,
+		version:   m.Version,
+		sizes:     sizes,
+		starts:    starts,
+		size:      m.Size,
+		info:      info,
+		idx:       -1,
 	}
 }
 
@@ -152,9 +155,11 @@ func (r *chunkedReader) open(idx int, from int64) error {
 	}
 	// 只取「本片剩余」这一段,不越片读取——否则会把下一片的字节当成本片内容。
 	last := size - 1
+	// 片 key 与 f.partKey 同构;reader 不持有 FS,这里按同一布局拼出。
+	key := fmt.Sprintf("%s%s/%05d", r.partsPath, r.version, idx)
 	req := &s3.GetObjectInput{
 		Bucket: aws.String(r.bucket),
-		Key:    aws.String(partKey(r.version, idx)),
+		Key:    aws.String(key),
 		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", inner, last)),
 	}
 	out, err := r.client.GetObject(r.ctx, req)

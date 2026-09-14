@@ -28,6 +28,11 @@ const (
 
 func newChunkedFS(t *testing.T, chunk int64) (*s3fs.FS, *fakes3.Server) {
 	t.Helper()
+	return newChunkedFSPrefixed(t, "", chunk)
+}
+
+func newChunkedFSPrefixed(t *testing.T, prefix string, chunk int64) (*s3fs.FS, *fakes3.Server) {
+	t.Helper()
 	srv := fakes3.New()
 	t.Cleanup(srv.Close)
 	s3c, err := client.New(context.Background(), &config.Resolved{
@@ -43,6 +48,7 @@ func newChunkedFS(t *testing.T, chunk int64) (*s3fs.FS, *fakes3.Server) {
 	fs, err := s3fs.New(s3fs.Config{
 		Client:        s3c,
 		Bucket:        testBucket,
+		Prefix:        prefix,
 		StagingDir:    t.TempDir(),
 		ChunkedUpload: true,
 		ChunkSize:     chunk,
@@ -469,7 +475,163 @@ func TestChunkedRenameKeepsContentReadable(t *testing.T) {
 	}
 }
 
-// --- Scenario: 分片关闭时行为与 P1 完全一致 ------------------------------------
+// --- Scenario: 片目录按逻辑路径归属,两路径同内容互不影响(F1 回归) ---------
+
+// 上传同一份内容到两个路径,覆盖其中一个后,另一个必须逐字节可读。
+// 片目录名曾取自内容哈希,覆盖写会把另一路径共享同哈希的片一起删掉。
+func TestChunkedSameContentPathsAreIsolated(t *testing.T) {
+	fs, srv := newChunkedFS(t, testChunkSize)
+	data := seq(threeChunkSize)
+
+	putAll(t, fs, "/colA.bin", data, "application/octet-stream")
+	putAll(t, fs, "/colB.bin", data, "application/octet-stream")
+	if got := readAll(t, fs, "/colB.bin"); !bytes.Equal(got, data) {
+		t.Fatal("两路径同内容上传后 colB 应可读")
+	}
+
+	replacement := seq(2 * testChunkSize) // 与 data 内容/片数都不同
+	putAll(t, fs, "/colA.bin", replacement, "application/octet-stream")
+
+	if got := readAll(t, fs, "/colB.bin"); !bytes.Equal(got, data) {
+		t.Fatalf("覆盖 colA 后 colB 内容被破坏: 长度 %d,期望 %d", len(got), len(data))
+	}
+	fi, err := fs.Stat(context.Background(), "/colB.bin")
+	if err != nil {
+		t.Fatalf("Stat colB 失败: %v", err)
+	}
+	if fi.Size != int64(len(data)) {
+		t.Fatalf("colB 的 Stat 大小应为 %d,实际 %d", len(data), fi.Size)
+	}
+	if got := readAll(t, fs, "/colA.bin"); !bytes.Equal(got, replacement) {
+		t.Fatal("colA 覆盖后应读到新内容")
+	}
+
+	// 归属唯一:每个逻辑路径一片目录,不存在共用的片目录。
+	if a, b := keysWithPrefix(srv, ".sail/parts/colA.bin/"), keysWithPrefix(srv, ".sail/parts/colB.bin/"); len(a) == 0 || len(b) == 0 {
+		t.Fatalf("两路径应各有一份片目录: colA=%v colB=%v", a, b)
+	}
+}
+
+// --- Scenario: 删除目录回收子树内所有片(F2 扩展) ------------------------------
+
+// webdav 的 DELETE 一律经 RemoveAll → Remove(recursive=true),此前该分支
+// 不回收片,留下永久孤儿。
+func TestChunkedRemoveDirectoryReclaimsSubtreeParts(t *testing.T) {
+	fs, srv := newChunkedFS(t, testChunkSize)
+	putAll(t, fs, "/d/one.bin", seq(threeChunkSize), "application/octet-stream")
+	putAll(t, fs, "/d/two.bin", seq(2*testChunkSize), "application/octet-stream")
+	putAll(t, fs, "/other.bin", seq(threeChunkSize), "application/octet-stream")
+
+	if got := keysWithPrefix(srv, ".sail/parts/d/"); len(got) != 5 {
+		t.Fatalf("目录下应有 5 片(3+2),实际 %d: %v", len(got), got)
+	}
+	if err := fs.Remove(context.Background(), "/d", true); err != nil {
+		t.Fatalf("Remove 目录失败: %v", err)
+	}
+	if left := keysWithPrefix(srv, ".sail/parts/d/"); len(left) != 0 {
+		t.Fatalf("目录删除后子树内的片应全部回收,残留 %v", left)
+	}
+	for _, p := range []string{"/d/one.bin", "/d/two.bin"} {
+		if _, err := fs.Stat(context.Background(), p); !errors.Is(err, vfs.ErrNotExist) {
+			t.Fatalf("%s 应不可见,实际 %v", p, err)
+		}
+	}
+	// 目录以外的片不受影响。
+	if got := keysWithPrefix(srv, ".sail/parts/other.bin/"); len(got) != 3 {
+		t.Fatalf("其它路径的片不应被回收,实际 %v", got)
+	}
+}
+
+// --- Scenario: 覆盖写只回收本路径的旧代 ----------------------------------------
+
+func TestChunkedOverwriteOnlyCleansOwnOldGeneration(t *testing.T) {
+	fs, srv := newChunkedFS(t, testChunkSize)
+	v1 := seq(threeChunkSize)
+	putAll(t, fs, "/big.bin", v1, "application/octet-stream")
+	putAll(t, fs, "/other.bin", seq(2*testChunkSize), "application/octet-stream")
+
+	otherBefore := append([]string(nil), keysWithPrefix(srv, ".sail/parts/other.bin/")...)
+	putAll(t, fs, "/big.bin", seq(2*testChunkSize), "application/octet-stream")
+
+	if got := readAll(t, fs, "/big.bin"); !bytes.Equal(got, seq(2*testChunkSize)) {
+		t.Fatal("覆盖写后读到的不是 v2")
+	}
+	parts := keysWithPrefix(srv, ".sail/parts/big.bin/")
+	if len(parts) != 2 {
+		t.Fatalf("覆盖写后应只剩 v2 的 2 片,实际 %d: %v", len(parts), parts)
+	}
+	if vs := versionsOf(parts); len(vs) != 1 {
+		t.Fatalf("应只剩一个版本目录,实际 %v", vs)
+	}
+	otherAfter := keysWithPrefix(srv, ".sail/parts/other.bin/")
+	if len(otherAfter) != len(otherBefore) {
+		t.Fatalf("另一路径的片不应变化: before=%v after=%v", otherBefore, otherAfter)
+	}
+}
+
+// --- Scenario: 片命名空间受根前缀约束(F4 回归) --------------------------------
+
+// 片 key 曾绕开 f.key(),直接落在桶根 —— 两个根前缀不同的实例共用一个桶时
+// 会互相覆盖/删除对方的片。
+func TestChunkedPartsRespectRootPrefix(t *testing.T) {
+	const root = "qa-xxx/"
+	fs, srv := newChunkedFSPrefixed(t, root, testChunkSize)
+	putAll(t, fs, "/dir/big.bin", seq(threeChunkSize), "application/octet-stream")
+	putAll(t, fs, "/small.txt", seq(64), "text/plain")
+
+	want := root + ".sail/parts/dir/big.bin/"
+	parts := keysWithPrefix(srv, want)
+	if len(parts) != 3 {
+		t.Fatalf("片应全部落在 %s 下,实际 %v", want, keysWithPrefix(srv, ".sail/parts/"))
+	}
+	for _, k := range srv.Keys(testBucket) {
+		if strings.Contains(k, ".sail/") && !strings.HasPrefix(k, root+".sail/") {
+			t.Fatalf("片对象越出根前缀: %s", k)
+		}
+		if !strings.HasPrefix(k, root) {
+			t.Fatalf("桶内出现根前缀之外的对象: %s", k)
+		}
+	}
+	if got := readAll(t, fs, "/dir/big.bin"); !bytes.Equal(got, seq(threeChunkSize)) {
+		t.Fatal("设根前缀时内容应逐字节一致")
+	}
+}
+
+// --- Scenario: MOVE 后内容仍可读,源片零残留 -----------------------------------
+
+func TestChunkedRenameReclaimsSourceParts(t *testing.T) {
+	fs, srv := newChunkedFS(t, testChunkSize)
+	data := seq(threeChunkSize)
+	putAll(t, fs, "/a/big.bin", data, "application/octet-stream")
+
+	if err := fs.Rename(context.Background(), "/a/big.bin", "/c/renamed.bin"); err != nil {
+		t.Fatalf("Rename 失败: %v", err)
+	}
+	if got := readAll(t, fs, "/c/renamed.bin"); !bytes.Equal(got, data) {
+		t.Fatal("重命名后内容应逐字节一致")
+	}
+	if left := keysWithPrefix(srv, ".sail/parts/a/big.bin/"); len(left) != 0 {
+		t.Fatalf("源路径的片应被回收,残留 %v", left)
+	}
+	if got := keysWithPrefix(srv, ".sail/parts/c/renamed.bin/"); len(got) != 3 {
+		t.Fatalf("目标路径应持有自己的 3 片,实际 %v", got)
+	}
+}
+
+// --- Scenario: 关闭分片时桶内 0 个 .sail/ 对象(零回归) ------------------------
+
+func TestChunkedDisabledTouchesNoPartsNamespace(t *testing.T) {
+	fs, srv := newFS(t, "", 0)
+	putAll(t, fs, "/d/big.bin", seq(threeChunkSize), "application/octet-stream")
+	if err := fs.Remove(context.Background(), "/d", true); err != nil {
+		t.Fatalf("Remove 失败: %v", err)
+	}
+	for _, k := range srv.Keys(testBucket) {
+		if strings.Contains(k, ".sail/") {
+			t.Fatalf("关分片时不应有任何 .sail/ 对象,实际 %s", k)
+		}
+	}
+}
 
 func TestChunkingDisabledKeepsSingleObject(t *testing.T) {
 	fs, srv := newFS(t, "", 0)
