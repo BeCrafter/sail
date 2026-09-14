@@ -22,6 +22,10 @@ Design boundaries:
     client-side procedure.
   - LOCK is an in-process lock, lost on restart and not shared across instances.
   - Directory-level MOVE/COPY returns 501, leaving the client to fall back to "copy + delete".
+  - With --chunked-upload on, files larger than --chunk-size are stored as chunks under the
+    reserved .sail/ prefix plus a small manifest object at the logical key: the bucket then
+    contains .sail/ objects, and "sail presign" fails loud on such a bucket because a presigned
+    URL would hand out the manifest instead of the file.
 
 Examples:
   sail serve webdav --bucket mybucket --listen :8443 \
@@ -36,6 +40,9 @@ Examples:
     服务端改了不生效。用 --print-windows-setup 拿到客户端侧的配置。
   - LOCK 是进程内锁,重启即失效,不跨实例。
   - 目录级 MOVE/COPY 返回 501,由客户端退化为"复制 + 删除"。
+  - 开启 --chunked-upload 后,超过 --chunk-size 的文件会拆成保留前缀 .sail/ 下的分片,
+    并在逻辑 key 上放一个小的 manifest 对象:桶内因此出现 .sail/ 对象,且
+    "sail presign" 会报错拒绝(预签名 URL 只会给到 manifest,不是文件本身)。
 
 示例:
   sail serve webdav --bucket mybucket --listen :8443 \
@@ -52,6 +59,8 @@ Examples:
 		"declared backend per-object limit (S3 has no capability negotiation, it can't be probed)":                     "声明的后端单对象上限(S3 无能力协商,不可探测)",
 		"request body limit, defaults to --backend-max-object-size; over the limit returns 413":                        "请求体上限,默认跟随 --backend-max-object-size;超限返回 413",
 		"write staging directory, defaults to the system temp dir; peak is about one file's size x concurrent uploads": "写暂存目录,默认系统临时目录;峰值 ≈ 单文件大小 × 并发上传数",
+		"store files larger than --chunk-size as chunks plus a manifest (default off: 1 file = 1 object)":             "把超过 --chunk-size 的文件拆成分片 + manifest 存储(默认关:1 文件 = 1 对象)",
+		"max physical chunk size and the chunked-storage threshold (5MiB ~ 5GiB); requires --chunked-upload":           "单个物理片上限,同时是分片阈值(5MiB ~ 5GiB);需配合 --chunked-upload",
 		"print the Windows client registry setup and mount command, then exit":                                         "打印 Windows 客户端注册表配置与挂载命令后退出",
 
 		// serve.go — runtime messages
@@ -60,7 +69,10 @@ Examples:
 		"--tls-cert and --tls-key must be supplied together":                                             "--tls-cert 与 --tls-key 必须同时提供",
 		"invalid --backend-max-object-size: %w":                                                          "--backend-max-object-size 非法: %w",
 		"invalid --max-upload-size: %w":                                                                  "--max-upload-size 非法: %w",
-		"sail webdav started: %s://%s  bucket=%s prefix=%q user=%s max-object-size=%s staging=%s\n":      "sail webdav 已启动: %s://%s  bucket=%s prefix=%q user=%s 单对象上限=%s 暂存=%s\n",
+		"invalid --chunk-size: %v":                                                                       "--chunk-size 非法: %v",
+		"--chunk-size must be between %s and %s, got %s":                                                 "--chunk-size 必须在 %s 与 %s 之间,当前 %s",
+		"--chunk-size (%s) exceeds --backend-max-object-size (%s): raise the backend limit or lower the chunk size": "--chunk-size(%s)超过 --backend-max-object-size(%s):请调高后端上限或调小片大小",
+		"sail webdav started: %s://%s  bucket=%s prefix=%q user=%s max-object-size=%s staging=%s chunked=%s\n":      "sail webdav 已启动: %s://%s  bucket=%s prefix=%q user=%s 单对象上限=%s 暂存=%s 分片=%s\n",
 
 		// serve.go — --print-windows-setup output
 		`Mount a sail WebDAV drive in Windows Explorer

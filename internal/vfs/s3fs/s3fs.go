@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 
 	"github.com/BeCrafter/sail/internal/s3path"
 	"github.com/BeCrafter/sail/internal/vfs"
@@ -28,6 +29,10 @@ const (
 	defaultConcurrency = 4
 	// deleteBatchSize 是 DeleteObjects 的单批上限。
 	deleteBatchSize = 1000
+	// maxChunkSize 是单片的硬上界:S3 PutObject 单次请求上限 5GiB。
+	maxChunkSize = 5 << 30
+	// metaConcurrency 是列目录补元信息时对 HEAD 的并发上限。
+	metaConcurrency = 8
 )
 
 // Config 是 s3fs 的构造参数。
@@ -45,6 +50,12 @@ type Config struct {
 	PartSize int64
 	// Concurrency 是分片并发度;<= 0 取 defaultConcurrency。
 	Concurrency int
+	// ChunkedUpload 打开分片存储表示:超过 ChunkSize 的文件拆片 + manifest。
+	// 默认关——关时桶内 1 文件 = 1 对象,既有桶与第三方 S3 工具零感知。
+	ChunkedUpload bool
+	// ChunkSize 是单个物理片的上限(字节),也是「多大算大文件」的阈值。
+	// 仅 ChunkedUpload 为真时生效;越界在构造期拒绝。
+	ChunkSize int64
 }
 
 // FS 实现 vfs.FileSystem。
@@ -56,6 +67,8 @@ type FS struct {
 	maxUploadSize int64
 	partSize      int64
 	concurrency   int
+	chunkedUpload bool
+	chunkSize     int64
 }
 
 // New 校验配置并确保暂存目录可用。
@@ -81,6 +94,12 @@ func New(cfg Config) (*FS, error) {
 	if concurrency <= 0 {
 		concurrency = defaultConcurrency
 	}
+	if cfg.ChunkedUpload {
+		if cfg.ChunkSize < minPartSize || cfg.ChunkSize > maxChunkSize {
+			return nil, fmt.Errorf("s3fs: --chunk-size 必须在 %d 与 %d 字节之间(5MiB ~ 5GiB),当前 %d",
+				int64(minPartSize), int64(maxChunkSize), cfg.ChunkSize)
+		}
+	}
 	return &FS{
 		client:        cfg.Client,
 		bucket:        cfg.Bucket,
@@ -89,6 +108,8 @@ func New(cfg Config) (*FS, error) {
 		maxUploadSize: cfg.MaxUploadSize,
 		partSize:      partSize,
 		concurrency:   concurrency,
+		chunkedUpload: cfg.ChunkedUpload,
+		chunkSize:     cfg.ChunkSize,
 	}, nil
 }
 
@@ -108,6 +129,12 @@ func (f *FS) Stat(ctx context.Context, p string) (vfs.FileInfo, error) {
 		Key:    aws.String(key),
 	})
 	if err == nil {
+		if _, fi, ok, derr := f.detectMeta(ctx, logical, key, h); derr != nil {
+			return vfs.FileInfo{}, derr
+		} else if ok {
+			// 分片文件:对外汇报逻辑大小与逻辑类型,不是 manifest 的物理大小。
+			return fi, nil
+		}
 		return f.infoFromHead(logical, key, h), nil
 	}
 	if !isNotFound(err) {
@@ -141,6 +168,8 @@ func (f *FS) ReadDir(ctx context.Context, p string) ([]vfs.FileInfo, error) {
 
 	out := []vfs.FileInfo{}
 	sawMarker := false
+	// files 暂存文件条目,稍后统一补元信息(分片文件要换成逻辑大小)。
+	var files []vfs.FileInfo
 	paginator := s3.NewListObjectsV2Paginator(f.client, &s3.ListObjectsV2Input{
 		Bucket:    aws.String(f.bucket),
 		Prefix:    aws.String(prefix),
@@ -153,7 +182,8 @@ func (f *FS) ReadDir(ctx context.Context, p string) ([]vfs.FileInfo, error) {
 		}
 		for _, cp := range page.CommonPrefixes {
 			name := childName(aws.ToString(cp.Prefix), prefix)
-			if name == "" {
+			if name == "" || name == sailDir {
+				// .sail/ 是内核保留前缀,不暴露给任何协议壳。
 				continue
 			}
 			out = append(out, vfs.FileInfo{
@@ -170,10 +200,10 @@ func (f *FS) ReadDir(ctx context.Context, p string) ([]vfs.FileInfo, error) {
 				continue
 			}
 			name := childName(k, prefix)
-			if name == "" {
+			if name == "" || strings.HasPrefix(name, sailDir+"/") || name == sailDir {
 				continue
 			}
-			out = append(out, vfs.FileInfo{
+			files = append(files, vfs.FileInfo{
 				Name:    name,
 				Path:    joinLogical(logical, name),
 				Size:    aws.ToInt64(o.Size),
@@ -182,6 +212,11 @@ func (f *FS) ReadDir(ctx context.Context, p string) ([]vfs.FileInfo, error) {
 			})
 		}
 	}
+
+	if err := f.decorateEntries(ctx, files); err != nil {
+		return nil, err
+	}
+	out = append(out, files...)
 
 	if len(out) == 0 && !sawMarker && logical != "/" {
 		// 没有任何子项也没有标记对象:要么是空目录(父层有共同前缀),要么根本不存在。
@@ -194,6 +229,61 @@ func (f *FS) ReadDir(ctx context.Context, p string) ([]vfs.FileInfo, error) {
 		}
 	}
 	return out, nil
+}
+
+// decorateEntries 为列目录得到的文件条目补元信息:分片文件要换成逻辑大小
+// 与逻辑 Content-Type,否则 Finder 里会显示成 manifest JSON 的字节数。
+//
+// 代价是有界的:只在开启分片、且条目还没有 Content-Type(ListObjectsV2 不
+// 返回该字段)时,才按 metaConcurrency 并发发一次 HEAD。分片关闭时本函数
+// 一次请求都不发,与 P1 完全一致。
+func (f *FS) decorateEntries(ctx context.Context, entries []vfs.FileInfo) error {
+	if !f.chunkedUpload {
+		return nil
+	}
+	sem := make(chan struct{}, metaConcurrency)
+	errCh := make(chan error, len(entries))
+	var wg sync.WaitGroup
+	for i := range entries {
+		e := &entries[i]
+		if e.IsDir || e.ContentType != "" {
+			continue
+		}
+		wg.Add(1)
+		go func(e *vfs.FileInfo) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			key := f.key(e.Path)
+			h, err := f.client.HeadObject(ctx, &s3.HeadObjectInput{
+				Bucket: aws.String(f.bucket),
+				Key:    aws.String(key),
+			})
+			if err != nil {
+				if isNotFound(err) {
+					return
+				}
+				errCh <- fmt.Errorf("s3fs: 读取 %s 元信息失败: %w", e.Path, err)
+				return
+			}
+			if _, fi, ok, derr := f.detectMeta(ctx, e.Path, key, h); derr != nil {
+				errCh <- derr
+			} else if ok {
+				*e = fi
+			} else {
+				// 普通文件:补上 HEAD 才知道的 Content-Type。
+				e.ContentType = aws.ToString(h.ContentType)
+			}
+		}(e)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // OpenRead 返回以 Range 实现的 io.ReadSeeker:Seek 只重定位偏移,
@@ -221,6 +311,12 @@ func (f *FS) OpenRead(ctx context.Context, p string) (vfs.ReadSeekCloser, error)
 	if fi.IsDir {
 		return nil, vfs.ErrNotSupported
 	}
+	// 分片文件:交给跨片聚合的 io.ReadSeeker(Seek 同样只改偏移、不发请求)。
+	if m, cfi, ok, cerr := f.chunked(ctx, logical, key, h); cerr != nil {
+		return nil, cerr
+	} else if ok {
+		return newChunkedReader(ctx, f.client, f.bucket, m, cfi), nil
+	}
 	return &readFile{ctx: ctx, client: f.client, bucket: f.bucket, key: key, info: fi, size: fi.Size}, nil
 }
 
@@ -236,8 +332,17 @@ func (f *FS) Remove(ctx context.Context, p string, recursive bool) error {
 	}
 	key := f.key(logical)
 	if !recursive {
+		// 分片文件:先删逻辑 key(提交点),再清片目录。
+		handled, err := f.removeChunkedPath(ctx, logical, key)
+		if err != nil {
+			return err
+		}
+		if handled {
+			return nil
+		}
 		return f.deleteObjects(ctx, []string{key})
 	}
+	// 递归删除:按前缀整体清,片目录也在该前缀下,天然一并删掉。
 	prefix := key
 	if !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
@@ -281,10 +386,11 @@ func (f *FS) Rename(ctx context.Context, oldPath, newPath string) error {
 	oldKey := f.key(oldLogical)
 	newKey := f.key(newLogical)
 
-	if _, err := f.client.HeadObject(ctx, &s3.HeadObjectInput{
+	oldHead, err := f.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(f.bucket),
 		Key:    aws.String(oldKey),
-	}); err != nil {
+	})
+	if err != nil {
 		if isNotFound(err) {
 			// 没有同名对象:可能是只有共同前缀的目录(或根本不存在)。
 			probe := oldKey
@@ -305,6 +411,14 @@ func (f *FS) Rename(ctx context.Context, oldPath, newPath string) error {
 	if strings.HasSuffix(oldKey, "/") {
 		// 目录标记对象本身不能当文件搬走。
 		return vfs.ErrNotSupported
+	}
+
+	// 分片文件:片目录名取自内容哈希,只搬 manifest 会让新路径读不出内容。
+	// 先把片复制到新路径自己的版本目录,再写新 manifest,最后删旧件旧片。
+	if m, ok, cerr := f.detectManifest(ctx, oldKey, oldHead); cerr != nil {
+		return cerr
+	} else if ok {
+		return f.renameChunked(ctx, oldLogical, newLogical, oldKey, newKey, m)
 	}
 
 	if _, err := f.client.CopyObject(ctx, &s3.CopyObjectInput{

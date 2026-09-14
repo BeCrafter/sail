@@ -18,6 +18,7 @@ func init() {
 		"failed to open local file: %w":                                                  "打开本地文件失败: %w",
 		"failed to query %s: %w":                                                         "查询 %s 失败: %w",
 		"failed to generate presigned URL: %w":                                           "生成预签名失败: %w",
+		"s3://%s/%s is stored as chunks; a presigned URL would return the manifest, not the file. Read it through 'sail serve webdav' or 'sail cp' instead (pass --allow-chunked to presign the manifest anyway)": "s3://%s/%s 是分片存储,预签名 URL 只会返回 manifest 而不是文件。请改用 'sail serve webdav' 或 'sail cp' 读取(加 --allow-chunked 可坚持对 manifest 预签名)",
 		"cdn-domain is not configured; set it in the config file or pass --cdn":          "未配置 cdn-domain,请在配置文件中设置或用 --cdn 指定",
 		"deleted %d objects\n":                                                           "共删除 %d 个对象\n",
 		"stdin line %q is not an s3:// path and no default bucket is configured":         "stdin 行 %q 不是 s3:// 路径且未配置默认 bucket",

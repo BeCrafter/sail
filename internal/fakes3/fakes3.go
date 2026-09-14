@@ -27,7 +27,10 @@ import (
 type Object struct {
 	Data        []byte
 	ContentType string
-	ModTime     time.Time
+	// Metadata 是用户元数据(x-amz-meta-*),键为去前缀后的小写名。
+	// sail serve 的 payload 元数据判定依赖它,故 fake 端必须能往返。
+	Metadata map[string]string
+	ModTime  time.Time
 }
 
 // Counts 记录各类请求次数。
@@ -77,6 +80,13 @@ func (s *Server) Put(bucket, key string, data []byte, contentType string) {
 	s.objects[bucket+"/"+key] = Object{Data: data, ContentType: contentType, ModTime: time.Now().UTC()}
 }
 
+// PutWithMetadata 写入一个带用户元数据的对象(测试夹具用)。
+func (s *Server) PutWithMetadata(bucket, key string, data []byte, contentType string, md map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.objects[bucket+"/"+key] = Object{Data: data, ContentType: contentType, Metadata: md, ModTime: time.Now().UTC()}
+}
+
 // Get 读取一个对象(测试断言用)。
 func (s *Server) Get(bucket, key string) (Object, bool) {
 	s.mu.Lock()
@@ -102,6 +112,29 @@ func (s *Server) Keys(bucket string) []string {
 func etagOf(data []byte) string {
 	sum := md5.Sum(data)
 	return `"` + hex.EncodeToString(sum[:]) + `"`
+}
+
+// userMetadata 取出请求里的 x-amz-meta-* 用户元数据(键去前缀、小写)。
+func userMetadata(h http.Header) map[string]string {
+	var md map[string]string
+	for name, vals := range h {
+		lower := strings.ToLower(name)
+		if !strings.HasPrefix(lower, "x-amz-meta-") || len(vals) == 0 {
+			continue
+		}
+		if md == nil {
+			md = map[string]string{}
+		}
+		md[strings.TrimPrefix(lower, "x-amz-meta-")] = vals[0]
+	}
+	return md
+}
+
+// writeMetadata 把用户元数据回写成 x-amz-meta-* 响应头。
+func writeMetadata(h http.Header, md map[string]string) {
+	for k, v := range md {
+		h.Set("X-Amz-Meta-"+k, v)
+	}
 }
 
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
@@ -160,6 +193,7 @@ func (s *Server) headObject(w http.ResponseWriter, bucket, key string) {
 	if o.ContentType != "" {
 		h.Set("Content-Type", o.ContentType)
 	}
+	writeMetadata(h, o.Metadata)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -177,6 +211,7 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, bucket, key s
 	if o.ContentType != "" {
 		h.Set("Content-Type", o.ContentType)
 	}
+	writeMetadata(h, o.Metadata)
 	body := o.Data
 	if rng := r.Header.Get("Range"); rng != "" {
 		start, end, err := parseRange(rng, int64(len(o.Data)))
@@ -231,6 +266,7 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, bucket, key s
 	s.objects[bucket+"/"+key] = Object{
 		Data:        data,
 		ContentType: r.Header.Get("Content-Type"),
+		Metadata:    userMetadata(r.Header),
 		ModTime:     time.Now().UTC(),
 	}
 	s.mu.Unlock()
@@ -249,6 +285,10 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, bucket, key 
 	o, ok := s.objects[srcBucket+"/"+srcKey]
 	if ok {
 		o.ModTime = time.Now().UTC()
+		// CopyObject 默认 COPY 源对象的元数据与服务端属性。
+		if md := userMetadata(r.Header); r.Header.Get("X-Amz-Metadata-Directive") == "REPLACE" {
+			o.Metadata = md
+		}
 		s.objects[bucket+"/"+key] = o
 	}
 	s.mu.Unlock()
@@ -281,8 +321,8 @@ func (s *Server) createMultipart(w http.ResponseWriter, r *http.Request, bucket,
 	s.nextID++
 	id := "upload-" + strconv.Itoa(s.nextID)
 	s.parts[id] = map[int][]byte{}
-	// CreateMultipartUpload 时就带上了 Content-Type,Complete 时要保留下来。
-	s.uploads[id] = Object{ContentType: r.Header.Get("Content-Type")}
+	// CreateMultipartUpload 时就带上了 Content-Type 与用户元数据,Complete 时要保留下来。
+	s.uploads[id] = Object{ContentType: r.Header.Get("Content-Type"), Metadata: userMetadata(r.Header)}
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/xml")
 	writeXML(w, initiateResult{Bucket: bucket, Key: key, UploadID: id})
@@ -330,7 +370,7 @@ func (s *Server) completeMultipart(w http.ResponseWriter, r *http.Request, bucke
 	}
 	total := md5.Sum(md5cat)
 	etag := fmt.Sprintf(`"%s-%d"`, hex.EncodeToString(total[:]), len(in.Parts))
-	s.objects[bucket+"/"+key] = Object{Data: all, ContentType: meta.ContentType, ModTime: time.Now().UTC()}
+	s.objects[bucket+"/"+key] = Object{Data: all, ContentType: meta.ContentType, Metadata: meta.Metadata, ModTime: time.Now().UTC()}
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/xml")
 	writeXML(w, completeResult{Bucket: bucket, Key: key, ETag: etag, Location: "/" + bucket + "/" + key})

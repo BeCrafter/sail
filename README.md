@@ -302,6 +302,8 @@ sail serve webdav --print-windows-setup
 | `--backend-max-object-size` | `5TiB` | Declared backend per-object limit (S3 has no capability negotiation, it can't be probed) |
 | `--max-upload-size` | follows the flag above | Request body limit; over the limit returns 413 + actionable guidance before the body is fully read |
 | `--staging-dir` | system temp dir | Write staging directory; peak ≈ largest single file × concurrent uploads |
+| `--chunked-upload` | `false` | Store files larger than `--chunk-size` as chunks + a manifest (off: 1 file = 1 object) |
+| `--chunk-size` | `4GiB` | Max physical chunk size, also the chunked-storage threshold (5MiB ~ 5GiB); requires `--chunked-upload` |
 | `--print-windows-setup` | — | Print the `.reg` content + PowerShell + a "you must restart the WebClient service" reminder, then exit |
 
 ### Mounting from clients
@@ -330,6 +332,35 @@ client-side procedure.
 Other trade-offs: directory-level `MOVE`/`COPY` returns **501**, leaving the client to fall back to
 "copy + delete" (P1 only does object-level moves); `.sail/` is a reserved prefix and is filtered out
 when listing directories.
+
+### Chunked storage (`--chunked-upload`)
+
+Off by default: one file is one object, and existing buckets plus third-party S3 tools see nothing
+new. Turn it on when the backend has a small per-object ceiling (for example a gateway in front of
+the bucket that rejects large objects): files larger than `--chunk-size` are then split into chunks
+stored under the reserved `.sail/parts/<version>/` prefix, with a few-hundred-byte JSON **manifest**
+at the logical key.
+
+```bash
+# Split anything over 100MiB; the pieces live under .sail/, the key holds a manifest
+sail serve webdav --bucket mybucket --user alice --password '***' \
+  --chunked-upload --chunk-size 100MiB
+```
+
+Rules that hold once it is on:
+
+- **The manifest is the commit point.** Chunks are uploaded first; the logical key is only
+  overwritten once every chunk has landed, so a client never sees a half-written file. Reads follow
+  the manifest and fetch only the chunk(s) a Range touches — no full-file buffering.
+- `--chunk-size` must be between `5MiB` and `5GiB` (the S3 `PutObject` request ceiling) and must not
+  exceed `--backend-max-object-size`; an out-of-range value refuses startup instead of failing later.
+- **`sail presign` fails loud on chunked keys**: a presigned URL would hand out the manifest, not the
+  file. Read those keys through `sail serve webdav` or `sail cp` (or pass `--allow-chunked` if you
+  really want the manifest itself).
+- **The bucket now contains `.sail/` objects.** They are filtered out of WebDAV listings, but
+  `sail ls` and other clients will show them. If a delete or overwrite is interrupted, orphaned
+  chunks may remain; they are invisible to listing and data-consistent, but there is no `sail gc`
+  command yet.
 
 ## Cross-check with AWS CLI
 

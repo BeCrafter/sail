@@ -101,3 +101,72 @@ func TestWindowsSetupText(t *testing.T) {
 		t.Error("文案不应出现 --max-file-size 这类假旋钮")
 	}
 }
+
+func TestParseChunkSize(t *testing.T) {
+	const mib = 1 << 20
+	const gib = 1 << 30
+	cases := []struct {
+		name       string
+		enabled    bool
+		raw        string
+		backendMax int64
+		want       int64
+		wantErr    bool
+	}{
+		{"分片关闭时不校验", false, "1", 5 << 40, 0, false},
+		{"默认 4GiB", true, "4GiB", 5 << 40, 4 * gib, false},
+		{"合法下限", true, "5MiB", 5 << 40, 5 * mib, false},
+		{"低于 5MiB 拒绝", true, "1MiB", 5 << 40, 0, true},
+		{"超过 5GiB 拒绝", true, "6GiB", 5 << 40, 0, true},
+		{"超过声明后端上限拒绝", true, "4GiB", 1 * gib, 0, true},
+		{"非法字面量拒绝", true, "不是大小", 5 << 40, 0, true},
+	}
+	for _, c := range cases {
+		got, err := parseChunkSize(c.enabled, c.raw, c.backendMax)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("%s: 期望报错,实际 %d", c.name, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: 意外报错 %v", c.name, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("%s: got %d want %d", c.name, got, c.want)
+		}
+	}
+}
+
+func TestServeWebdavRejectsBadChunkSize(t *testing.T) {
+	origBucket, origOpts := cfgBucket, serveWebdavOpts
+	t.Cleanup(func() {
+		cfgBucket, serveWebdavOpts = origBucket, origOpts
+	})
+	cfgBucket = "mybucket"
+	serveWebdavOpts = serveWebdavFlags{
+		backendMaxSize: "5TiB",
+		listen:         ":8080",
+		user:           "alice",
+		password:       "s3cret",
+		chunkedUpload:  true,
+		chunkSize:      "1MiB", // 低于 S3 multipart 下限
+	}
+	if err := runServeWebdav(serveWebdavCmd, nil); err == nil || !strings.Contains(err.Error(), "--chunk-size") {
+		t.Fatalf("非法 --chunk-size 应拒绝启动,实际 %v", err)
+	}
+}
+
+// 命名纪律:绝不提供看着能抬高 Windows 客户端 50MB 闸门的假旋钮,
+// 也不在功能落地前先暴露 P2 之外的参数。
+func TestServeWebdavFlagSurface(t *testing.T) {
+	for _, name := range []string{"chunked-upload", "chunk-size"} {
+		if serveWebdavCmd.Flags().Lookup(name) == nil {
+			t.Errorf("缺少参数 --%s", name)
+		}
+	}
+	if f := serveWebdavCmd.Flags().Lookup("max-file-size"); f != nil {
+		t.Error("不应提供 --max-file-size(服务端假旋钮)")
+	}
+}

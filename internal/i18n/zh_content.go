@@ -137,14 +137,23 @@ Examples:
 Note: some self-hosted S3-compatible services do not support query string authentication (returning "Authorization empty").
 In that case, use a CDN domain to access a public object instead: sail url s3://bucket/key.
 
+A key stored as chunks (written with "sail serve webdav --chunked-upload") cannot be presigned:
+the URL would hand out the small manifest instead of the file, so this command fails loud and
+points at "sail serve webdav" or "sail cp" instead.
+
 Examples:
   sail presign s3://bucket/data.bin --expires 3600`: `生成预签名下载 URL(GET,默认有效 1 小时),无需凭证即可在有效期内访问。
 注意:部分自建 S3 兼容服务不支持 query string 认证(返回 "Authorization empty"),
 此时请改用 CDN 域名访问公开对象:sail url s3://bucket/key。
 
+分片存储的 key(由 "sail serve webdav --chunked-upload" 写入)不能预签名:URL 只会给到
+那个小的 manifest 而不是文件本身,因此本命令直接报错,并指引改用 "sail serve webdav"
+或 "sail cp"。
+
 示例:
   sail presign s3://bucket/data.bin --expires 3600`,
 		"URL lifetime in seconds": "URL 有效期(秒)",
+		"presign the manifest of a chunked key anyway (the URL will not return the file content)": "仍然为分片 key 的 manifest 预签名(URL 不会返回文件内容)",
 
 		// url
 		"Generate a CDN access URL for a file": "生成文件的 CDN 访问地址",
