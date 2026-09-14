@@ -356,6 +356,11 @@ Rules that hold once it is on:
   `.sail/parts/a/big.bin/<version>/`; another path stores its own copy even when the content is
   byte-identical. An overwrite therefore purges only its own old generation, and deleting a file or
   directory reclaims that path's chunks — never another path's.
+- **Known limitation: an overwrite interrupts in-flight reads.** The old chunks are reclaimed as soon
+  as the manifest switches, so a reader still streaming the previous content is cut off mid-transfer.
+  The failure is **loud** (the response's `Content-Length` disagrees with the bytes delivered, and
+  versions are never mixed within one response) and a retry succeeds; there is no delayed reclamation
+  or in-flight reader registration today.
 - **Chunks share the logical keys' root prefix** (`--prefix`). With a shared root prefix configured,
   chunks stay inside it too, so instances sharing one bucket cannot overwrite each other's data.
 - `--chunk-size` must be between `5MiB` and `5GiB` (the S3 `PutObject` request ceiling) and must not
