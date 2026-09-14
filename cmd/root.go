@@ -24,7 +24,8 @@ var rootCmd = &cobra.Command{
 	Short: "S3 object storage CLI",
 	Long: `sail is a command-line tool for S3-compatible object storage, modeled on Linux/macOS file commands.
 It covers object transfer (cp/mv/rm/sync/mb/rb), listing and stats (ls/tree/find/du/stat),
-content viewing (view/head/tail/wc/grep), and validation/access (checksum/presign/url).
+content viewing (view/head/tail/wc/grep), validation/access (checksum/presign/url), and sharing
+a bucket with a file manager over WebDAV (serve webdav).
 A single static binary with zero runtime dependencies, compatible with AWS S3 / MinIO / Aliyun OSS
 and self-hosted S3-compatible services.
 
@@ -59,7 +60,8 @@ func init() {
 		&cobra.Group{ID: "verify", Title: "Checksum and access"},
 		&cobra.Group{ID: "config", Title: "Config"},
 	)
-	rootCmd.AddCommand(cpCmd, mvCmd, rmCmd, mkdirCmd, rmdirCmd, mbCmd, rbCmd, syncCmd, lsCmd, treeCmd, findCmd, duCmd, statCmd, viewCmd, headCmd, tailCmd, wcCmd, grepCmd, checksumCmd, presignCmd, urlCmd, configCmd)
+	// serve 的子命令 webdav 由 cmd/serve.go 的 init() 挂载。
+	rootCmd.AddCommand(cpCmd, mvCmd, rmCmd, mkdirCmd, rmdirCmd, mbCmd, rbCmd, syncCmd, lsCmd, treeCmd, findCmd, duCmd, statCmd, viewCmd, headCmd, tailCmd, wcCmd, grepCmd, checksumCmd, presignCmd, urlCmd, serveCmd, configCmd)
 	assignGroups()
 	// help 归入「Config」组末尾(Additional 命令区只有内置 completion,已隐藏)
 	rootCmd.SetHelpCommandGroupID("config")
@@ -69,7 +71,7 @@ func init() {
 func assignGroups() {
 	for _, c := range rootCmd.Commands() {
 		switch c.Name() {
-		case "cp", "mb", "mkdir", "mv", "rb", "rm", "rmdir", "sync":
+		case "cp", "mb", "mkdir", "mv", "rb", "rm", "rmdir", "serve", "sync":
 			c.GroupID = "transfer"
 		case "du", "find", "ls", "stat", "tree":
 			c.GroupID = "list"

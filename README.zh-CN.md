@@ -19,6 +19,7 @@
 - **检索统计**:`find`(名称/大小/时间过滤)、`du`(按前缀层级统计占用)
 - **内容查看**:多格式智能渲染——文本/JSON/YAML/CSV/XML/图片终端字符画/二进制;`head`/`tail`/`wc`/`grep` 流式读写不落盘
 - **校验与鉴权**:`checksum`(md5/sha256 计算与比对)、`presign` 预签名 URL、基于 CDN 域名的公开访问地址
+- **WebDAV 网关**:`serve webdav` 把 bucket 挂成网络盘,macOS Finder / Windows 资源管理器直接读写,零客户端安装
 - **多 profile 配置**:prod / test / staging 等多环境切换,密钥可引用环境变量避免明文
 - **跨平台**:macOS / Linux,单二进制下载即用;支持 shell 自动补全(zsh / bash / fish)
 
@@ -279,6 +280,56 @@ sail -p test upload local.txt s3://testbucket/local.txt
 ```bash
 aws s3 ls --endpoint-url <your-s3-endpoint> s3://mybucket/
 ```
+
+## WebDAV 网关(`sail serve webdav`)
+
+把 bucket(或 `--prefix` 指定的前缀)挂成网络盘:客户端用系统自带的 WebDAV 能力直接读写,
+不用装任何软件。列目录、上传、下载、Range 拖进度条、改名、删除的行为与普通网络盘一致。
+
+```bash
+# 启动(HTTPS 推荐;同时给 --tls-cert/--tls-key 即启用)
+sail serve webdav --bucket mybucket --listen :8443 \
+  --user alice --password '***' --tls-cert cert.pem --tls-key key.pem
+
+# 只共享桶内某个前缀(映射为 /,越界路径一律拒绝)
+sail serve webdav --bucket mybucket --prefix tenant-a --user alice --password '***'
+
+# 生成 Windows 客户端的一次性注册表配置与挂载命令后退出
+sail serve webdav --print-windows-setup
+```
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--listen` | `:8080` | 监听地址 |
+| `--bucket` | **必填** | 共享的桶;缺失即拒绝启动 |
+| `--prefix` | 空 | 共享根前缀(映射为 `/`);越界路径一律拒绝 |
+| `--user` / `--password` | 空 | Basic 认证,**为空拒绝启动**,不允许匿名共享 |
+| `--tls-cert` / `--tls-key` | 空 | 同时提供即启用 HTTPS |
+| `--backend-max-object-size` | `5TiB` | 声明的后端单对象上限(S3 无能力协商,不可探测) |
+| `--max-upload-size` | 跟随上一项 | 请求体上限,超限在读满请求体前返回 413 + 可操作指引 |
+| `--staging-dir` | 系统临时目录 | 写暂存目录;峰值 ≈ 单文件最大值 × 并发上传数 |
+| `--print-windows-setup` | — | 打印 `.reg` 内容 + PowerShell + 「必须重启 WebClient 服务」提醒后退出 |
+
+### 客户端挂载
+
+- **macOS Finder**:`前往 → 连接服务器`(⌘K),填 `https://host:8443`,用 `--user`/`--password` 登录。
+- **Windows 资源管理器**:先跑 `sail serve webdav --print-windows-setup` 导入注册表配置并重启
+  WebClient 服务,再 `net use Z: \\host@SSL@8443\DavWWWRoot /user:alice`。
+
+Windows 默认把单次上传卡在约 50MB,这道闸门在**客户端注册表**,服务端参数改不动它。
+所以 sail 不提供 `--max-file-size` 这类看着能抬高闸门的假旋钮——用 `--print-windows-setup`
+拿客户端侧的正确做法。
+
+### 两条限制
+
+- **LOCK 是进程内锁**:WebDAV 协议要求的锁由内存实现,进程重启即失效,也不跨实例共享。
+  单实例、短事务的网盘场景够用;多实例部署下客户端看到的锁不互通。
+- **写路径需要暂存盘**:上传先完整落到 `--staging-dir`,提交时才切块上传到 S3。磁盘峰值
+  ≈ 单文件最大值 × 并发上传数;空间不足时在写入前返回 **507** 而不是中途失败。
+  大文件多的场景请把 `--staging-dir` 指向空间足够的磁盘。
+
+其他取舍:目录级 `MOVE`/`COPY` 返回 **501**,由客户端退化为「复制 + 删除」(P1 只做对象级移动);
+`.sail/` 为保留前缀,列目录时会过滤掉。
 
 ## 限制
 

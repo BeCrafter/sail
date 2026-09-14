@@ -19,6 +19,7 @@
 - **Search & statistics**: `find` (name/size/time filtering), `du` (prefix-level usage)
 - **Content viewing**: multi-format smart rendering — text/JSON/YAML/CSV/XML/image terminal ASCII art/binary; `head`/`tail`/`wc`/`grep` stream without writing to disk
 - **Checksum & auth**: `checksum` (md5/sha256 computation and comparison), `presign` presigned URLs, public access URLs based on a CDN domain
+- **WebDAV gateway**: `serve webdav` mounts a bucket as a network drive — macOS Finder / Windows Explorer read and write directly, with zero client install
 - **Multi-profile config**: prod / test / staging environment switching, keys can reference env vars to avoid plaintext
 - **Cross-platform**: macOS / Linux, single binary, download and use; shell auto-completion (zsh / bash / fish)
 
@@ -271,6 +272,64 @@ sail stat ./local.log                           # local file metadata
 # Switch profile
 sail -p test upload local.txt s3://testbucket/local.txt
 ```
+
+## WebDAV gateway (`sail serve webdav`)
+
+Mount a bucket (or the prefix given by `--prefix`) as a network drive: clients read and write
+directly through the WebDAV support built into the OS, with no software to install. Listing,
+uploading, downloading, dragging the progress bar with Range requests, renaming, and deleting
+all behave like an ordinary network drive.
+
+```bash
+# Start (HTTPS recommended; supplying both --tls-cert/--tls-key enables it)
+sail serve webdav --bucket mybucket --listen :8443 \
+  --user alice --password '***' --tls-cert cert.pem --tls-key key.pem
+
+# Share only a prefix inside the bucket (mapped to /, out-of-prefix paths are always rejected)
+sail serve webdav --bucket mybucket --prefix tenant-a --user alice --password '***'
+
+# Print the one-time Windows client registry setup and mount command, then exit
+sail serve webdav --print-windows-setup
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--listen` | `:8080` | Listen address |
+| `--bucket` | **required** | Bucket to share; startup is refused when missing |
+| `--prefix` | empty | Shared root prefix (mapped to `/`); out-of-prefix paths are always rejected |
+| `--user` / `--password` | empty | Basic auth; startup is refused when empty, anonymous sharing is not allowed |
+| `--tls-cert` / `--tls-key` | empty | Supplying both enables HTTPS |
+| `--backend-max-object-size` | `5TiB` | Declared backend per-object limit (S3 has no capability negotiation, it can't be probed) |
+| `--max-upload-size` | follows the flag above | Request body limit; over the limit returns 413 + actionable guidance before the body is fully read |
+| `--staging-dir` | system temp dir | Write staging directory; peak ≈ largest single file × concurrent uploads |
+| `--print-windows-setup` | — | Print the `.reg` content + PowerShell + a "you must restart the WebClient service" reminder, then exit |
+
+### Mounting from clients
+
+- **macOS Finder**: `Go → Connect to Server` (⌘K), enter `https://host:8443`, sign in with `--user`/`--password`.
+- **Windows Explorer**: first run `sail serve webdav --print-windows-setup` to import the registry
+  settings and restart the WebClient service, then
+  `net use Z: \\host@SSL@8443\DavWWWRoot /user:alice`.
+
+Windows caps a single upload at about 50MB by default. That gate lives in the **client registry**;
+no server-side flag can move it. So sail deliberately does not offer a `--max-file-size` style fake
+knob that looks like it could raise the gate — use `--print-windows-setup` for the correct
+client-side procedure.
+
+### Two limitations
+
+- **LOCK is an in-process lock**: the locks required by the WebDAV protocol are implemented in
+  memory, so they are lost on restart and are not shared across instances. That is enough for a
+  single-instance, short-transaction network drive; with multiple instances the locks clients see
+  are not shared.
+- **The write path needs a staging disk**: uploads land in full under `--staging-dir`, and only on
+  commit are they chunked and uploaded to S3. Disk peak ≈ largest single file × concurrent uploads;
+  when space is short the write returns **507** before writing rather than failing midway. Point
+  `--staging-dir` at a disk with enough room when large files are common.
+
+Other trade-offs: directory-level `MOVE`/`COPY` returns **501**, leaving the client to fall back to
+"copy + delete" (P1 only does object-level moves); `.sail/` is a reserved prefix and is filtered out
+when listing directories.
 
 ## Cross-check with AWS CLI
 
