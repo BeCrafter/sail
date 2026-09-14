@@ -294,14 +294,21 @@ sail serve webdav --bucket mybucket --listen :8443 \
 # 只共享桶内某个前缀(映射为 /,越界路径一律拒绝)
 sail serve webdav --bucket mybucket --prefix tenant-a --user alice --password '***'
 
+# 省略 --bucket:与其它命令走同一条解析链(--bucket > SAIL_BUCKET > profile.bucket)
+sail serve webdav --profile prod --user alice --password '***'
+
 # 生成 Windows 客户端的一次性注册表配置与挂载命令后退出
 sail serve webdav --print-windows-setup
 ```
 
+桶取自与其它命令完全相同的解析链:`--bucket` > `SAIL_BUCKET` > `profile.bucket`。
+三处都取不到桶时拒绝启动;启动横幅打印 `bucket=`、`profile=`、`prefix=`,
+让「到底暴露了什么」始终可断言。
+
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `--listen` | `:8080` | 监听地址 |
-| `--bucket` | **必填** | 共享的桶;缺失即拒绝启动 |
+| `--bucket` | 取自配置解析 | 共享的桶:`--bucket` > `SAIL_BUCKET` > `profile.bucket`;三处都为空时拒绝启动 |
 | `--prefix` | 空 | 共享根前缀(映射为 `/`);越界路径一律拒绝 |
 | `--user` / `--password` | 空 | Basic 认证,**为空拒绝启动**,不允许匿名共享 |
 | `--tls-cert` / `--tls-key` | 空 | 同时提供即启用 HTTPS |
