@@ -5,13 +5,15 @@ func init() {
 		"S3 object storage CLI": "S3 对象存储 CLI",
 		`sail is a command-line tool for S3-compatible object storage, modeled on Linux/macOS file commands.
 It covers object transfer (cp/mv/rm/sync/mb/rb), listing and stats (ls/tree/find/du/stat),
-content viewing (view/head/tail/wc/grep), and validation/access (checksum/presign/url).
+content viewing (view/head/tail/wc/grep), validation/access (checksum/presign/url), and sharing
+a bucket with a file manager over WebDAV (serve webdav).
 A single static binary with zero runtime dependencies, compatible with AWS S3 / MinIO / Aliyun OSS
 and self-hosted S3-compatible services.
 
 Use --help on any command for detailed usage and examples.`: `sail 是 S3 协议对象存储的命令行工具,以 Linux/macOS 文件命令为基准。
 支持对象传输(cp/mv/rm/sync/mb/rb)、检索统计(ls/tree/find/du/stat)、
-内容查看(view/head/tail/wc/grep)、校验与访问(checksum/presign/url)。
+内容查看(view/head/tail/wc/grep)、校验与访问(checksum/presign/url),
+以及把 bucket 共享给文件管理器的 serve webdav。
 单二进制零运行时依赖,兼容 AWS S3 / MinIO / 阿里云 OSS 及自建 S3 兼容服务。
 
 所有命令统一用 --help 查看详细说明与示例。`,
