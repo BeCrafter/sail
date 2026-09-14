@@ -246,8 +246,8 @@ func (w *writeFile) commitPlain(ctx context.Context, contentType string) (vfs.Fi
 }
 
 // commitChunked 是 P2 的存储表示:暂存按 --chunk-size 切片上传到
-// .sail/parts/<version>/,最后把 manifest 写到逻辑 key —— 那一刻才是提交点。
-// 提交前逻辑 key 上仍是旧对象(或不存在),客户端看不到半成品。
+// .sail/parts/<逻辑路径>/<version>/,最后把 manifest 写到逻辑 key —— 那一刻才是
+// 提交点。提交前逻辑 key 上仍是旧对象(或不存在),客户端看不到半成品。
 func (w *writeFile) commitChunked(ctx context.Context, contentType string) (vfs.FileInfo, error) {
 	version := hex.EncodeToString(w.sum.Sum(nil))
 	w.sum = nil
@@ -305,9 +305,10 @@ func (w *writeFile) commitChunked(ctx context.Context, contentType string) (vfs.
 	if err != nil {
 		return vfs.FileInfo{}, fmt.Errorf("s3fs: 提交 %s 的 manifest 失败: %w", w.logical, err)
 	}
-	// 提交点已过:新版本对客户端可见。此后才尽力清理旧版本的片。
+	// 提交点已过:新版本对客户端可见。此后才尽力清理旧版本的片 —— 只清本路径
+	// 名下的旧代,天然不碰其它逻辑路径(哪怕内容相同)。
 	if old != "" && old != version {
-		w.fs.cleanupVersion(ctx, old)
+		w.fs.cleanupVersion(ctx, w.logical, old)
 	}
 	fmt.Fprintf(os.Stderr, "sail: %s 已分片存储: %d 片,片大小 %d 字节\n", w.logical, len(m.Chunks), w.fs.chunkSize)
 	return manifestInfo(w.logical, m, aws.ToString(out.ETag), time.Now()), nil
@@ -355,7 +356,7 @@ func (w *writeFile) uploadPart(ctx context.Context, version string, idx int, c m
 	// 会回卷重读,不可 seek 的 body 会直接报 "request stream is not seekable"。
 	out, err := w.fs.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(w.fs.bucket),
-		Key:    aws.String(partKey(version, idx)),
+		Key:    aws.String(w.fs.partKey(w.logical, version, idx)),
 		Body:   io.NewSectionReader(sec, c.Offset, c.Length),
 		// 片是内部对象,固定 octet-stream;原文件类型记在 manifest 上。
 		ContentType: aws.String("application/octet-stream"),

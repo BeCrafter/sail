@@ -10,13 +10,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BeCrafter/sail/internal/s3path"
 	"github.com/BeCrafter/sail/internal/vfs"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
 
 // 分片文件的判定与编码。逻辑 key 上放的是一个小 JSON(manifest),
-// 片放在保留前缀 .sail/parts/<version>/ 下。
+// 片放在保留前缀 .sail/parts/<逻辑路径>/<version>/ 下 —— 片目录按逻辑路径
+// 归属,两个路径即使内容相同也各存一份,回收退化成「删自己名下的前缀」。
 //
 // 判定两条路:
 //  1. 快路径:HeadObject 回显 x-amz-meta-sail-manifest-key(0 次额外请求,
@@ -127,13 +129,28 @@ func decodeManifest(b []byte) (*manifest, error) {
 }
 
 // partKey 是某个片的对象 key。序号固定 5 位十进制,便于按前缀列举时天然有序。
-func partKey(version string, idx int) string {
-	return fmt.Sprintf("%s%s/%05d", partsPrefix, version, idx)
+// 片与逻辑 key 走同一个根前缀(f.key),根前缀之外零对象。
+func (f *FS) partKey(logical, version string, idx int) string {
+	return fmt.Sprintf("%s/%05d", f.partsDir(logical, version), idx)
 }
 
-// partsPrefixOf 是某个版本的片目录前缀。
-func partsPrefixOf(version string) string {
-	return partsPrefix + version + "/"
+// partsDir 是某个逻辑路径某代片的目录 key。
+func (f *FS) partsDir(logical, version string) string {
+	return f.partsPath(logical) + version
+}
+
+// partsPath 是某个逻辑路径的全部片的命名空间,带尾随 "/"。
+// 归属是逻辑路径本身:partsPath 是单射,不存在两个路径共享片目录的情形。
+func (f *FS) partsPath(logical string) string {
+	name := strings.TrimPrefix(logical, "/")
+	if name == "" {
+		return f.key("/") + partsPrefix
+	}
+	base := s3path.JoinKey(f.key("/"), partsPrefix)
+	if strings.HasSuffix(name, "/") {
+		return base + name
+	}
+	return base + name + "/"
 }
 
 // metaManifest 判定 HEAD 响应是否带 manifest 元数据标记。

@@ -315,13 +315,17 @@ func (f *FS) OpenRead(ctx context.Context, p string) (vfs.ReadSeekCloser, error)
 	if m, cfi, ok, cerr := f.chunked(ctx, logical, key, h); cerr != nil {
 		return nil, cerr
 	} else if ok {
-		return newChunkedReader(ctx, f.client, f.bucket, m, cfi), nil
+		return newChunkedReader(ctx, f.client, f.bucket, f.partsPath(logical), m, cfi), nil
 	}
 	return &readFile{ctx: ctx, client: f.client, bucket: f.bucket, key: key, info: fi, size: fi.Size}, nil
 }
 
 // Remove 删除单个对象;recursive 为真时删除该前缀下的全部对象(
 // 含目录标记对象),批量 DeleteObjects 每批 1000 个。
+//
+// 分片文件/目录的片命名空间不落在逻辑 key 的前缀下(见 partsPath),
+// 因此两种 recursive 取值都必须显式回收本路径名下的片 —— 回收是纯前缀删除,
+// 不需要读 manifest,也不可能碰到其它逻辑路径的数据。
 func (f *FS) Remove(ctx context.Context, p string, recursive bool) error {
 	logical, err := normalize(p)
 	if err != nil {
@@ -342,7 +346,11 @@ func (f *FS) Remove(ctx context.Context, p string, recursive bool) error {
 		}
 		return f.deleteObjects(ctx, []string{key})
 	}
-	// 递归删除:按前缀整体清,片目录也在该前缀下,天然一并删掉。
+	// 递归删除:按前缀整体清。先回收该路径名下的片(此时逻辑 key 仍可见,
+	// 失败只留可判定孤儿,不会把文件删成半截),再删逻辑前缀。
+	if f.chunkedUpload {
+		f.cleanupPrefix(ctx, f.partsPath(logical), "分片")
+	}
 	prefix := key
 	if !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
@@ -413,7 +421,7 @@ func (f *FS) Rename(ctx context.Context, oldPath, newPath string) error {
 		return vfs.ErrNotSupported
 	}
 
-	// 分片文件:片目录名取自内容哈希,只搬 manifest 会让新路径读不出内容。
+	// 分片文件:片目录按逻辑路径归属,只搬 manifest 会让新路径读不出内容。
 	// 先把片复制到新路径自己的版本目录,再写新 manifest,最后删旧件旧片。
 	if m, ok, cerr := f.detectManifest(ctx, oldKey, oldHead); cerr != nil {
 		return cerr

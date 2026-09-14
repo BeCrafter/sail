@@ -338,8 +338,8 @@ when listing directories.
 Off by default: one file is one object, and existing buckets plus third-party S3 tools see nothing
 new. Turn it on when the backend has a small per-object ceiling (for example a gateway in front of
 the bucket that rejects large objects): files larger than `--chunk-size` are then split into chunks
-stored under the reserved `.sail/parts/<version>/` prefix, with a few-hundred-byte JSON **manifest**
-at the logical key.
+stored under the reserved `.sail/parts/<logical path>/<version>/` prefix, with a few-hundred-byte
+JSON **manifest** at the logical key.
 
 ```bash
 # Split anything over 100MiB; the pieces live under .sail/, the key holds a manifest
@@ -352,6 +352,12 @@ Rules that hold once it is on:
 - **The manifest is the commit point.** Chunks are uploaded first; the logical key is only
   overwritten once every chunk has landed, so a client never sees a half-written file. Reads follow
   the manifest and fetch only the chunk(s) a Range touches — no full-file buffering.
+- **A chunk directory belongs to one logical path.** The chunks of `/a/big.bin` live under
+  `.sail/parts/a/big.bin/<version>/`; another path stores its own copy even when the content is
+  byte-identical. An overwrite therefore purges only its own old generation, and deleting a file or
+  directory reclaims that path's chunks — never another path's.
+- **Chunks share the logical keys' root prefix** (`--prefix`). With a shared root prefix configured,
+  chunks stay inside it too, so instances sharing one bucket cannot overwrite each other's data.
 - `--chunk-size` must be between `5MiB` and `5GiB` (the S3 `PutObject` request ceiling) and must not
   exceed `--backend-max-object-size`; an out-of-range value refuses startup instead of failing later.
 - **`sail presign` fails loud on chunked keys**: a presigned URL would hand out the manifest, not the
@@ -359,8 +365,10 @@ Rules that hold once it is on:
   really want the manifest itself).
 - **The bucket now contains `.sail/` objects.** They are filtered out of WebDAV listings, but
   `sail ls` and other clients will show them. If a delete or overwrite is interrupted, orphaned
-  chunks may remain; they are invisible to listing and data-consistent, but there is no `sail gc`
-  command yet.
+  chunks may remain; they are invisible to listing and data-consistent. There is no `sail gc`
+  command yet, but the **detection rule now exists**: the directory name records the owning logical
+  path, so a single HEAD per candidate settles whether the generation is still referenced — a GC
+  never has to scan the whole bucket.
 
 ## Cross-check with AWS CLI
 
