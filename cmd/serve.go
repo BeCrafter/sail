@@ -81,9 +81,6 @@ func runServeWebdav(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	if cfgBucket == "" {
-		return errors.New(i18n.T("--bucket is required: WebDAV shares a whole bucket, and without one there is no data to expose"))
-	}
 	if o.user == "" || o.password == "" {
 		return errors.New(i18n.T("--user and --password are required: this gateway does not allow anonymous sharing"))
 	}
@@ -110,6 +107,14 @@ func runServeWebdav(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	// 桶取自统一解析链的出口 r.Bucket(--bucket > SAIL_BUCKET > profile.bucket)。
+	// config.Resolve 刻意不校验 Bucket 非空(多数命令可由 s3://bucket/key 显式给出),
+	// 而 WebDAV 共享的是整桶,没有桶就无从共享,故这一条由 serve 自己兜。
+	if r.Bucket == "" {
+		return errors.New(i18n.Tf(
+			"no bucket to share: pass --bucket, set SAIL_BUCKET, or add \"bucket\" to profile %q in the config file — WebDAV exposes a whole bucket, and without one there is nothing to share",
+			r.ProfileName))
+	}
 	ctx := context.Background()
 	s3c, err := client.New(ctx, r)
 	if err != nil {
@@ -118,7 +123,7 @@ func runServeWebdav(cmd *cobra.Command, _ []string) error {
 
 	core, err := s3fs.New(s3fs.Config{
 		Client:        s3c,
-		Bucket:        cfgBucket,
+		Bucket:        r.Bucket,
 		Prefix:        o.prefix,
 		StagingDir:    o.stagingDir,
 		MaxUploadSize: maxUpload,
@@ -153,13 +158,22 @@ func runServeWebdav(cmd *cobra.Command, _ []string) error {
 		scheme = "https"
 	}
 	fmt.Fprint(os.Stderr, i18n.Tf(
-		"sail webdav started: %s://%s  bucket=%s prefix=%q user=%s max-object-size=%s staging=%s chunked=%s\n",
-		scheme, o.listen, cfgBucket, corePrefix(o.prefix), o.user, humanSize(maxUpload), stagingDirOf(o.stagingDir), chunkedText(o.chunkedUpload, chunkSize)))
+		"sail webdav started: %s://%s  bucket=%s profile=%s%s user=%s max-object-size=%s staging=%s chunked=%s\n",
+		scheme, o.listen, r.Bucket, r.ProfileName, exposePrefix(o.prefix), o.user, humanSize(maxUpload), stagingDirOf(o.stagingDir), chunkedText(o.chunkedUpload, chunkSize)))
 
 	if o.tlsCert != "" {
 		return httpSrv.ListenAndServeTLS(o.tlsCert, o.tlsKey)
 	}
 	return httpSrv.ListenAndServe()
+}
+
+// exposePrefix 渲染启动横幅里的共享前缀段:未设前缀时整段省略,
+// 免得 `prefix=""` 让「没设前缀」看起来像一个空前缀。
+func exposePrefix(p string) string {
+	if p = corePrefix(p); p != "" {
+		return " prefix=" + p
+	}
+	return ""
 }
 
 func corePrefix(p string) string {

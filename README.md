@@ -288,14 +288,21 @@ sail serve webdav --bucket mybucket --listen :8443 \
 # Share only a prefix inside the bucket (mapped to /, out-of-prefix paths are always rejected)
 sail serve webdav --bucket mybucket --prefix tenant-a --user alice --password '***'
 
+# Omit --bucket: resolved like every other command (--bucket > SAIL_BUCKET > profile.bucket)
+sail serve webdav --profile prod --user alice --password '***'
+
 # Print the one-time Windows client registry setup and mount command, then exit
 sail serve webdav --print-windows-setup
 ```
 
+The bucket is taken from the same resolution chain every other command uses: `--bucket` >
+`SAIL_BUCKET` > `profile.bucket`. Startup is refused when none of the three yields a bucket;
+the startup banner prints `bucket=`, `profile=`, and `prefix=` so what is exposed stays assertable.
+
 | Flag | Default | Description |
 |---|---|---|
 | `--listen` | `:8080` | Listen address |
-| `--bucket` | **required** | Bucket to share; startup is refused when missing |
+| `--bucket` | from config resolution | Bucket to share: `--bucket` > `SAIL_BUCKET` > `profile.bucket`; startup is refused when all three are empty |
 | `--prefix` | empty | Shared root prefix (mapped to `/`); out-of-prefix paths are always rejected |
 | `--user` / `--password` | empty | Basic auth; startup is refused when empty, anonymous sharing is not allowed |
 | `--tls-cert` / `--tls-key` | empty | Supplying both enables HTTPS |

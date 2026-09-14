@@ -1,8 +1,12 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/BeCrafter/sail/internal/i18n"
 )
 
 func TestParseSize(t *testing.T) {
@@ -50,18 +54,31 @@ func TestHumanSize(t *testing.T) {
 }
 
 func TestServeWebdavRequiresBucketAndCredentials(t *testing.T) {
-	origBucket, origOpts := cfgBucket, serveWebdavOpts
+	origBucket, origOpts, origPath, origProfile := cfgBucket, serveWebdavOpts, cfgPath, profile
 	t.Cleanup(func() {
-		cfgBucket, serveWebdavOpts = origBucket, origOpts
+		cfgBucket, serveWebdavOpts, cfgPath, profile = origBucket, origOpts, origPath, origProfile
 	})
 
+	// 缺桶分支:三条来源(--bucket / SAIL_BUCKET / profile.bucket)都没有桶才拒绝启动。
+	// 配置文件解析在 flag 校验之后,故这里必须注入一份合法配置,否则报错会变成
+	// 「读不到配置」而不是「没有桶」;凭据也要给全,否则先撞上 --user/--password 校验。
+	writeServeConfig(t, "")
+	t.Setenv("SAIL_BUCKET", "")
+	serveWebdavOpts = serveWebdavFlags{backendMaxSize: "5TiB", listen: ":8080", user: "alice", password: "s3cret"}
 	cfgBucket = ""
-	serveWebdavOpts = serveWebdavFlags{backendMaxSize: "5TiB", listen: ":8080"}
-	if err := runServeWebdav(serveWebdavCmd, nil); err == nil || !strings.Contains(err.Error(), "--bucket") {
-		t.Fatalf("缺少 bucket 应报错,实际 %v", err)
+	err := runServeWebdav(serveWebdavCmd, nil)
+	if err == nil {
+		t.Fatal("缺少 bucket 应报错")
+	}
+	for _, want := range []string{"--bucket", "SAIL_BUCKET", "bucket"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("缺桶错误未提到 %q:%v", want, err)
+		}
 	}
 
-	cfgBucket = "mybucket"
+	// 以下 flag 校验一律先于配置解析:配置刻意指向不存在的路径,若顺序被改动,
+	// 报错会退化成「读配置失败」而被这些断言抓住。
+	cfgPath = filepath.Join(t.TempDir(), "no-such-config.yaml")
 	serveWebdavOpts.user = "alice"
 	serveWebdavOpts.password = ""
 	if err := runServeWebdav(serveWebdavCmd, nil); err == nil || !strings.Contains(err.Error(), "--user") {
@@ -79,6 +96,76 @@ func TestServeWebdavRequiresBucketAndCredentials(t *testing.T) {
 	serveWebdavOpts.backendMaxSize = "不是大小"
 	if err := runServeWebdav(serveWebdavCmd, nil); err == nil || !strings.Contains(err.Error(), "backend-max-object-size") {
 		t.Fatalf("非法上限应报错,实际 %v", err)
+	}
+}
+
+// writeServeConfig 写一份最小可用配置(含凭据与所需 bucket),并把全局 flag 指向它。
+// bucket 传空串即写出「profile 未配置 bucket」的合法配置 —— config.Resolve 不校验 Bucket 非空。
+func writeServeConfig(t *testing.T, bucket string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	body := "default-profile: prod\nprofiles:\n  prod:\n    endpoint: http://127.0.0.1:9000\n" +
+		"    access-key: ak\n    secret-key: sk\n    bucket: " + bucket + "\n" +
+		"    region: us-east-1\n    path-style: true\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("写配置失败: %v", err)
+	}
+	origPath, origProfile, origBucket := cfgPath, profile, cfgBucket
+	t.Cleanup(func() { cfgPath, profile, cfgBucket = origPath, origProfile, origBucket })
+	cfgPath, profile, cfgBucket = path, "prod", ""
+}
+
+// 默认桶的唯一解析出口是 loadResolved() 的 r.Bucket,优先级 --bucket > SAIL_BUCKET > profile.bucket。
+func TestLoadResolvedBucketPriorityChain(t *testing.T) {
+	cases := []struct {
+		name        string
+		profileBkt  string
+		envBucket   string
+		flagBucket  string
+		wantBucket  string
+		wantProfile string
+	}{
+		{"仅 profile 提供桶", "tizzy", "", "", "tizzy", "prod"},
+		{"SAIL_BUCKET 覆盖 profile", "tizzy", "env-bucket", "", "env-bucket", "prod"},
+		{"--bucket 覆盖 env 与 profile", "tizzy", "env-bucket", "other", "other", "prod"},
+		{"profile 无桶且无 flag/env", "", "", "", "", "prod"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			writeServeConfig(t, c.profileBkt)
+			t.Setenv("SAIL_BUCKET", c.envBucket)
+			cfgBucket = c.flagBucket
+
+			r, _, err := loadResolved()
+			if err != nil {
+				t.Fatalf("loadResolved 失败: %v", err)
+			}
+			if r.Bucket != c.wantBucket {
+				t.Errorf("bucket = %q,期望 %q", r.Bucket, c.wantBucket)
+			}
+			if r.ProfileName != c.wantProfile {
+				t.Errorf("profile = %q,期望 %q", r.ProfileName, c.wantProfile)
+			}
+		})
+	}
+}
+
+// 启动横幅是绑定后唯一的「我到底暴露了什么」断言面:bucket / profile / prefix 三件事都必须在。
+func TestServeBannerExposesBucketProfilePrefix(t *testing.T) {
+	line := i18n.Tf(
+		"sail webdav started: %s://%s  bucket=%s profile=%s%s user=%s max-object-size=%s staging=%s chunked=%s\n",
+		"https", ":8443", "tizzy", "prod", exposePrefix("tenant-a"), "alice", humanSize(5<<40), stagingDirOf(""), chunkedText(false, 0))
+	for _, want := range []string{"bucket=tizzy", "profile=prod", "prefix=tenant-a"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("启动横幅缺少 %q:%s", want, line)
+		}
+	}
+	// 未设前缀时整段省略,不出现具有误导性的 `prefix=""`。
+	if line := exposePrefix(""); line != "" {
+		t.Errorf("空前缀应省略整段,实际 %q", line)
+	}
+	if line := exposePrefix("/tenant-a/"); line != " prefix=tenant-a" {
+		t.Errorf("前缀应归一化渲染,实际 %q", line)
 	}
 }
 
