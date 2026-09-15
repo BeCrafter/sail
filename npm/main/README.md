@@ -137,7 +137,7 @@ the startup banner prints `bucket=`, `profile=`, `prefix=`, and the mountable ad
 |---|---|---|
 | `--listen` | `:8080` | Listen address (`serve.listen`) |
 | `--prefix` | empty | Shared root prefix (mapped to `/`); out-of-prefix paths are always rejected (`serve.prefix`) |
-| `--user` / `--password` | empty | Basic auth; startup is refused when empty, anonymous sharing is not allowed |
+| `--user` / `--password` | empty | Basic auth; startup is refused when empty, anonymous sharing is not allowed. Mutually exclusive with `serve.users` |
 | `--tls-cert` / `--tls-key` | empty | Supplying both enables HTTPS |
 | `--staging-dir` | system temp dir | Write staging directory; peak ≈ largest single file × concurrent uploads |
 | `--chunked-upload` / `--chunk-size` | `false` / `4GiB` | Store files larger than `--chunk-size` as chunks + a manifest (off: 1 file = 1 object) |
@@ -147,6 +147,13 @@ the startup banner prints `bucket=`, `profile=`, `prefix=`, and the mountable ad
 
 Mount with **macOS Finder** (⌘K, `https://host:8443`) or **Windows Explorer** (run
 `--print-windows-setup` first to lift the ~50MB WebClient registry gate, then `net use Z: \\host@SSL@8443\DavWWWRoot`).
+
+**Multi-user (`serve.users`)**: write a user table into the profile's `serve:` block and each user
+gets a Basic-auth identity with a private namespace under the base prefix — structural isolation,
+seconds-level hot reload of the user table (no restart for adding/removing users or changing
+passwords), and automatic creation of each user's root directory. `users` and `user`/`password`
+are mutually exclusive; prefixes must be pairwise non-nested (fail-loud). Single-user mode is
+unchanged. Details in the [repo README](https://github.com/BeCrafter/sail#multi-user-serveusers).
 
 See the [repo README](https://github.com/BeCrafter/sail#webdav-gateway-sail-serve-webdav) for the
 full flag table, design boundaries (in-process LOCK, 501 on directory MOVE/COPY), and chunked storage.

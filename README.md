@@ -133,7 +133,7 @@ profiles:
       # chunk-size: 4GiB
 ```
 
-Each `serve` field maps one-to-one to the same-named `serve webdav` flag (size fields use the same string format as the flags, e.g. `5TiB`). `user`/`password` accept plaintext or a `${VAR}` environment-variable reference, matching the access-key/secret-key key-security mechanism; empty fields fall back to the flag defaults.
+Each `serve` field maps one-to-one to the same-named `serve webdav` flag (size fields use the same string format as the flags, e.g. `5TiB`). `user`/`password` accept plaintext or a `${VAR}` environment-variable reference, matching the access-key/secret-key key-security mechanism; empty fields fall back to the flag defaults. The optional `users` list enables multi-user mode — see "Multi-user" under the WebDAV gateway.
 
 ### cdn-domain notes
 
@@ -335,7 +335,7 @@ it explicitly to override the config value.
 | `--profile` | config `default-profile` | Which profile to share: the bucket comes from that profile's `bucket` (overridable by global `--bucket` or `SAIL_BUCKET`); startup is refused when all three are empty |
 | `--listen` | `:8080` | Listen address (`serve.listen`) |
 | `--prefix` | empty | Shared root prefix (mapped to `/`); out-of-prefix paths are always rejected (`serve.prefix`) |
-| `--user` / `--password` | empty | Basic auth; startup is refused when empty, anonymous sharing is not allowed (`serve.user`/`serve.password`) |
+| `--user` / `--password` | empty | Basic auth; startup is refused when empty, anonymous sharing is not allowed (`serve.user`/`serve.password`). Mutually exclusive with `serve.users` |
 | `--tls-cert` / `--tls-key` | empty | Supplying both enables HTTPS (`serve.tls-cert`/`serve.tls-key`) |
 | `--backend-max-object-size` | `5TiB` | Declared backend per-object limit (S3 has no capability negotiation, it can't be probed) (`serve.backend-max-object-size`) |
 | `--max-upload-size` | follows the flag above | Request body limit; over the limit returns 413 + actionable guidance before the body is fully read (`serve.max-upload-size`) |
@@ -349,6 +349,48 @@ it explicitly to override the config value.
 The startup banner derives mount URLs from the bind address: for a wildcard bind (`:8080`/`0.0.0.0:8080`) it lists both `http://localhost:PORT/` (this machine) and each interface's LAN IP (other devices); for an explicit host it lists only that address.
 
 > **Performance**: uploads/downloads stream via server-side Range reads without staging whole files in memory; the HTTP connection pool is tuned for high-concurrency S3, reusing long-lived connections when opening many files at once; directory listings are short-TTL cached. Opening a single file is 1 `HeadObject` + 1 `GetObject`.
+
+### Multi-user (`serve.users`)
+
+One gateway can serve multiple users, each with a private space. Write the user table into the
+profile's `serve:` block — every user gets a Basic-auth identity and their own namespace:
+
+```yaml
+    serve:
+      listen: ":8443"
+      prefix: team/            # base prefix (cold zone: changes need a restart)
+      users:
+        - name: alice
+          password: ${ALICE_PASSWORD}   # ${VAR} reference, same as other serve fields
+          prefix: alice/                # relative to prefix; omitted = the base prefix itself
+          # quota: 10GiB                # syntax validated at startup; enforcement lands with MERC-11 P2
+        - name: bob
+          password: ${BOB_PASSWORD}
+          prefix: shared/bob-data/      # any relative segment
+```
+
+- **Structural isolation.** A user's effective prefix is the base `prefix` + their `prefix`
+  segment; every object key they touch (including `.sail/` chunk parts) lands inside it. A user's
+  `/` is their own space — other users' objects are structurally unreachable, `..` traversal is
+  rejected, and the access log attributes every request as `user=<name>`.
+- **Hot reload.** The user table is watched: editing the config file (add/remove users, change
+  passwords or prefixes) takes effect within seconds, no restart. `listen`, TLS certificates,
+  `staging-dir`, chunked-upload settings and the base `prefix` are cold zone — changing them logs
+  a "restart required" warning and keeps the running values. A broken YAML keeps the previous
+  user table (with a warning); deleting and recreating the config file does not kill the watcher,
+  and the new content is picked up automatically.
+- **Directory auto-create.** When a user comes into effect (startup or reload), sail asynchronously
+  creates a 0-byte directory marker at the user's prefix so the folder is visible in S3 consoles
+  and to `sail ls`. Creation is idempotent and best-effort: an S3 hiccup logs a warning and the
+  user still works — the marker is visibility, not a mount prerequisite.
+- **Fail-loud conflicts.** `users` and `user`/`password` are mutually exclusive (across sources
+  too: a `--user`/`--password` flag plus a config `users` table is refused). Effective prefixes
+  must be pairwise distinct and non-nested — `alice/` and `alice/logs/` cannot coexist, since the
+  outer user would list the inner user's objects. Both checks run at startup and on every reload;
+  violations are refused and the previous state is kept.
+- **Single-user mode stays.** `--user`/`--password` (or `serve.user`/`serve.password`) behaves
+  exactly as before: one implicit user on the base prefix. Credentials that come from flags
+  disable hot reload — a warning is printed at startup.
 
 ### Mounting from clients
 

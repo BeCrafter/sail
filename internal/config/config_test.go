@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -180,7 +181,7 @@ profiles:
 		StagingDir: "/tmp/stage", BackendMaxSize: "100GiB", MaxUploadSize: "50GiB",
 		ChunkedUpload: true, ChunkSize: "10MiB",
 	}
-	if r.Serve != want {
+	if !reflect.DeepEqual(r.Serve, want) {
 		t.Errorf("serve 块透传错误:\n got %+v\nwant %+v", r.Serve, want)
 	}
 
@@ -193,7 +194,7 @@ profiles:
     secret-key: sk
 `)
 	var zero ServeConfig
-	if r.Serve != zero {
+	if !reflect.DeepEqual(r.Serve, zero) {
 		t.Errorf("未配置 serve 块应为零值,got %+v", r.Serve)
 	}
 }

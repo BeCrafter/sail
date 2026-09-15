@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,9 +9,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/BeCrafter/sail/internal/client"
@@ -18,6 +21,9 @@ import (
 	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/BeCrafter/sail/internal/vfs/s3fs"
 	"github.com/BeCrafter/sail/internal/webdavfs"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/cobra"
 )
 
@@ -103,38 +109,13 @@ func runServeWebdav(cmd *cobra.Command, _ []string) error {
 			"no bucket to share: pass --bucket, set SAIL_BUCKET, or add \"bucket\" to profile %q in the config file — WebDAV exposes a whole bucket, and without one there is nothing to share",
 			r.ProfileName))
 	}
-	ctx := context.Background()
-	s3c, err := client.New(ctx, r)
+
+	rt, err := newServeRuntime(o, r, s, cmd.Flags().Changed, log.New(os.Stderr, "", log.LstdFlags))
 	if err != nil {
 		return err
 	}
 
-	core, err := s3fs.New(s3fs.Config{
-		Client:        s3c,
-		Bucket:        r.Bucket,
-		Prefix:        s.prefix,
-		StagingDir:    s.stagingDir,
-		MaxUploadSize: s.maxUpload,
-		ChunkedUpload: s.chunkedUpload,
-		ChunkSize:     s.chunkSize,
-	})
-	if err != nil {
-		return err
-	}
-	srv, err := webdavfs.NewServer(webdavfs.Config{
-		FileSystem:        webdavfs.NewWithListingCache(core, s.dirCacheTTL),
-		User:              s.user,
-		Password:          s.password,
-		MaxUploadSize:     s.maxUpload,
-		MaxUploadSizeText: humanSize(s.maxUpload),
-		Logger:            log.New(os.Stderr, "", log.LstdFlags),
-		PrewarmDirs:       s.prewarm,
-	})
-	if err != nil {
-		return err
-	}
-
-	httpSrv := newServeHTTPServer(s.listen, srv)
+	httpSrv := newServeHTTPServer(s.listen, rt.gw)
 
 	scheme := "http"
 	if s.tlsCert != "" {
@@ -142,12 +123,25 @@ func runServeWebdav(cmd *cobra.Command, _ []string) error {
 	}
 	fmt.Fprint(os.Stderr, i18n.Tf(
 		"sail webdav started: %s://%s  bucket=%s profile=%s%s user=%s max-object-size=%s staging=%s chunked=%s\n",
-		scheme, s.listen, r.Bucket, r.ProfileName, exposePrefix(s.prefix), s.user, humanSize(s.maxUpload), stagingDirOf(s.stagingDir), chunkedText(s.chunkedUpload, s.chunkSize)))
+		scheme, s.listen, r.Bucket, r.ProfileName, exposePrefix(s.prefix), usersBanner(s), humanSize(s.maxUpload), stagingDirOf(s.stagingDir), chunkedText(s.chunkedUpload, s.chunkSize)))
+	for _, line := range userSpaceLines(s) {
+		fmt.Fprint(os.Stderr, line)
+	}
 	if urls := serveURLs(scheme, s.listen); len(urls) > 0 {
 		fmt.Fprint(os.Stderr, i18n.Tf("  mount at: %s\n", strings.Join(urls, "  ")))
 		if len(urls) > 1 {
 			fmt.Fprint(os.Stderr, i18n.T("  (localhost = this machine; LAN IP = other devices)\n"))
 		}
+	}
+
+	// 热加载只在用户表来自配置文件时开启。凭据来自 --user/--password flag 是
+	// 临时形态(列表语义不适合 CLI 参数),配置变更不热生效,启动时明确告警。
+	if serveUserFromFlags(cmd) {
+		fmt.Fprint(os.Stderr, i18n.T("  users come from --user/--password flags: config file changes will NOT hot-apply; restart to change users\n"))
+	} else if cfgFile := serveWatchTarget(); cfgFile != "" {
+		watchConfig(context.Background(), cfgFile, 500*time.Millisecond, rt.reload, rt.logger)
+	} else {
+		fmt.Fprint(os.Stderr, i18n.T("  no config file path resolved: hot reload disabled\n"))
 	}
 
 	if s.tlsCert != "" {
@@ -156,12 +150,56 @@ func runServeWebdav(cmd *cobra.Command, _ []string) error {
 	return httpSrv.ListenAndServe()
 }
 
+// serveUserFromFlags 判定单用户凭据是否来自命令行 flag(flag 显式给出即视为
+// 来自 flag,即使配置文件里也有同名字段——flag 优先)。
+func serveUserFromFlags(cmd *cobra.Command) bool {
+	return cmd.Flags().Changed("user") || cmd.Flags().Changed("password")
+}
+
+// serveWatchTarget 返回热加载监听的配置文件路径;解析不出则返回空串。
+func serveWatchTarget() string {
+	if cfgPath != "" {
+		return cfgPath
+	}
+	p, err := config.ConfigPath()
+	if err != nil {
+		return ""
+	}
+	return p
+}
+
+// usersBanner 渲染启动横幅的 user 段:单用户沿用既有格式;多用户列名字
+// (不渲染密码),每个用户的空间映射在随后的 userSpaceLines 里逐行展开。
+func usersBanner(s serveSettings) string {
+	if len(s.users) == 0 {
+		return s.user
+	}
+	names := make([]string, 0, len(s.users))
+	for _, u := range s.users {
+		names = append(names, u.Name)
+	}
+	return strings.Join(names, ",")
+}
+
+// userSpaceLines 是多用户模式下逐行展开的「用户 → 空间前缀」映射。
+func userSpaceLines(s serveSettings) []string {
+	if len(s.users) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, len(s.users))
+	for _, u := range s.users {
+		lines = append(lines, "  "+u.Name+" → "+config.EffectivePrefix(s.prefix, u.Prefix)+"/\n")
+	}
+	return lines
+}
+
 // serveSettings 是合并并校验后的 serve 生效参数。
 type serveSettings struct {
 	listen        string
 	prefix        string
 	user          string
 	password      string
+	users         []config.UserConfig
 	tlsCert       string
 	tlsKey        string
 	stagingDir    string
@@ -190,7 +228,19 @@ func mergeServe(o serveWebdavFlags, r *config.Resolved, changed func(string) boo
 		chunkedUpload = o.chunkedUpload
 	}
 
-	if user == "" || password == "" {
+	// 用户表只来自配置文件(users 列表语义不适合 CLI 参数);单 user/password
+	// 是兼容既有用法的隐式一用户表,两者同设属配置冲突,fail-loud(I4)。
+	users := r.Serve.Users
+	if len(users) > 0 && (user != "" || password != "") {
+		return serveSettings{}, errors.New(i18n.Tf(
+			"serve.users and user/password are mutually exclusive (profile %q): configure either the users list or the single-user pair, not both",
+			r.ProfileName))
+	}
+	if len(users) > 0 {
+		if err := config.ValidateUsers(corePrefix(prefix), users); err != nil {
+			return serveSettings{}, err
+		}
+	} else if user == "" || password == "" {
 		return serveSettings{}, errors.New(i18n.Tf(
 			"--user and --password are required (from flags or profile %q \"serve\" config): this gateway does not allow anonymous sharing",
 			r.ProfileName))
@@ -223,6 +273,7 @@ func mergeServe(o serveWebdavFlags, r *config.Resolved, changed func(string) boo
 		prefix:        prefix,
 		user:          user,
 		password:      password,
+		users:         users,
 		tlsCert:       tlsCert,
 		tlsKey:        tlsKey,
 		stagingDir:    stagingDir,
@@ -232,6 +283,301 @@ func mergeServe(o serveWebdavFlags, r *config.Resolved, changed func(string) boo
 		dirCacheTTL:   dirCacheTTL,
 		prewarm:       o.prewarm,
 	}, nil
+}
+
+// serveRuntime 聚合 serve 进程的运行期状态:冷区设置快照、共享 S3 client、
+// 网关与每用户栈缓存。热加载只动用户表(I7);栈缓存与 reload 只被初始构建
+// 与 watch goroutine 串行触达,reload 之间经 reloadMu 互斥,无需其他锁。
+type serveRuntime struct {
+	o        serveWebdavFlags
+	changed  func(string) bool
+	settings serveSettings
+	bucket   string
+	profile  string
+	s3c      *s3.Client
+	gw       *webdavfs.Server
+	logger   *log.Logger
+
+	reloadMu sync.Mutex
+	// stacks 是生效前缀 → 根文件系统的栈缓存。栈按生效前缀一一对应
+	// (I6 已禁前缀相等),改密码/名字复用同一栈,删用户/改前缀退役。
+	stacks map[string]*webdavfs.FileSystem
+	// ensured 是已完成目录标记创建的生效前缀;ensure 失败不登记,下次
+	// reload 重试(I10)。
+	ensured map[string]bool
+}
+
+// effectiveUserTable 把生效参数归一为用户表:多用户取配置表;单用户是
+// 隐式一用户表(相对前缀为空,即 base 前缀本身,不限额)。
+func effectiveUserTable(s serveSettings) []config.UserConfig {
+	if len(s.users) > 0 {
+		return s.users
+	}
+	return []config.UserConfig{{Name: s.user, Password: s.password}}
+}
+
+// newServeRuntime 构建共享 S3 client、初始用户栈与网关。
+func newServeRuntime(o serveWebdavFlags, r *config.Resolved, s serveSettings, changed func(string) bool, logger *log.Logger) (*serveRuntime, error) {
+	s3c, err := client.New(context.Background(), r)
+	if err != nil {
+		return nil, err
+	}
+	rt := &serveRuntime{
+		o:        o,
+		changed:  changed,
+		settings: s,
+		bucket:   r.Bucket,
+		profile:  r.ProfileName,
+		s3c:      s3c,
+		logger:   logger,
+		stacks:   map[string]*webdavfs.FileSystem{},
+		ensured:  map[string]bool{},
+	}
+	if err := rt.applyUserTable(effectiveUserTable(s)); err != nil {
+		return nil, err
+	}
+	return rt, nil
+}
+
+// buildEntries 为用户表构建路由条目:栈按生效前缀复用缓存,缺失则新建
+// (共享同一 S3 client,构建是内存操作)。前缀基点用运行中的 settings.prefix
+// ——base 属冷区,热加载按它解释用户前缀。
+func (rt *serveRuntime) buildEntries(users []config.UserConfig) ([]webdavfs.UserEntry, error) {
+	entries := make([]webdavfs.UserEntry, 0, len(users))
+	for _, u := range users {
+		eff := config.EffectivePrefix(rt.settings.prefix, u.Prefix)
+		fs, ok := rt.stacks[eff]
+		if !ok {
+			core, err := s3fs.New(s3fs.Config{
+				Client:        rt.s3c,
+				Bucket:        rt.bucket,
+				Prefix:        eff,
+				StagingDir:    rt.settings.stagingDir,
+				MaxUploadSize: rt.settings.maxUpload,
+				ChunkedUpload: rt.settings.chunkedUpload,
+				ChunkSize:     rt.settings.chunkSize,
+			})
+			if err != nil {
+				return nil, err
+			}
+			fs = webdavfs.NewWithListingCache(core, rt.settings.dirCacheTTL)
+			rt.stacks[eff] = fs
+		}
+		entries = append(entries, webdavfs.UserEntry{
+			Name:        u.Name,
+			Password:    u.Password,
+			FileSystem:  fs,
+			PrewarmDirs: rt.settings.prewarm,
+		})
+	}
+	return entries, nil
+}
+
+// applyUserTable 校验并应用一份用户表,是启动与热加载共用的单一闸门:
+// Validate(互斥/嵌套/密码/quota,启动时 mergeServe 已做过一遍,这里对
+// 运行中的 base 再验)→ Swap(建网关或换表)→ 为新前缀异步补建目录。
+// 任何失败返回错误,旧表原样生效。
+func (rt *serveRuntime) applyUserTable(users []config.UserConfig) error {
+	if err := config.ValidateUsers(corePrefix(rt.settings.prefix), users); err != nil {
+		return err
+	}
+	if rt.gw == nil {
+		entries, err := rt.buildEntries(users)
+		if err != nil {
+			return err
+		}
+		gw, err := webdavfs.NewServer(webdavfs.Config{
+			Users:             entries,
+			MaxUploadSize:     rt.settings.maxUpload,
+			MaxUploadSizeText: humanSize(rt.settings.maxUpload),
+			Logger:            rt.logger,
+		})
+		if err != nil {
+			return err
+		}
+		rt.gw = gw
+	} else {
+		old := make(map[string]bool, len(rt.stacks))
+		for eff := range rt.stacks {
+			old[eff] = true
+		}
+		entries, err := rt.buildEntries(users)
+		if err != nil {
+			return err
+		}
+		if err := rt.gw.SwapUsers(entries); err != nil {
+			for eff := range rt.stacks {
+				if !old[eff] {
+					delete(rt.stacks, eff)
+				}
+			}
+			return err
+		}
+		// 退役:缓存里已不在新表中的前缀,连同其栈交给 GC;预热 goroutine
+		// 已由网关换表时取消(I9),在途请求持旧 handler 引用自然完成。
+		effs := make(map[string]bool, len(users))
+		for _, u := range users {
+			effs[config.EffectivePrefix(rt.settings.prefix, u.Prefix)] = true
+		}
+		for eff := range rt.stacks {
+			if !effs[eff] {
+				delete(rt.stacks, eff)
+			}
+		}
+	}
+	// 多用户模式下异步幂等创建用户空间目录(I10);单用户兼容模式保持
+	// 既有行为,不自动创建。
+	if len(rt.settings.users) > 0 {
+		for _, u := range users {
+			if eff := config.EffectivePrefix(rt.settings.prefix, u.Prefix); eff != "" {
+				rt.ensureDirAsync(eff)
+			}
+		}
+	}
+	return nil
+}
+
+// reload 是热加载回调,统一三步(I8):Load → Validate → Swap;任何失败
+// 保留旧用户表并告警,服务不中断。冷区字段变更仅告警,不改运行参数(I7)。
+func (rt *serveRuntime) reload() {
+	rt.reloadMu.Lock()
+	defer rt.reloadMu.Unlock()
+	rt.logger.Print(i18n.T("config change detected: reloading user table"))
+	r2, _, err := loadResolved()
+	if err != nil {
+		rt.logger.Print(i18n.Tf("reload rejected, keeping previous user table: %v", err))
+		return
+	}
+	s2, err := mergeServe(rt.o, r2, rt.changed)
+	if err != nil {
+		rt.logger.Print(i18n.Tf("reload rejected, keeping previous user table: %v", err))
+		return
+	}
+	rt.warnColdZone(r2, s2)
+	users := effectiveUserTable(s2)
+	// 生效前缀按运行中的 base 解释(base 属冷区),校验与应用经同一闸门。
+	if err := rt.applyUserTable(users); err != nil {
+		rt.logger.Print(i18n.Tf("reload rejected, keeping previous user table: %v", err))
+		return
+	}
+	rt.logger.Print(i18n.Tf("user table reloaded: %d user(s)", len(users)))
+}
+
+// warnColdZone 对比重读结果与运行参数,对冷区变更逐项告警「需重启」。
+// 密钥类字段只报字段名,不回显值。
+func (rt *serveRuntime) warnColdZone(r2 *config.Resolved, s2 serveSettings) {
+	var changed []string
+	add := func(label string) { changed = append(changed, label) }
+	if rt.settings.listen != s2.listen {
+		add("listen")
+	}
+	if corePrefix(rt.settings.prefix) != corePrefix(s2.prefix) {
+		add("prefix")
+	}
+	if rt.settings.tlsCert != s2.tlsCert || rt.settings.tlsKey != s2.tlsKey {
+		add("tls-cert/tls-key")
+	}
+	if rt.settings.stagingDir != s2.stagingDir {
+		add("staging-dir")
+	}
+	if rt.settings.maxUpload != s2.maxUpload {
+		add("backend-max-object-size/max-upload-size")
+	}
+	if rt.settings.chunkedUpload != s2.chunkedUpload || rt.settings.chunkSize != s2.chunkSize {
+		add("chunked-upload/chunk-size")
+	}
+	if rt.bucket != r2.Bucket {
+		add("bucket")
+	}
+	if rt.profile != r2.ProfileName {
+		add("profile")
+	}
+	for _, label := range changed {
+		rt.logger.Print(i18n.Tf("config change on %q is a cold-zone field and requires a restart to take effect", label))
+	}
+}
+
+// ensureDirAsync 为一个生效前缀异步补建目录 marker;已成功过的前缀跳过。
+func (rt *serveRuntime) ensureDirAsync(eff string) {
+	rt.reloadMu.Lock()
+	done := rt.ensured[eff]
+	rt.reloadMu.Unlock()
+	if done {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, err := rt.s3c.PutObject(ctx, &s3.PutObjectInput{
+			Bucket:        aws.String(rt.bucket),
+			Key:           aws.String(eff + "/"),
+			Body:          bytes.NewReader(nil),
+			ContentLength: aws.Int64(0),
+		})
+		if err != nil {
+			// 失败仅告警:用户根的 Stat/列取在内核侧是合成的,没有 marker
+			// 也能正常挂载使用;下次 reload 会重试(I10)。
+			rt.logger.Print(i18n.Tf("WARN: creating directory for user space %q failed (users still work; retried on next reload): %v", eff, err))
+			return
+		}
+		rt.reloadMu.Lock()
+		rt.ensured[eff] = true
+		rt.reloadMu.Unlock()
+		rt.logger.Print(i18n.Tf("directory created for user space: %s/", eff))
+	}()
+}
+
+// watchConfig 监听配置文件所在目录,文件名匹配且写入稳定 debounce 后触发一次
+// onChange(防抖:编辑器一次保存常连发多个事件)。文件被删除(Remove)不退出
+// ——监听的是目录,文件重建后的下一个事件自然恢复(I8)。
+func watchConfig(ctx context.Context, path string, debounce time.Duration, onChange func(), logger *log.Logger) {
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		logger.Print(i18n.Tf("WARN: hot reload disabled (fsnotify unavailable): %v", err))
+		return
+	}
+	dir := filepath.Dir(path)
+	if err := w.Add(dir); err != nil {
+		logger.Print(i18n.Tf("WARN: hot reload disabled (cannot watch directory %s): %v", dir, err))
+		_ = w.Close()
+		return
+	}
+	go func() {
+		defer w.Close()
+		// timer 只被事件循环 goroutine 触达;AfterFunc 一次性触发,fire 里
+		// 不再碰 timer,避免跨 goroutine 读写。
+		var timer *time.Timer
+		fire := func() {
+			onChange()
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev, ok := <-w.Events:
+				if !ok {
+					return
+				}
+				if filepath.Base(ev.Name) != filepath.Base(path) {
+					continue
+				}
+				switch {
+				case ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) != 0:
+					if timer != nil {
+						timer.Stop()
+					}
+					timer = time.AfterFunc(debounce, fire)
+				case ev.Op&fsnotify.Remove != 0:
+					// 文件被误删:不触发 reload,也不退出;重建后自愈。
+				}
+			case err, ok := <-w.Errors:
+				if !ok {
+					return
+				}
+				logger.Print(i18n.Tf("WARN: config watch error: %v", err))
+			}
+		}
+	}()
 }
 
 // parseDuration 解析 --dir-cache-ttl。空串或 "0" 表示关闭缓存;

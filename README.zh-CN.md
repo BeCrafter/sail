@@ -133,7 +133,7 @@ profiles:
       # chunk-size: 4GiB
 ```
 
-`serve` 块各字段与 `serve webdav` 的同名 flag 一一对应(大小类字段用与 flag 相同的字符串格式,如 `5TiB`)。`user`/`password` 可写明文或 `${VAR}` 引用环境变量,与 access-key/secret-key 的密钥安全机制一致;空字段由 flag 默认值兜底。
+`serve` 块各字段与 `serve webdav` 的同名 flag 一一对应(大小类字段用与 flag 相同的字符串格式,如 `5TiB`)。`user`/`password` 可写明文或 `${VAR}` 引用环境变量,与 access-key/secret-key 的密钥安全机制一致;空字段由 flag 默认值兜底。可选的 `users` 列表开启多用户模式——见 WebDAV 网关一节的「多用户」。
 
 ### cdn-domain 说明
 
@@ -340,7 +340,7 @@ sail serve webdav --print-windows-setup
 | `--profile` | 配置的 default-profile | 选择共享哪个 profile:桶取该 profile 的 `bucket`(可被全局 `--bucket` 或 `SAIL_BUCKET` 覆盖);三处都为空时拒绝启动 |
 | `--listen` | `:8080` | 监听地址(`serve.listen`) |
 | `--prefix` | 空 | 共享根前缀(映射为 `/`);越界路径一律拒绝(`serve.prefix`) |
-| `--user` / `--password` | 空 | Basic 认证,**为空拒绝启动**,不允许匿名共享(`serve.user`/`serve.password`) |
+| `--user` / `--password` | 空 | Basic 认证,**为空拒绝启动**,不允许匿名共享(`serve.user`/`serve.password`)。与 `serve.users` 互斥 |
 | `--tls-cert` / `--tls-key` | 空 | 同时提供即启用 HTTPS(`serve.tls-cert`/`serve.tls-key`) |
 | `--backend-max-object-size` | `5TiB` | 声明的后端单对象上限(S3 无能力协商,不可探测)(`serve.backend-max-object-size`) |
 | `--max-upload-size` | 跟随上一项 | 请求体上限,超限在读满请求体前返回 413 + 可操作指引(`serve.max-upload-size`) |
@@ -354,6 +354,41 @@ sail serve webdav --print-windows-setup
 启动横幅会按绑定给出挂载地址:通配地址(`:8080`/`0.0.0.0:8080`)时同时列出 `http://localhost:端口/`(本机挂载)和各网卡的局域网 IP(其它设备挂载);显式绑定具体主机时只列该地址。
 
 > **性能**:上传/下载走服务端 Range 流式读写,不整文件入内存;HTTP 连接池按 S3 高并发调优,并发打开多个文件时复用长连接;目录列表带短时缓存。单次打开文件只做 1 次 `HeadObject` + 1 次 `GetObject`。
+
+### 多用户(`serve.users`)
+
+一个网关可同时服务多个用户,每人一个独立空间。用户表写进 profile 的 `serve:` 块——每个用户
+获得一个 Basic 认证身份和自己的命名空间:
+
+```yaml
+    serve:
+      listen: ":8443"
+      prefix: team/            # base 前缀(冷区:变更需重启)
+      users:
+        - name: alice
+          password: ${ALICE_PASSWORD}   # ${VAR} 引用,与 serve 其余字段一致
+          prefix: alice/                # 相对 base;省略 = base 前缀本身
+          # quota: 10GiB                # 启动/reload 校验语法;配额执行随 MERC-11 P2 落地
+        - name: bob
+          password: ${BOB_PASSWORD}
+          prefix: shared/bob-data/      # 任意相对段
+```
+
+- **结构性隔离**。用户生效前缀 = base `prefix` + 该用户的 `prefix` 段;其触碰的所有对象 key
+  (含 `.sail/` 分片部件)都落在前缀内。用户的 `/` 即自己的空间——其他用户的对象结构性不可达,
+  `..` 越界被拒绝,访问日志对每个请求归因 `user=<名字>`。
+- **热加载**。用户表被监听:编辑配置文件(新增/删除用户、改密码、改前缀)秒级生效,无需重启。
+  `listen`、TLS 证书、`staging-dir`、分片参数与 base `prefix` 属冷区——变更仅告警「需重启」,
+  运行参数不变。坏 YAML 保留原用户表并告警;配置文件被误删后重建不破坏监听,新内容自动加载。
+- **目录自动创建**。用户生效(启动或 reload)时,sail 异步在其前缀写入 0 字节目录标记对象,
+  让目录在 S3 控制台与 `sail ls` 中可见。创建幂等且尽力而为:S3 抖动仅告警、用户照常使用
+  ——marker 是可见性,不是挂载硬前提。
+- **冲突 fail-loud**。`users` 与 `user`/`password` 互斥(跨来源同罪:`--user`/`--password`
+  flag 搭配配置 `users` 表同样拒绝)。生效前缀必须两两互异且互不嵌套——`alice/` 与
+  `alice/logs/` 不能共存,否则外层用户会列举到内层用户的对象。两项检查在启动与每次 reload
+  时执行,违规拒绝并保留原状态。
+- **单用户模式不变**。`--user`/`--password`(或 `serve.user`/`serve.password`)行为与以往
+  完全一致:base 前缀上的单隐式用户。凭据来自 flag 时关闭热加载,启动时明确告警。
 
 ### 客户端挂载
 

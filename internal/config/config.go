@@ -28,21 +28,34 @@ type Profile struct {
 	Serve ServeConfig `mapstructure:"serve"`
 }
 
+// UserConfig 是 serve.users 用户表里的一名用户。字段支持 ${VAR} 环境变量
+// 展开(与 serve 其余字段一致),密码可留环境变量、不落明文。
+type UserConfig struct {
+	Name     string `mapstructure:"name"`
+	Password string `mapstructure:"password"`
+	// Prefix 是相对 serve.prefix 的空间段;省略 = base 前缀本身。
+	Prefix string `mapstructure:"prefix"`
+	// Quota 是空间配额(如 "10GiB");省略 = 不限额。语法校验见 users.go,
+	// 配额执行由 P2 的 quotafs 落地。
+	Quota string `mapstructure:"quota"`
+}
+
 // ServeConfig 是 serve webdav 的全部 flag 参数的配置落点。字段语义与
 // cmd/serve.go 里的同名 flag 一一对应;大小类字段保持 flag 的字符串格式
 // (如 "5TiB"),合并后在 cmd 层统一 parseSize。
 type ServeConfig struct {
-	Listen         string `mapstructure:"listen"`
-	Prefix         string `mapstructure:"prefix"`
-	User           string `mapstructure:"user"`
-	Password       string `mapstructure:"password"`
-	TLSCert        string `mapstructure:"tls-cert"`
-	TLSKey         string `mapstructure:"tls-key"`
-	StagingDir     string `mapstructure:"staging-dir"`
-	BackendMaxSize string `mapstructure:"backend-max-object-size"`
-	MaxUploadSize  string `mapstructure:"max-upload-size"`
-	ChunkedUpload  bool   `mapstructure:"chunked-upload"`
-	ChunkSize      string `mapstructure:"chunk-size"`
+	Listen         string       `mapstructure:"listen"`
+	Prefix         string       `mapstructure:"prefix"`
+	User           string       `mapstructure:"user"`
+	Password       string       `mapstructure:"password"`
+	Users          []UserConfig `mapstructure:"users"`
+	TLSCert        string       `mapstructure:"tls-cert"`
+	TLSKey         string       `mapstructure:"tls-key"`
+	StagingDir     string       `mapstructure:"staging-dir"`
+	BackendMaxSize string       `mapstructure:"backend-max-object-size"`
+	MaxUploadSize  string       `mapstructure:"max-upload-size"`
+	ChunkedUpload  bool         `mapstructure:"chunked-upload"`
+	ChunkSize      string       `mapstructure:"chunk-size"`
 }
 
 // Config 是 ~/.sail/config.yaml 的整体结构
@@ -136,6 +149,15 @@ func (c *Config) Resolve(profile string) (*Resolved, error) {
 		return nil, fmt.Errorf(i18n.T("profile %q not found in config file"), profile)
 	}
 
+	var users []UserConfig
+	for _, u := range p.Serve.Users {
+		users = append(users, UserConfig{
+			Name:     expandEnv(u.Name),
+			Password: expandEnv(u.Password),
+			Prefix:   expandEnv(u.Prefix),
+			Quota:    expandEnv(u.Quota),
+		})
+	}
 	r := &Resolved{
 		ProfileName:   profile,
 		Endpoint:      expandEnv(p.Endpoint),
@@ -151,6 +173,7 @@ func (c *Config) Resolve(profile string) (*Resolved, error) {
 			Prefix:         expandEnv(p.Serve.Prefix),
 			User:           expandEnv(p.Serve.User),
 			Password:       expandEnv(p.Serve.Password),
+			Users:          users,
 			TLSCert:        expandEnv(p.Serve.TLSCert),
 			TLSKey:         expandEnv(p.Serve.TLSKey),
 			StagingDir:     expandEnv(p.Serve.StagingDir),
