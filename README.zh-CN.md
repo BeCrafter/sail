@@ -108,6 +108,33 @@ profiles:
 
 向导中留空 `access-key`/`secret-key` 时,会自动写入按 profile 派生的占位符 `SAIL_<PROFILE>_(ACCESS|SECRET)_KEY`(profile 名大写、连字符等非字母数字字符转下划线,清洗后为空则回退 `SAIL_ACCESS_KEY` 全局名);配置文件中也可手动改为任意 `${VAR}`。
 
+### serve 块
+
+`serve webdav` 的全部参数都可固化在 profile 下的 `serve:` 块里,启动时不用每次手打;命令行 flag 仍保留,并作为最高优先级覆盖配置。优先级:`flag(显式设置) > profile.serve.* > flag 默认值`。
+
+```yaml
+profiles:
+  prod:
+    endpoint: <your-s3-endpoint>
+    access-key: ${SAIL_PROD_ACCESS_KEY}
+    secret-key: ${SAIL_PROD_SECRET_KEY}
+    bucket: mybucket
+    serve:
+      listen: ":8443"
+      prefix: ""                 # 共享根前缀,空 = 整桶
+      user: alice
+      password: ${SAIL_PROD_SERVE_PASSWORD}   # 支持明文或 ${VAR} 引用
+      # tls-cert: /etc/cert.pem   # 与 tls-key 同时提供即启用 HTTPS
+      # tls-key: /etc/key.pem
+      # staging-dir: /tmp/sail-stage
+      # backend-max-object-size: 5TiB
+      # max-upload-size: 5TiB     # 空 = 跟随 backend-max-object-size
+      # chunked-upload: false
+      # chunk-size: 4GiB
+```
+
+`serve` 块各字段与 `serve webdav` 的同名 flag 一一对应(大小类字段用与 flag 相同的字符串格式,如 `5TiB`)。`user`/`password` 可写明文或 `${VAR}` 引用环境变量,与 access-key/secret-key 的密钥安全机制一致;空字段由 flag 默认值兜底。
+
 ### cdn-domain 说明
 
 `cdn-domain` 用于 `sail url` 命令生成文件的公开访问地址,填入你的存储服务对应的 CDN 域名即可。
@@ -305,18 +332,21 @@ sail serve webdav --print-windows-setup
 三处都取不到桶时拒绝启动;启动横幅打印 `bucket=`、`profile=`、`prefix=`,
 让「到底暴露了什么」始终可断言。
 
+除 `--bucket`/`--profile` 外,下表参数都可同时写进 profile 的 `serve:` 块(见上文「serve 块」),
+启动时省略对应 flag 即从配置读取;flag 显式给出时仍覆盖配置。
+
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--listen` | `:8080` | 监听地址 |
+| `--listen` | `:8080` | 监听地址(`serve.listen`) |
 | `--bucket` | 取自配置解析 | 共享的桶:`--bucket` > `SAIL_BUCKET` > `profile.bucket`;三处都为空时拒绝启动 |
-| `--prefix` | 空 | 共享根前缀(映射为 `/`);越界路径一律拒绝 |
-| `--user` / `--password` | 空 | Basic 认证,**为空拒绝启动**,不允许匿名共享 |
-| `--tls-cert` / `--tls-key` | 空 | 同时提供即启用 HTTPS |
-| `--backend-max-object-size` | `5TiB` | 声明的后端单对象上限(S3 无能力协商,不可探测) |
-| `--max-upload-size` | 跟随上一项 | 请求体上限,超限在读满请求体前返回 413 + 可操作指引 |
-| `--staging-dir` | 系统临时目录 | 写暂存目录;峰值 ≈ 单文件最大值 × 并发上传数 |
-| `--chunked-upload` | `false` | 把超过 `--chunk-size` 的文件拆成分片 + manifest 存储(关:1 文件 = 1 对象) |
-| `--chunk-size` | `4GiB` | 单个物理片上限,同时是分片阈值(5MiB ~ 5GiB);需配合 `--chunked-upload` |
+| `--prefix` | 空 | 共享根前缀(映射为 `/`);越界路径一律拒绝(`serve.prefix`) |
+| `--user` / `--password` | 空 | Basic 认证,**为空拒绝启动**,不允许匿名共享(`serve.user`/`serve.password`) |
+| `--tls-cert` / `--tls-key` | 空 | 同时提供即启用 HTTPS(`serve.tls-cert`/`serve.tls-key`) |
+| `--backend-max-object-size` | `5TiB` | 声明的后端单对象上限(S3 无能力协商,不可探测)(`serve.backend-max-object-size`) |
+| `--max-upload-size` | 跟随上一项 | 请求体上限,超限在读满请求体前返回 413 + 可操作指引(`serve.max-upload-size`) |
+| `--staging-dir` | 系统临时目录 | 写暂存目录;峰值 ≈ 单文件最大值 × 并发上传数(`serve.staging-dir`) |
+| `--chunked-upload` | `false` | 把超过 `--chunk-size` 的文件拆成分片 + manifest 存储(关:1 文件 = 1 对象)(`serve.chunked-upload`) |
+| `--chunk-size` | `4GiB` | 单个物理片上限,同时是分片阈值(5MiB ~ 5GiB);需配合 `--chunked-upload`(`serve.chunk-size`) |
 | `--print-windows-setup` | — | 打印 `.reg` 内容 + PowerShell + 「必须重启 WebClient 服务」提醒后退出 |
 
 ### 客户端挂载

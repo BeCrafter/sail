@@ -65,6 +65,7 @@ Examples:
 
 		// serve.go — runtime messages
 		"--user and --password are required: this gateway does not allow anonymous sharing":                         "--user 与 --password 必填:本网关不允许匿名共享",
+		"--user and --password are required (from flags or profile %q \"serve\" config): this gateway does not allow anonymous sharing": "--user 与 --password 必填(来自 flag 或 profile %q 的 \"serve\" 配置):本网关不允许匿名共享",
 		"--tls-cert and --tls-key must be supplied together":                                                        "--tls-cert 与 --tls-key 必须同时提供",
 		"invalid --backend-max-object-size: %w":                                                                     "--backend-max-object-size 非法: %w",
 		"invalid --max-upload-size: %w":                                                                             "--max-upload-size 非法: %w",

@@ -23,6 +23,26 @@ type Profile struct {
 	// CDNBucketPath 显式声明 cdn-domain 是否已含 bucket 路径。
 	// nil = 自动检测;true = 已含(不再追加);false = 未含(总是追加)。
 	CDNBucketPath *bool `mapstructure:"cdn-bucket-path"`
+	// Serve 是 sail serve webdav 的部署参数。与连接参数同属一个 profile,
+	// 由 serve 命令按「flag > serve.* > flag 默认」的优先级合并。
+	Serve ServeConfig `mapstructure:"serve"`
+}
+
+// ServeConfig 是 serve webdav 的全部 flag 参数的配置落点。字段语义与
+// cmd/serve.go 里的同名 flag 一一对应;大小类字段保持 flag 的字符串格式
+// (如 "5TiB"),合并后在 cmd 层统一 parseSize。
+type ServeConfig struct {
+	Listen         string `mapstructure:"listen"`
+	Prefix         string `mapstructure:"prefix"`
+	User           string `mapstructure:"user"`
+	Password       string `mapstructure:"password"`
+	TLSCert        string `mapstructure:"tls-cert"`
+	TLSKey         string `mapstructure:"tls-key"`
+	StagingDir     string `mapstructure:"staging-dir"`
+	BackendMaxSize string `mapstructure:"backend-max-object-size"`
+	MaxUploadSize  string `mapstructure:"max-upload-size"`
+	ChunkedUpload  bool   `mapstructure:"chunked-upload"`
+	ChunkSize      string `mapstructure:"chunk-size"`
 }
 
 // Config 是 ~/.sail/config.yaml 的整体结构
@@ -43,6 +63,7 @@ type Resolved struct {
 	PathStyle     bool
 	CDNDomain     string
 	CDNBucketPath *bool
+	Serve         ServeConfig
 }
 
 var envVarPattern = regexp.MustCompile(`\$\{([A-Z0-9_]+)\}`)
@@ -125,6 +146,19 @@ func (c *Config) Resolve(profile string) (*Resolved, error) {
 		PathStyle:     p.PathStyle,
 		CDNDomain:     expandEnv(p.CDNDomain),
 		CDNBucketPath: p.CDNBucketPath,
+		Serve: ServeConfig{
+			Listen:         expandEnv(p.Serve.Listen),
+			Prefix:         expandEnv(p.Serve.Prefix),
+			User:           expandEnv(p.Serve.User),
+			Password:       expandEnv(p.Serve.Password),
+			TLSCert:        expandEnv(p.Serve.TLSCert),
+			TLSKey:         expandEnv(p.Serve.TLSKey),
+			StagingDir:     expandEnv(p.Serve.StagingDir),
+			BackendMaxSize: expandEnv(p.Serve.BackendMaxSize),
+			MaxUploadSize:  expandEnv(p.Serve.MaxUploadSize),
+			ChunkedUpload:  p.Serve.ChunkedUpload,
+			ChunkSize:      expandEnv(p.Serve.ChunkSize),
+		},
 	}
 
 	// 环境变量覆盖

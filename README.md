@@ -108,6 +108,33 @@ profiles:
 
 Leaving `access-key`/`secret-key` empty in the wizard automatically writes per-profile placeholders `SAIL_<PROFILE>_(ACCESS|SECRET)_KEY` (profile name uppercased, non-alphanumeric characters such as hyphens converted to underscores; if the sanitized name is empty, falls back to the global `SAIL_ACCESS_KEY` name). You can also manually change it to any `${VAR}` in the config file.
 
+### serve block
+
+All `serve webdav` parameters can be pinned in a `serve:` block under a profile, so you don't re-type them on every launch; the CLI flags remain and override config as the highest priority. Precedence: `flag (explicitly set) > profile.serve.* > flag default`.
+
+```yaml
+profiles:
+  prod:
+    endpoint: <your-s3-endpoint>
+    access-key: ${SAIL_PROD_ACCESS_KEY}
+    secret-key: ${SAIL_PROD_SECRET_KEY}
+    bucket: mybucket
+    serve:
+      listen: ":8443"
+      prefix: ""                 # shared root prefix; empty = whole bucket
+      user: alice
+      password: ${SAIL_PROD_SERVE_PASSWORD}   # plaintext or ${VAR} reference
+      # tls-cert: /etc/cert.pem   # with tls-key enables HTTPS
+      # tls-key: /etc/key.pem
+      # staging-dir: /tmp/sail-stage
+      # backend-max-object-size: 5TiB
+      # max-upload-size: 5TiB     # empty = follow backend-max-object-size
+      # chunked-upload: false
+      # chunk-size: 4GiB
+```
+
+Each `serve` field maps one-to-one to the same-named `serve webdav` flag (size fields use the same string format as the flags, e.g. `5TiB`). `user`/`password` accept plaintext or a `${VAR}` environment-variable reference, matching the access-key/secret-key key-security mechanism; empty fields fall back to the flag defaults.
+
 ### cdn-domain notes
 
 `cdn-domain` is used by `sail url` to generate public access URLs for files — fill in the CDN domain of your storage service.
@@ -299,18 +326,22 @@ The bucket is taken from the same resolution chain every other command uses: `--
 `SAIL_BUCKET` > `profile.bucket`. Startup is refused when none of the three yields a bucket;
 the startup banner prints `bucket=`, `profile=`, and `prefix=` so what is exposed stays assertable.
 
+Besides `--bucket`/`--profile`, every flag in the table below can also be written to a profile's
+`serve:` block (see "serve block" above); omit the flag to read it from config, or pass it explicitly
+to override the config value.
+
 | Flag | Default | Description |
 |---|---|---|
-| `--listen` | `:8080` | Listen address |
+| `--listen` | `:8080` | Listen address (`serve.listen`) |
 | `--bucket` | from config resolution | Bucket to share: `--bucket` > `SAIL_BUCKET` > `profile.bucket`; startup is refused when all three are empty |
-| `--prefix` | empty | Shared root prefix (mapped to `/`); out-of-prefix paths are always rejected |
-| `--user` / `--password` | empty | Basic auth; startup is refused when empty, anonymous sharing is not allowed |
-| `--tls-cert` / `--tls-key` | empty | Supplying both enables HTTPS |
-| `--backend-max-object-size` | `5TiB` | Declared backend per-object limit (S3 has no capability negotiation, it can't be probed) |
-| `--max-upload-size` | follows the flag above | Request body limit; over the limit returns 413 + actionable guidance before the body is fully read |
-| `--staging-dir` | system temp dir | Write staging directory; peak ≈ largest single file × concurrent uploads |
-| `--chunked-upload` | `false` | Store files larger than `--chunk-size` as chunks + a manifest (off: 1 file = 1 object) |
-| `--chunk-size` | `4GiB` | Max physical chunk size, also the chunked-storage threshold (5MiB ~ 5GiB); requires `--chunked-upload` |
+| `--prefix` | empty | Shared root prefix (mapped to `/`); out-of-prefix paths are always rejected (`serve.prefix`) |
+| `--user` / `--password` | empty | Basic auth; startup is refused when empty, anonymous sharing is not allowed (`serve.user`/`serve.password`) |
+| `--tls-cert` / `--tls-key` | empty | Supplying both enables HTTPS (`serve.tls-cert`/`serve.tls-key`) |
+| `--backend-max-object-size` | `5TiB` | Declared backend per-object limit (S3 has no capability negotiation, it can't be probed) (`serve.backend-max-object-size`) |
+| `--max-upload-size` | follows the flag above | Request body limit; over the limit returns 413 + actionable guidance before the body is fully read (`serve.max-upload-size`) |
+| `--staging-dir` | system temp dir | Write staging directory; peak ≈ largest single file × concurrent uploads (`serve.staging-dir`) |
+| `--chunked-upload` | `false` | Store files larger than `--chunk-size` as chunks + a manifest (off: 1 file = 1 object) (`serve.chunked-upload`) |
+| `--chunk-size` | `4GiB` | Max physical chunk size, also the chunked-storage threshold (5MiB ~ 5GiB); requires `--chunked-upload` (`serve.chunk-size`) |
 | `--print-windows-setup` | — | Print the `.reg` content + PowerShell + a "you must restart the WebClient service" reminder, then exit |
 
 ### Mounting from clients

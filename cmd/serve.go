@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/BeCrafter/sail/internal/client"
+	"github.com/BeCrafter/sail/internal/config"
 	"github.com/BeCrafter/sail/internal/i18n"
 	"github.com/BeCrafter/sail/internal/vfs/s3fs"
 	"github.com/BeCrafter/sail/internal/webdavfs"
@@ -81,32 +82,15 @@ func runServeWebdav(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	if o.user == "" || o.password == "" {
-		return errors.New(i18n.T("--user and --password are required: this gateway does not allow anonymous sharing"))
-	}
-	if (o.tlsCert == "") != (o.tlsKey == "") {
-		return errors.New(i18n.T("--tls-cert and --tls-key must be supplied together"))
-	}
-
-	backendMax, err := parseSize(o.backendMaxSize)
-	if err != nil {
-		return fmt.Errorf(i18n.T("invalid --backend-max-object-size: %w"), err)
-	}
-	maxUpload := backendMax
-	if o.maxUploadSize != "" {
-		if maxUpload, err = parseSize(o.maxUploadSize); err != nil {
-			return fmt.Errorf(i18n.T("invalid --max-upload-size: %w"), err)
-		}
-	}
-	chunkSize, err := parseChunkSize(o.chunkedUpload, o.chunkSize, backendMax)
-	if err != nil {
-		return err
-	}
-
 	r, _, err := loadResolved()
 	if err != nil {
 		return err
 	}
+	s, err := mergeServe(o, r, cmd.Flags().Changed)
+	if err != nil {
+		return err
+	}
+
 	// 桶取自统一解析链的出口 r.Bucket(--bucket > SAIL_BUCKET > profile.bucket)。
 	// config.Resolve 刻意不校验 Bucket 非空(多数命令可由 s3://bucket/key 显式给出),
 	// 而 WebDAV 共享的是整桶,没有桶就无从共享,故这一条由 serve 自己兜。
@@ -124,21 +108,21 @@ func runServeWebdav(cmd *cobra.Command, _ []string) error {
 	core, err := s3fs.New(s3fs.Config{
 		Client:        s3c,
 		Bucket:        r.Bucket,
-		Prefix:        o.prefix,
-		StagingDir:    o.stagingDir,
-		MaxUploadSize: maxUpload,
-		ChunkedUpload: o.chunkedUpload,
-		ChunkSize:     chunkSize,
+		Prefix:        s.prefix,
+		StagingDir:    s.stagingDir,
+		MaxUploadSize: s.maxUpload,
+		ChunkedUpload: s.chunkedUpload,
+		ChunkSize:     s.chunkSize,
 	})
 	if err != nil {
 		return err
 	}
 	srv, err := webdavfs.NewServer(webdavfs.Config{
 		FileSystem:        webdavfs.New(core),
-		User:              o.user,
-		Password:          o.password,
-		MaxUploadSize:     maxUpload,
-		MaxUploadSizeText: humanSize(maxUpload),
+		User:              s.user,
+		Password:          s.password,
+		MaxUploadSize:     s.maxUpload,
+		MaxUploadSizeText: humanSize(s.maxUpload),
 		Logger:            log.New(os.Stderr, "", log.LstdFlags),
 	})
 	if err != nil {
@@ -146,7 +130,7 @@ func runServeWebdav(cmd *cobra.Command, _ []string) error {
 	}
 
 	httpSrv := &http.Server{
-		Addr:    o.listen,
+		Addr:    s.listen,
 		Handler: srv,
 		// 不设 ReadTimeout/WriteTimeout:大文件上传下载会长时间占用连接,
 		// 超时会把正常传输掐断。超时由客户端与 TCP 层负责。
@@ -154,17 +138,101 @@ func runServeWebdav(cmd *cobra.Command, _ []string) error {
 	}
 
 	scheme := "http"
-	if o.tlsCert != "" {
+	if s.tlsCert != "" {
 		scheme = "https"
 	}
 	fmt.Fprint(os.Stderr, i18n.Tf(
 		"sail webdav started: %s://%s  bucket=%s profile=%s%s user=%s max-object-size=%s staging=%s chunked=%s\n",
-		scheme, o.listen, r.Bucket, r.ProfileName, exposePrefix(o.prefix), o.user, humanSize(maxUpload), stagingDirOf(o.stagingDir), chunkedText(o.chunkedUpload, chunkSize)))
+		scheme, s.listen, r.Bucket, r.ProfileName, exposePrefix(s.prefix), s.user, humanSize(s.maxUpload), stagingDirOf(s.stagingDir), chunkedText(s.chunkedUpload, s.chunkSize)))
 
-	if o.tlsCert != "" {
-		return httpSrv.ListenAndServeTLS(o.tlsCert, o.tlsKey)
+	if s.tlsCert != "" {
+		return httpSrv.ListenAndServeTLS(s.tlsCert, s.tlsKey)
 	}
 	return httpSrv.ListenAndServe()
+}
+
+// serveSettings 是合并并校验后的 serve 生效参数。
+type serveSettings struct {
+	listen        string
+	prefix        string
+	user          string
+	password      string
+	tlsCert       string
+	tlsKey        string
+	stagingDir    string
+	maxUpload     int64
+	chunkedUpload bool
+	chunkSize     int64
+}
+
+// mergeServe 按「flag(显式设置) > profile.serve.* > flag 默认值」合并并校验
+// 全部 serve 参数。changed 返回某 flag 是否被显式设置;测试可传显式 map。
+func mergeServe(o serveWebdavFlags, r *config.Resolved, changed func(string) bool) (serveSettings, error) {
+	listen := pick(changed("listen"), o.listen, r.Serve.Listen)
+	prefix := pick(changed("prefix"), o.prefix, r.Serve.Prefix)
+	user := pick(changed("user"), o.user, r.Serve.User)
+	password := pick(changed("password"), o.password, r.Serve.Password)
+	tlsCert := pick(changed("tls-cert"), o.tlsCert, r.Serve.TLSCert)
+	tlsKey := pick(changed("tls-key"), o.tlsKey, r.Serve.TLSKey)
+	stagingDir := pick(changed("staging-dir"), o.stagingDir, r.Serve.StagingDir)
+	backendMaxRaw := pick(changed("backend-max-object-size"), o.backendMaxSize, r.Serve.BackendMaxSize)
+	maxUploadRaw := pick(changed("max-upload-size"), o.maxUploadSize, r.Serve.MaxUploadSize)
+	chunkSizeRaw := pick(changed("chunk-size"), o.chunkSize, r.Serve.ChunkSize)
+	chunkedUpload := r.Serve.ChunkedUpload
+	if changed("chunked-upload") {
+		chunkedUpload = o.chunkedUpload
+	}
+
+	if user == "" || password == "" {
+		return serveSettings{}, errors.New(i18n.Tf(
+			"--user and --password are required (from flags or profile %q \"serve\" config): this gateway does not allow anonymous sharing",
+			r.ProfileName))
+	}
+	if (tlsCert == "") != (tlsKey == "") {
+		return serveSettings{}, errors.New(i18n.T("--tls-cert and --tls-key must be supplied together"))
+	}
+
+	backendMax, err := parseSize(backendMaxRaw)
+	if err != nil {
+		return serveSettings{}, fmt.Errorf(i18n.T("invalid --backend-max-object-size: %w"), err)
+	}
+	maxUpload := backendMax
+	if maxUploadRaw != "" {
+		if maxUpload, err = parseSize(maxUploadRaw); err != nil {
+			return serveSettings{}, fmt.Errorf(i18n.T("invalid --max-upload-size: %w"), err)
+		}
+	}
+	chunkSize, err := parseChunkSize(chunkedUpload, chunkSizeRaw, backendMax)
+	if err != nil {
+		return serveSettings{}, err
+	}
+
+	return serveSettings{
+		listen:        listen,
+		prefix:        prefix,
+		user:          user,
+		password:      password,
+		tlsCert:       tlsCert,
+		tlsKey:        tlsKey,
+		stagingDir:    stagingDir,
+		maxUpload:     maxUpload,
+		chunkedUpload: chunkedUpload,
+		chunkSize:     chunkSize,
+	}, nil
+}
+
+// pick 实现「flag(显式设置) > 配置 > flag 默认值」的合并:
+//   - changed 为 true:flag 显式给出,直接取 flagVal;
+//   - 否则配置非空则取配置;
+//   - 都没有时落回 flag 默认值(flagVal 本身即默认值)。
+func pick(changed bool, flagVal, cfgVal string) string {
+	if changed {
+		return flagVal
+	}
+	if cfgVal != "" {
+		return cfgVal
+	}
+	return flagVal
 }
 
 // exposePrefix 渲染启动横幅里的共享前缀段:未设前缀时整段省略,

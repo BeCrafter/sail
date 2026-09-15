@@ -151,6 +151,54 @@ profiles:
 	}
 }
 
+// TestResolveServeConfig 校验 profile 下的 serve 块逐字段透传、${VAR} 展开,
+// 以及未配置时为空/默认值。
+func TestResolveServeConfig(t *testing.T) {
+	t.Setenv("SAIL_PROD_SERVE_PASSWORD", "from-env-pw")
+	r := resolveFrom(t, `default-profile: prod
+profiles:
+  prod:
+    endpoint: https://p.example.com
+    access-key: ak
+    secret-key: sk
+    serve:
+      listen: ":8443"
+      prefix: tenant-a
+      user: alice
+      password: ${SAIL_PROD_SERVE_PASSWORD}
+      tls-cert: /etc/cert.pem
+      tls-key: /etc/key.pem
+      staging-dir: /tmp/stage
+      backend-max-object-size: 100GiB
+      max-upload-size: 50GiB
+      chunked-upload: true
+      chunk-size: 10MiB
+`)
+	want := ServeConfig{
+		Listen: ":8443", Prefix: "tenant-a", User: "alice",
+		Password: "from-env-pw", TLSCert: "/etc/cert.pem", TLSKey: "/etc/key.pem",
+		StagingDir: "/tmp/stage", BackendMaxSize: "100GiB", MaxUploadSize: "50GiB",
+		ChunkedUpload: true, ChunkSize: "10MiB",
+	}
+	if r.Serve != want {
+		t.Errorf("serve 块透传错误:\n got %+v\nwant %+v", r.Serve, want)
+	}
+
+	// 未配置 serve 块:全为空、ChunkedUpload 为 false
+	r = resolveFrom(t, `default-profile: prod
+profiles:
+  prod:
+    endpoint: https://p.example.com
+    access-key: ak
+    secret-key: sk
+`)
+	var zero ServeConfig
+	if r.Serve != zero {
+		t.Errorf("未配置 serve 块应为零值,got %+v", r.Serve)
+	}
+}
+
+// TestResolveProfileNotFound 校验 profile 不存在时报错。
 func TestResolveProfileNotFound(t *testing.T) {
 	cfg, err := Load(writeConfig(t, `profiles:
   prod:

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/BeCrafter/sail/internal/config"
 	"github.com/BeCrafter/sail/internal/i18n"
 )
 
@@ -60,8 +61,8 @@ func TestServeWebdavRequiresBucketAndCredentials(t *testing.T) {
 	})
 
 	// 缺桶分支:三条来源(--bucket / SAIL_BUCKET / profile.bucket)都没有桶才拒绝启动。
-	// 配置文件解析在 flag 校验之后,故这里必须注入一份合法配置,否则报错会变成
-	// 「读不到配置」而不是「没有桶」;凭据也要给全,否则先撞上 --user/--password 校验。
+	// 配置文件解析先于 flag 校验,故这里注入一份合法配置(含凭据但无 bucket),否则先撞上
+	// 「读不到配置」或「缺 user/password」。
 	writeServeConfig(t, "")
 	t.Setenv("SAIL_BUCKET", "")
 	serveWebdavOpts = serveWebdavFlags{backendMaxSize: "5TiB", listen: ":8080", user: "alice", password: "s3cret"}
@@ -76,15 +77,19 @@ func TestServeWebdavRequiresBucketAndCredentials(t *testing.T) {
 		}
 	}
 
-	// 以下 flag 校验一律先于配置解析:配置刻意指向不存在的路径,若顺序被改动,
-	// 报错会退化成「读配置失败」而被这些断言抓住。
-	cfgPath = filepath.Join(t.TempDir(), "no-such-config.yaml")
-	serveWebdavOpts.user = "alice"
-	serveWebdavOpts.password = ""
-	if err := runServeWebdav(serveWebdavCmd, nil); err == nil || !strings.Contains(err.Error(), "--user") {
-		t.Fatalf("缺少密码应报错,实际 %v", err)
+	// user/password/tls 校验依赖配置合并结果:注入合法配置(不提供 user/password),
+	// 断言报错同时提及 flag 与 serve 配置两条来源。
+	writeServeConfig(t, "mybucket")
+	serveWebdavOpts = serveWebdavFlags{backendMaxSize: "5TiB", listen: ":8080", user: "", password: ""}
+	credErr := runServeWebdav(serveWebdavCmd, nil)
+	if credErr == nil || !strings.Contains(credErr.Error(), "--user") {
+		t.Fatalf("缺少密码应报错,实际 %v", credErr)
+	}
+	if !strings.Contains(credErr.Error(), "serve") {
+		t.Errorf("缺 user/password 报错应提及 serve 配置来源,实际 %v", credErr)
 	}
 
+	serveWebdavOpts.user = "alice"
 	serveWebdavOpts.password = "s3cret"
 	serveWebdavOpts.tlsCert = "c.pem"
 	serveWebdavOpts.tlsKey = ""
@@ -96,6 +101,26 @@ func TestServeWebdavRequiresBucketAndCredentials(t *testing.T) {
 	serveWebdavOpts.backendMaxSize = "不是大小"
 	if err := runServeWebdav(serveWebdavCmd, nil); err == nil || !strings.Contains(err.Error(), "backend-max-object-size") {
 		t.Fatalf("非法上限应报错,实际 %v", err)
+	}
+}
+
+func TestPick(t *testing.T) {
+	cases := []struct {
+		name    string
+		changed bool
+		flagVal string
+		cfgVal  string
+		want    string
+	}{
+		{"flag 显式设置覆盖配置", true, "flag", "cfg", "flag"},
+		{"未设置 flag 取配置", false, ":8080", ":8443", ":8443"},
+		{"配置为空落回 flag 默认", false, ":8080", "", ":8080"},
+		{"flag 显式设置且配置为空取 flag", true, "x", "", "x"},
+	}
+	for _, c := range cases {
+		if got := pick(c.changed, c.flagVal, c.cfgVal); got != c.want {
+			t.Errorf("%s: pick(%v,%q,%q) = %q,期望 %q", c.name, c.changed, c.flagVal, c.cfgVal, got, c.want)
+		}
 	}
 }
 
@@ -113,6 +138,46 @@ func writeServeConfig(t *testing.T, bucket string) {
 	origPath, origProfile, origBucket := cfgPath, profile, cfgBucket
 	t.Cleanup(func() { cfgPath, profile, cfgBucket = origPath, origProfile, origBucket })
 	cfgPath, profile, cfgBucket = path, "prod", ""
+}
+
+// writeServeConfigWithServe 写一份含 serve 块(serveBody 为缩进后的键值行)的配置,
+// 并把全局 flag 指向它。用于验证 serve 参数能从配置读取。
+func writeServeConfigWithServe(t *testing.T, bucket, serveBody string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	body := "default-profile: prod\nprofiles:\n  prod:\n    endpoint: http://127.0.0.1:9000\n" +
+		"    access-key: ak\n    secret-key: sk\n    bucket: " + bucket + "\n" +
+		"    region: us-east-1\n    path-style: true\n" +
+		"    serve:\n" + serveBody
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("写配置失败: %v", err)
+	}
+	origPath, origProfile, origBucket := cfgPath, profile, cfgBucket
+	t.Cleanup(func() { cfgPath, profile, cfgBucket = origPath, origProfile, origBucket })
+	cfgPath, profile, cfgBucket = path, "prod", ""
+}
+
+// TestServeWebdavConfigProvidesCredentials 校验 user/password 可由配置提供:
+// 配置给全凭据但不给桶时,应通过凭据校验、卡在缺桶(证明配置来源的凭据被接受)。
+func TestServeWebdavConfigProvidesCredentials(t *testing.T) {
+	origBucket, origOpts := cfgBucket, serveWebdavOpts
+	t.Cleanup(func() { cfgBucket, serveWebdavOpts = origBucket, origOpts })
+	cfgBucket = ""
+
+	writeServeConfigWithServe(t, "",
+		"      user: alice\n      password: s3cret\n")
+	serveWebdavOpts = serveWebdavFlags{backendMaxSize: "5TiB", listen: ":8080"}
+	if err := runServeWebdav(serveWebdavCmd, nil); err == nil || !strings.Contains(err.Error(), "bucket") {
+		t.Fatalf("配置提供凭据但无桶,应卡在缺桶,实际 %v", err)
+	}
+
+	// 配置提供非法 backend-max-object-size:应被拒绝(证明大小解析走合并值)。
+	writeServeConfigWithServe(t, "mybucket",
+		"      user: alice\n      password: s3cret\n      backend-max-object-size: 不是大小\n")
+	serveWebdavOpts = serveWebdavFlags{backendMaxSize: "5TiB", listen: ":8080"}
+	if err := runServeWebdav(serveWebdavCmd, nil); err == nil || !strings.Contains(err.Error(), "backend-max-object-size") {
+		t.Fatalf("配置提供非法上限应被拒绝,实际 %v", err)
+	}
 }
 
 // 默认桶的唯一解析出口是 loadResolved() 的 r.Bucket,优先级 --bucket > SAIL_BUCKET > profile.bucket。
@@ -227,12 +292,10 @@ func TestParseChunkSize(t *testing.T) {
 }
 
 func TestServeWebdavRejectsBadChunkSize(t *testing.T) {
-	origBucket, origOpts := cfgBucket, serveWebdavOpts
-	t.Cleanup(func() {
-		cfgBucket, serveWebdavOpts = origBucket, origOpts
-	})
-	cfgBucket = "mybucket"
-	serveWebdavOpts = serveWebdavFlags{
+	r := &config.Resolved{ProfileName: "prod"}
+	// changed 显式置位:模拟用户显式给了 --chunked-upload 与 --chunk-size。
+	changed := map[string]bool{"chunked-upload": true, "chunk-size": true}
+	o := serveWebdavFlags{
 		backendMaxSize: "5TiB",
 		listen:         ":8080",
 		user:           "alice",
@@ -240,7 +303,7 @@ func TestServeWebdavRejectsBadChunkSize(t *testing.T) {
 		chunkedUpload:  true,
 		chunkSize:      "1MiB", // 低于 S3 multipart 下限
 	}
-	if err := runServeWebdav(serveWebdavCmd, nil); err == nil || !strings.Contains(err.Error(), "--chunk-size") {
+	if _, err := mergeServe(o, r, func(f string) bool { return changed[f] }); err == nil || !strings.Contains(err.Error(), "--chunk-size") {
 		t.Fatalf("非法 --chunk-size 应拒绝启动,实际 %v", err)
 	}
 }

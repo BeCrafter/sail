@@ -129,6 +129,8 @@ var configSetupCmd = &cobra.Command{
 			Endpoint: endpoint, AccessKey: accessKey, SecretKey: secretKey,
 			Bucket: bucket, Region: region, PathStyle: pathStyle,
 			CDNDomain: cdnDomain, CDNBucketPath: cdnBucketPath,
+			// serve 块由手工编辑维护,setup 不提问但必须保留,避免静默丢弃。
+			Serve: existing.Serve,
 		}
 		// 始终允许把本次写入的 profile 设为默认:无默认或本就是默认时默认 yes,
 		// 否则默认 no(避免无意切换默认)。
@@ -307,7 +309,38 @@ func renderProfile(name string, p config.Profile) string {
     region: "%s"
     path-style: %s
     cdn-domain: "%s"
-%s`, name, p.Endpoint, ak, sk, p.Bucket, p.Region, ps, p.CDNDomain, cdp)
+%s%s`, name, p.Endpoint, ak, sk, p.Bucket, p.Region, ps, p.CDNDomain, cdp, serveBlock(p.Serve))
+}
+
+// serveBlock 渲染 profile 下的 serve 块;全部字段为空(纯默认)时返回空串,
+// 不产生冗余块。空字段注释掉以便手工补齐;password 原样写入,${VAR} 得以保留。
+func serveBlock(s config.ServeConfig) string {
+	if s.Listen == "" && s.Prefix == "" && s.User == "" && s.Password == "" &&
+		s.TLSCert == "" && s.TLSKey == "" && s.StagingDir == "" &&
+		s.BackendMaxSize == "" && s.MaxUploadSize == "" &&
+		!s.ChunkedUpload && s.ChunkSize == "" {
+		return ""
+	}
+	f := func(key, val string) string {
+		if val == "" {
+			return fmt.Sprintf("      # %s:\n", key)
+		}
+		return fmt.Sprintf("      %s: %s\n", key, val)
+	}
+	var b strings.Builder
+	b.WriteString("    serve:\n")
+	b.WriteString(f("listen", s.Listen))
+	b.WriteString(f("prefix", s.Prefix))
+	b.WriteString(f("user", s.User))
+	b.WriteString(f("password", s.Password))
+	b.WriteString(f("tls-cert", s.TLSCert))
+	b.WriteString(f("tls-key", s.TLSKey))
+	b.WriteString(f("staging-dir", s.StagingDir))
+	b.WriteString(f("backend-max-object-size", s.BackendMaxSize))
+	b.WriteString(f("max-upload-size", s.MaxUploadSize))
+	b.WriteString(f("chunk-size", s.ChunkSize))
+	fmt.Fprintf(&b, "      chunked-upload: %t\n", s.ChunkedUpload)
+	return b.String()
 }
 
 // firstProfileName 返回配置中按名称排序的第一个 profile,无则返回空串。
