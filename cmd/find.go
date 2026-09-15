@@ -25,8 +25,9 @@ var (
 )
 
 var findCmd = &cobra.Command{
-	Use:   "find [s3://bucket/prefix]",
-	Short: "Find objects by name/size/time",
+	GroupID: "list",
+	Use:     "find [s3://bucket/prefix]",
+	Short:   "Find objects by name/size/time",
 	Long: `Find objects under a prefix by criteria, printing s3://bucket/key one per line by default.
 
 Filter criteria are combinable (AND):

@@ -141,6 +141,22 @@ func TestUnauthenticatedRequestRejected(t *testing.T) {
 	}
 }
 
+// OPTIONS 是能力探测,必须在认证之前放行,否则 macOS Finder / Windows WebClient
+// 挂载时停在「连接中」。
+func TestOptionsAllowedWithoutAuth(t *testing.T) {
+	g := newGateway(t, "", 0)
+	resp := g.do(t, "OPTIONS", "/", "", false, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("OPTIONS 不带认证应 200,实际 %d: %s", resp.StatusCode, bodyOf(t, resp))
+	}
+	if dav := resp.Header.Get("DAV"); dav == "" {
+		t.Fatal("OPTIONS 响应必须带 DAV 头")
+	}
+	if allow := resp.Header.Get("Allow"); !strings.Contains(allow, "PROPFIND") {
+		t.Fatalf("OPTIONS 的 Allow 头应含 PROPFIND,实际 %q", allow)
+	}
+}
+
 // 列目录必须走单次分页列举,不得退化成每项 HEAD,更不能发 GetObject。
 func TestListDirectoryDoesNotGetObjects(t *testing.T) {
 	g := newGateway(t, "", 0)

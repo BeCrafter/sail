@@ -22,8 +22,9 @@ var (
 )
 
 var tailCmd = &cobra.Command{
-	Use:   "tail [-n N | --bytes N] <s3://bucket/key|LOCAL_PATH>",
-	Short: "Output the last part of object/file",
+	GroupID: "content",
+	Use:     "tail [-n N | --bytes N] <s3://bucket/key|LOCAL_PATH>",
+	Short:   "Output the last part of object/file",
 	Long: `Read the tail of an object/file. For s3 paths only the trailing window is fetched via Range, so the whole object is not downloaded;
 when Range is unavailable (unsupported service or tiny object) it automatically falls back to a full streaming read.
 -n shows the last N lines (default 10); --bytes shows the last N bytes; the two are mutually exclusive.

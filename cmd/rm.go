@@ -19,8 +19,9 @@ import (
 var rmRecursive bool
 
 var rmCmd = &cobra.Command{
-	Use:   "rm <s3://bucket/key>...",
-	Short: "Delete objects",
+	GroupID: "transfer",
+	Use:     "rm <s3://bucket/key>...",
+	Short:   "Delete objects",
 	Long: `Delete objects; accepts multiple arguments. -r recursively deletes every object under the prefix (batch deletes of up to 1000 at a time).
 Arguments with wildcards (*, ?) are matched against patterns (listing + client-side matching), e.g. s3://bucket/logs/*.log.
 

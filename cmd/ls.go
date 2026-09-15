@@ -27,8 +27,9 @@ var (
 )
 
 var lsCmd = &cobra.Command{
-	Use:   "ls [s3://bucket/prefix]",
-	Short: "List objects or buckets",
+	GroupID: "list",
+	Use:     "ls [s3://bucket/prefix]",
+	Short:   "List objects or buckets",
 	Long: `List objects or buckets. With no arguments, lists the default bucket
 (s3://bucket is accepted but pointless);
 -l long format (size + last-modified time), combinable with -t to sort by time,

@@ -1,14 +1,81 @@
 package cmd
 
 import (
+	"bufio"
+	"context"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/BeCrafter/sail/internal/client"
 	"github.com/BeCrafter/sail/internal/config"
+	"github.com/BeCrafter/sail/internal/fakes3"
 	"github.com/BeCrafter/sail/internal/i18n"
+	"github.com/BeCrafter/sail/internal/vfs/s3fs"
+	"github.com/BeCrafter/sail/internal/webdavfs"
 )
+
+// newServeHTTPServer 必须设 DisableGeneralOptionsHandler:否则 net/http 会用内置的
+// globalOptionsHandler 截胡 `OPTIONS *`,不回 DAV 头,macOS Finder 判定为非 WebDAV
+// 而卡在「连接中」。本测试起真实 http.Server(httptest 不走此分支),发 `OPTIONS *`,
+// 断言响应带 DAV 头 —— 这正是修复前会失败的点。
+func TestServeHTTPServerAnswersOptionsStarWithDAVHeader(t *testing.T) {
+	s3srv := fakes3.New()
+	t.Cleanup(s3srv.Close)
+	s3c, err := client.New(context.Background(), &config.Resolved{
+		Endpoint: s3srv.URL(), AccessKey: "ak", SecretKey: "sk", Region: "us-east-1", PathStyle: true,
+	})
+	if err != nil {
+		t.Fatalf("构造 S3 client 失败: %v", err)
+	}
+	core, err := s3fs.New(s3fs.Config{Client: s3c, Bucket: "b", StagingDir: t.TempDir()})
+	if err != nil {
+		t.Fatalf("构造 s3fs 失败: %v", err)
+	}
+	gw, err := webdavfs.NewServer(webdavfs.Config{
+		FileSystem: webdavfs.New(core),
+		User:       "admin",
+		Password:   "123",
+	})
+	if err != nil {
+		t.Fatalf("构造网关失败: %v", err)
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("监听失败: %v", err)
+	}
+	srv := newServeHTTPServer(ln.Addr().String(), gw)
+	go srv.Serve(ln)
+	t.Cleanup(func() { _ = srv.Close() })
+
+	// 用底层 TCP 发 `OPTIONS *`:net/http 的 client 不允许直接设 RequestURI,
+	// 只有原始握手才能确保请求行确实是 `OPTIONS * HTTP/1.1`。
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("连接失败: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("OPTIONS * HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")); err != nil {
+		t.Fatalf("写请求失败: %v", err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "OPTIONS"})
+	if err != nil {
+		t.Fatalf("读响应失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("OPTIONS * 期望 200,实际 %d", resp.StatusCode)
+	}
+	if dav := resp.Header.Get("DAV"); dav == "" {
+		t.Fatal("OPTIONS * 必须带 DAV 头(Finder 靠它判定 WebDAV);" +
+			"缺少说明 http.Server 的 globalOptionsHandler 未被禁用")
+	}
+}
 
 func TestParseSize(t *testing.T) {
 	cases := []struct {
@@ -231,6 +298,40 @@ func TestServeBannerExposesBucketProfilePrefix(t *testing.T) {
 	}
 	if line := exposePrefix("/tenant-a/"); line != " prefix=tenant-a" {
 		t.Errorf("前缀应归一化渲染,实际 %q", line)
+	}
+}
+
+// serveURLs 必须把通配绑定展开成可挂载的地址:localhost(本机)+ 局域网 IP(其它设备),
+// 而不是原样吐出 ":8080" / "0.0.0.0:8080"。
+func TestServeURLs(t *testing.T) {
+	// 通配绑定:应包含 localhost,且不含 0.0.0.0/:: 这类不可连地址。
+	for _, listen := range []string{":8080", "0.0.0.0:8443"} {
+		urls := serveURLs("https", listen)
+		if len(urls) == 0 {
+			t.Fatalf("serveURLs(%q) 不应为空", listen)
+		}
+		if urls[0] != "https://localhost:"+strings.SplitN(listen, ":", 2)[1]+"/" {
+			t.Errorf("serveURLs(%q) 首条应为 localhost,实际 %q", listen, urls[0])
+		}
+		for _, u := range urls {
+			if strings.Contains(u, "0.0.0.0") || strings.Contains(u, "[::]") {
+				t.Errorf("serveURLs(%q) 含不可连的通配地址: %q", listen, u)
+			}
+			if !strings.HasSuffix(u, "/") {
+				t.Errorf("serveURLs(%q) 生成的 %q 不是以 / 结尾的挂载 URL", listen, u)
+			}
+		}
+	}
+
+	// 显式绑定具体主机:只暴露它,不额外猜测其它地址。
+	urls := serveURLs("http", "127.0.0.1:8080")
+	if len(urls) != 1 || urls[0] != "http://127.0.0.1:8080/" {
+		t.Errorf("显式 host 应只给该地址,实际 %v", urls)
+	}
+	// IPv6 字面量要加方括号。
+	urls6 := serveURLs("http", "[::1]:8080")
+	if len(urls6) != 1 || urls6[0] != "http://[::1]:8080/" {
+		t.Errorf("IPv6 应加方括号,实际 %v", urls6)
 	}
 }
 

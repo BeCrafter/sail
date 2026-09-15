@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -33,14 +34,17 @@ type serveWebdavFlags struct {
 	stagingDir        string
 	chunkedUpload     bool
 	chunkSize         string
+	dirCacheTTL       string
+	prewarm           []string
 	printWindowsSetup bool
 }
 
 var serveWebdavOpts serveWebdavFlags
 
 var serveCmd = &cobra.Command{
-	Use:   "serve",
-	Short: "Start a server that shares a bucket over a standard protocol",
+	GroupID: "server",
+	Use:     "serve",
+	Short:   "Start a server that shares a bucket over a standard protocol",
 	Long: `Share a bucket with the file manager built into the OS; clients install nothing.
 
   serve webdav  -- share over the WebDAV protocol (HTTPS optional)`,
@@ -118,24 +122,19 @@ func runServeWebdav(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	srv, err := webdavfs.NewServer(webdavfs.Config{
-		FileSystem:        webdavfs.New(core),
+		FileSystem:        webdavfs.NewWithListingCache(core, s.dirCacheTTL),
 		User:              s.user,
 		Password:          s.password,
 		MaxUploadSize:     s.maxUpload,
 		MaxUploadSizeText: humanSize(s.maxUpload),
 		Logger:            log.New(os.Stderr, "", log.LstdFlags),
+		PrewarmDirs:       s.prewarm,
 	})
 	if err != nil {
 		return err
 	}
 
-	httpSrv := &http.Server{
-		Addr:    s.listen,
-		Handler: srv,
-		// 不设 ReadTimeout/WriteTimeout:大文件上传下载会长时间占用连接,
-		// 超时会把正常传输掐断。超时由客户端与 TCP 层负责。
-		ReadHeaderTimeout: 30 * time.Second,
-	}
+	httpSrv := newServeHTTPServer(s.listen, srv)
 
 	scheme := "http"
 	if s.tlsCert != "" {
@@ -144,6 +143,12 @@ func runServeWebdav(cmd *cobra.Command, _ []string) error {
 	fmt.Fprint(os.Stderr, i18n.Tf(
 		"sail webdav started: %s://%s  bucket=%s profile=%s%s user=%s max-object-size=%s staging=%s chunked=%s\n",
 		scheme, s.listen, r.Bucket, r.ProfileName, exposePrefix(s.prefix), s.user, humanSize(s.maxUpload), stagingDirOf(s.stagingDir), chunkedText(s.chunkedUpload, s.chunkSize)))
+	if urls := serveURLs(scheme, s.listen); len(urls) > 0 {
+		fmt.Fprint(os.Stderr, i18n.Tf("  mount at: %s\n", strings.Join(urls, "  ")))
+		if len(urls) > 1 {
+			fmt.Fprint(os.Stderr, i18n.T("  (localhost = this machine; LAN IP = other devices)\n"))
+		}
+	}
 
 	if s.tlsCert != "" {
 		return httpSrv.ListenAndServeTLS(s.tlsCert, s.tlsKey)
@@ -163,6 +168,8 @@ type serveSettings struct {
 	maxUpload     int64
 	chunkedUpload bool
 	chunkSize     int64
+	dirCacheTTL   time.Duration
+	prewarm       []string
 }
 
 // mergeServe 按「flag(显式设置) > profile.serve.* > flag 默认值」合并并校验
@@ -206,6 +213,10 @@ func mergeServe(o serveWebdavFlags, r *config.Resolved, changed func(string) boo
 	if err != nil {
 		return serveSettings{}, err
 	}
+	dirCacheTTL, err := parseDuration(o.dirCacheTTL)
+	if err != nil {
+		return serveSettings{}, fmt.Errorf(i18n.T("invalid --dir-cache-ttl: %w"), err)
+	}
 
 	return serveSettings{
 		listen:        listen,
@@ -218,7 +229,121 @@ func mergeServe(o serveWebdavFlags, r *config.Resolved, changed func(string) boo
 		maxUpload:     maxUpload,
 		chunkedUpload: chunkedUpload,
 		chunkSize:     chunkSize,
+		dirCacheTTL:   dirCacheTTL,
+		prewarm:       o.prewarm,
 	}, nil
+}
+
+// parseDuration 解析 --dir-cache-ttl。空串或 "0" 表示关闭缓存;
+// 否则必须是合法的 Go duration(如 "5s"、"1m")。
+func parseDuration(raw string) (time.Duration, error) {
+	t := strings.TrimSpace(raw)
+	if t == "" || t == "0" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(t)
+	if err != nil {
+		return 0, err
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("duration must not be negative")
+	}
+	return d, nil
+}
+
+// newServeHTTPServer 构造 WebDAV 网关的 http.Server。
+func newServeHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:    addr,
+		Handler: handler,
+		// 不设 ReadTimeout/WriteTimeout:大文件上传下载会长时间占用连接,
+		// 超时会把正常传输掐断。超时由客户端与 TCP 层负责。
+		ReadHeaderTimeout: 30 * time.Second,
+		// macOS Finder 挂载 WebDAV 的第一步是发 `OPTIONS *`(星号)探测能力,
+		// 靠响应里的 DAV 头判断「是不是 WebDAV 服务器」。默认 net/http 会用内置的
+		// globalOptionsHandler 直接回空 200,请求到不了 WebDAV handler,于是没有 DAV 头,
+		// Finder 判定为非 WebDAV 而卡在「连接中」。禁用后 OPTIONS * 落到我们的 handler。
+		DisableGeneralOptionsHandler: true,
+	}
+}
+
+// serveURLs 把 --listen 地址解析成可直接挂载的完整 URL 列表。
+//
+// listen 常写成 ":8080" 或 "0.0.0.0:8080",这些不是客户端能连的地址。这里按
+// 实际绑定展开成:
+//   - 指定了具体 host(如 192.168.1.5:8080)时,只给那一个地址;
+//   - 通配地址(空 / 0.0.0.0 / ::)时,给出 localhost(本机挂载)+ 各网卡的
+//     局域网 IPv4(其它设备挂载),让用户按场景复制。
+//
+// 解析失败或无需展开(如 "unix:/tmp/x.sock")时返回 nil,不打断启动。
+func serveURLs(scheme, listen string) []string {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil || port == "" {
+		return nil
+	}
+	// 显式绑定了具体主机:只暴露它,不猜其它地址。
+	if ip := net.ParseIP(host); host != "" && (ip == nil || !ip.IsUnspecified()) {
+		return []string{urlFor(scheme, host, port)}
+	}
+	// 通配绑定:本机 + 局域网。
+	urls := []string{urlFor(scheme, "localhost", port)}
+	for _, ip := range lanIPv4s() {
+		urls = append(urls, urlFor(scheme, ip, port))
+	}
+	return urls
+}
+
+// urlFor 拼一个挂载 URL;IPv6 字面量加方括号。
+func urlFor(scheme, host, port string) string {
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return scheme + "://" + host + ":" + port + "/"
+}
+
+// lanIPv4s 枚举本机上可用的局域网 IPv4 地址(排除回环与非全局单播)。
+// 通过枚举网卡得到,不依赖任何外部网络(不再向 8.8.8.8 探测),
+// 因此离线/内网环境同样可用。顺序按网卡名排序,结果稳定。
+func lanIPv4s() []string {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	var names []string
+	byName := map[string][]string{}
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok || ipnet.IP.IsLoopback() {
+				continue
+			}
+			ip4 := ipnet.IP.To4()
+			if ip4 == nil {
+				continue
+			}
+			// 排除链路本地 169.254.0.0/16(awdl/llw 等接口常见),它对其它设备不可达。
+			if ip4[0] == 169 && ip4[1] == 254 {
+				continue
+			}
+			byName[ifc.Name] = append(byName[ifc.Name], ip4.String())
+		}
+	}
+	for name := range byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var out []string
+	for _, name := range names {
+		out = append(out, byName[name]...)
+	}
+	return out
 }
 
 // pick 实现「flag(显式设置) > 配置 > flag 默认值」的合并:
@@ -412,6 +537,8 @@ func init() {
 	serveWebdavCmd.Flags().StringVar(&serveWebdavOpts.stagingDir, "staging-dir", "", "write staging directory, defaults to the system temp dir; peak is about one file's size x concurrent uploads")
 	serveWebdavCmd.Flags().BoolVar(&serveWebdavOpts.chunkedUpload, "chunked-upload", false, "store files larger than --chunk-size as chunks plus a manifest (default off: 1 file = 1 object)")
 	serveWebdavCmd.Flags().StringVar(&serveWebdavOpts.chunkSize, "chunk-size", "4GiB", "max physical chunk size and the chunked-storage threshold (5MiB ~ 5GiB); requires --chunked-upload")
+	serveWebdavCmd.Flags().StringVar(&serveWebdavOpts.dirCacheTTL, "dir-cache-ttl", "60s", "how long a directory listing is cached (e.g. 60s, 10m; 0 disables); expired entries are served stale while refreshing in the background, so a warm directory never blocks. External bucket changes become visible after at most this long")
+	serveWebdavCmd.Flags().StringSliceVar(&serveWebdavOpts.prewarm, "prewarm", nil, "directories to keep hot in the background (comma-separated logical paths, e.g. /yiche,/modelImage); each is listed once at startup then refreshed, so the first visit does not pay the full listing cost")
 	serveWebdavCmd.Flags().BoolVar(&serveWebdavOpts.printWindowsSetup, "print-windows-setup", false, "print the Windows client registry setup and mount command, then exit")
 
 	serveCmd.AddCommand(serveWebdavCmd)

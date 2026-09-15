@@ -326,14 +326,14 @@ The bucket is taken from the same resolution chain every other command uses: `--
 `SAIL_BUCKET` > `profile.bucket`. Startup is refused when none of the three yields a bucket;
 the startup banner prints `bucket=`, `profile=`, and `prefix=` so what is exposed stays assertable.
 
-Besides `--bucket`/`--profile`, every flag in the table below can also be written to a profile's
-`serve:` block (see "serve block" above); omit the flag to read it from config, or pass it explicitly
-to override the config value.
+Besides `--profile` and the global `--bucket`, every flag in the table below can also be written to
+a profile's `serve:` block (see "serve block" above); omit the flag to read it from config, or pass
+it explicitly to override the config value.
 
 | Flag | Default | Description |
 |---|---|---|
+| `--profile` | config `default-profile` | Which profile to share: the bucket comes from that profile's `bucket` (overridable by global `--bucket` or `SAIL_BUCKET`); startup is refused when all three are empty |
 | `--listen` | `:8080` | Listen address (`serve.listen`) |
-| `--bucket` | from config resolution | Bucket to share: `--bucket` > `SAIL_BUCKET` > `profile.bucket`; startup is refused when all three are empty |
 | `--prefix` | empty | Shared root prefix (mapped to `/`); out-of-prefix paths are always rejected (`serve.prefix`) |
 | `--user` / `--password` | empty | Basic auth; startup is refused when empty, anonymous sharing is not allowed (`serve.user`/`serve.password`) |
 | `--tls-cert` / `--tls-key` | empty | Supplying both enables HTTPS (`serve.tls-cert`/`serve.tls-key`) |
@@ -342,7 +342,13 @@ to override the config value.
 | `--staging-dir` | system temp dir | Write staging directory; peak ≈ largest single file × concurrent uploads (`serve.staging-dir`) |
 | `--chunked-upload` | `false` | Store files larger than `--chunk-size` as chunks + a manifest (off: 1 file = 1 object) (`serve.chunked-upload`) |
 | `--chunk-size` | `4GiB` | Max physical chunk size, also the chunked-storage threshold (5MiB ~ 5GiB); requires `--chunked-upload` (`serve.chunk-size`) |
+| `--dir-cache-ttl` | `60s` | How long a directory listing is cached (e.g. `60s`, `10m`); expired entries are served stale and refreshed in the background, so a warm directory never blocks; writes invalidate immediately, `0` disables. External bucket changes become visible after at most this long |
+| `--prewarm` | empty | Directories to keep hot in the background (comma-separated logical paths, e.g. `/yiche,/modelImage`); each is listed once at startup then refreshed on a cycle, so the first visit does not pay the full listing cost. Intended for very large directories (100k+ entries, tens of seconds on first listing) |
 | `--print-windows-setup` | — | Print the `.reg` content + PowerShell + a "you must restart the WebClient service" reminder, then exit |
+
+The startup banner derives mount URLs from the bind address: for a wildcard bind (`:8080`/`0.0.0.0:8080`) it lists both `http://localhost:PORT/` (this machine) and each interface's LAN IP (other devices); for an explicit host it lists only that address.
+
+> **Performance**: uploads/downloads stream via server-side Range reads without staging whole files in memory; the HTTP connection pool is tuned for high-concurrency S3, reusing long-lived connections when opening many files at once; directory listings are short-TTL cached. Opening a single file is 1 `HeadObject` + 1 `GetObject`.
 
 ### Mounting from clients
 

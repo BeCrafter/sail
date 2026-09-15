@@ -27,6 +27,10 @@ type Config struct {
 	MaxUploadSizeText string
 	// Logger 为空则不记录访问日志。
 	Logger *log.Logger
+	// PrewarmDirs 是需要后台预热的目录路径(逻辑路径,如 "/yiche")。
+	// 首个请求到达时启动,按缓存 TTL 周期刷新,让超大目录在用户访问前
+	// 就处于热状态——它们的首次列举可能长达数十秒。
+	PrewarmDirs []string
 }
 
 // Server 是 WebDAV 网关的 HTTP 外壳。
@@ -38,6 +42,9 @@ type Server struct {
 	maxUploadText string
 	logger        *log.Logger
 	handler       http.Handler
+
+	// prewarmDirs 是需要后台预热的目录;NewServer 时即启动,随进程存活。
+	prewarmDirs []string
 }
 
 // NewServer 组装中间件链:
@@ -56,6 +63,7 @@ func NewServer(cfg Config) (*Server, error) {
 		maxUploadSize: cfg.MaxUploadSize,
 		maxUploadText: cfg.MaxUploadSizeText,
 		logger:        cfg.Logger,
+		prewarmDirs:   cfg.PrewarmDirs,
 	}
 	dav := &webdav.Handler{
 		FileSystem: cfg.FileSystem,
@@ -63,6 +71,13 @@ func NewServer(cfg Config) (*Server, error) {
 		LockSystem: webdav.NewMemLS(),
 	}
 	s.handler = s.withBasicAuth(s.withRequestState(s.withDirCopyMove(dav)))
+	// 构造即启动后台预热:进程生命周期内持续刷新,让热点目录在用户首次
+	// 访问前就处于热状态。这些目录的首次列举可能长达数十秒,预热把这份
+	// 代价挪到点击之前。cmd/serve.go 仅在真正要监听时才构造本对象,
+	// 故不会在「构造即丢弃」的场景平白发起后端列举。
+	if len(s.prewarmDirs) > 0 {
+		s.fs.prewarm(context.Background(), s.prewarmDirs)
+	}
 	return s, nil
 }
 
@@ -70,9 +85,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.handler.ServeHTTP(w, r)
 }
 
-// withBasicAuth 拒绝一切未认证请求,包括 OPTIONS。
+// withBasicAuth 拒绝一切未认证请求,但放行 OPTIONS。
+// OPTIONS 是能力探测(返回 DAV/Allow 头),不含任何资源数据;macOS Finder /
+// Windows WebClient 挂载时会先发一个不带凭据的 OPTIONS,收到 401 后不会带凭据
+// 重试,而是停在「连接中」。故 OPTIONS 必须在认证之前放行。
 func (s *Server) withBasicAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			next.ServeHTTP(w, r)
+			return
+		}
 		user, pass, ok := r.BasicAuth()
 		if !ok ||
 			subtle.ConstantTimeCompare([]byte(user), []byte(s.user)) != 1 ||

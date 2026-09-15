@@ -14,8 +14,9 @@ import (
 )
 
 var mbCmd = &cobra.Command{
-	Use:   "mb <s3://bucket>...",
-	Short: "Create buckets",
+	GroupID: "transfer",
+	Use:     "mb <s3://bucket>...",
+	Short:   "Create buckets",
 	Long: `Create buckets (CreateBucket). Bucket names must follow the naming rules of the S3 service you connect to.
 Recreating the same bucket may be rejected by the service (implementation-dependent); on failure you are prompted to use the existing bucket instead.
 
@@ -51,8 +52,9 @@ Examples:
 }
 
 var rbCmd = &cobra.Command{
-	Use:   "rb <s3://bucket>...",
-	Short: "Delete empty buckets",
+	GroupID: "transfer",
+	Use:     "rb <s3://bucket>...",
+	Short:   "Delete empty buckets",
 	Long: `Delete empty buckets (DeleteBucket). The service rejects the call when the bucket still holds objects or placeholder objects;
 empty it first (e.g. sail rm -r s3://bucket/). Recreation after deletion usually has a delay — wait and retry.
 

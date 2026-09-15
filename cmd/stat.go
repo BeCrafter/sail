@@ -16,8 +16,9 @@ import (
 )
 
 var statCmd = &cobra.Command{
-	Use:   "stat <s3://bucket/key | LOCAL_PATH>",
-	Short: "Show object/file metadata",
+	GroupID: "list",
+	Use:     "stat <s3://bucket/key | LOCAL_PATH>",
+	Short:   "Show object/file metadata",
 	Long: `Show metadata for an object or file: s3 paths use HeadObject, local paths use os.Stat.
 Outputs key, size, content-type, last-modified time, etag, storage class,
 version-id and custom metadata.

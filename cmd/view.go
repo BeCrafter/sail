@@ -22,6 +22,7 @@ var (
 )
 
 var viewCmd = &cobra.Command{
+	GroupID: "content",
 	Use:     "view <s3://bucket/key | LOCAL_FILE_PATH>",
 	Aliases: []string{"cat"},
 	Short:   "View object/file contents",

@@ -11,8 +11,9 @@ import (
 )
 
 var urlCmd = &cobra.Command{
-	Use:   "url s3://bucket/key",
-	Short: "Generate a CDN access URL for a file",
+	GroupID: "verify",
+	Use:     "url s3://bucket/key",
+	Short:   "Generate a CDN access URL for a file",
 	Long: `Build a public access URL for a file from the configured cdn-domain.
 
 Requires the bucket to be public-read and a cdn-domain set in the config.

@@ -29,6 +29,7 @@ Use --help on any command for detailed usage and examples.`: `sail 是 S3 协议
 		"List and stats":           "列举与统计",
 		"View content":             "内容查看",
 		"Checksum and access":      "校验与访问",
+		"Server":                   "服务",
 		"Config":                   "配置",
 	})
 }

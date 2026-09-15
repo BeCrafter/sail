@@ -25,6 +25,11 @@ type FileInfo struct {
 	// ContentType 是对象存储中记录的 Content-Type。列目录(ListObjectsV2)
 	// 不返回该字段,故列举得到的条目此处为空,由协议壳按扩展名兜底推断。
 	ContentType string
+
+	// Chunked 表示该文件在对象存储里以「分片 + manifest」形式存储。
+	// Stat 阶段已判定完毕(见 s3fs.detectMeta),故 InfoOpener 可据此决定
+	// 是否需要读 manifest 体,而不必重发一次 HEAD。
+	Chunked bool
 }
 
 // FileSystem 是协议无关的核心契约。
@@ -76,6 +81,17 @@ type WriteOptions struct {
 // 实现方可据此做暂存盘预留;不实现时壳按未知长度处理。
 type WriteOptioner interface {
 	SetWriteOptions(WriteOptions)
+}
+
+// InfoOpener 由内核可选实现:协议壳已通过 Stat 拿到 FileInfo 后,调用它直接
+// 打开读句柄,省去 OpenRead 内部重复的一次 HEAD。WebDAV 的 GET 路径是
+// Stat → OpenFile(Stat) → ServeContent(Seek/Read),不实现此接口时每次打开
+// 都要多发一次 HEAD,在慢后端上每次多一个 RTT。
+//
+// 实现方必须保证:fi 与 path 指向同一资源时,结果与 OpenRead 等价;无法凭 fi
+// 安全构造句柄时(例如分片存储),应退回 OpenRead 的完整路径而不是给出错误结果。
+type InfoOpener interface {
+	OpenReadWithInfo(ctx context.Context, path string, fi FileInfo) (ReadSeekCloser, error)
 }
 
 // 错误语义:必须 errors.Is 可判定,协议壳依赖它做状态码映射。

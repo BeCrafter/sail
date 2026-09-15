@@ -25,8 +25,9 @@ var (
 )
 
 var checksumCmd = &cobra.Command{
-	Use:   "checksum [--algo md5|sha256] [--compare FILE] [--etag] <src>...",
-	Short: "Compute object/file checksums",
+	GroupID: "verify",
+	Use:     "checksum [--algo md5|sha256] [--compare FILE] [--etag] <src>...",
+	Short:   "Compute object/file checksums",
 	Long: `Stream-compute the md5 or sha256 checksum of an object/file and print "<checksum>  <source>".
 --compare checks against a local file, printing OK on match and FAILED on mismatch (exit code 1 if any FAILED).
 --etag shows the raw ETag of the S3 object without reading its content. Note: for multipart uploads

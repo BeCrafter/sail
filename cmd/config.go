@@ -16,8 +16,9 @@ import (
 )
 
 var configCmd = &cobra.Command{
-	Use:   "config",
-	Short: "Config management",
+	GroupID: "config",
+	Use:     "config",
+	Short:   "Config management",
 	Long: `Manage configuration. Subcommands:
   setup   interactively generate/update the config file (default ~/.sail/config.yaml, override with -c;
           --reset starts from a fresh config; when the file already exists, adds or reconfigures one profile,

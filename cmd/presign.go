@@ -19,8 +19,9 @@ var presignExpires int
 const metaManifestKey = "sail-manifest-key"
 
 var presignCmd = &cobra.Command{
-	Use:   "presign s3://bucket/key",
-	Short: "Generate a presigned download URL",
+	GroupID: "verify",
+	Use:     "presign s3://bucket/key",
+	Short:   "Generate a presigned download URL",
 	Long: `Generate a presigned download URL (GET, valid for 1 hour by default) that can be accessed without credentials until it expires.
 Note: some self-hosted S3-compatible services do not support query string authentication (returning "Authorization empty").
 In that case, use a CDN domain to access a public object instead: sail url s3://bucket/key.

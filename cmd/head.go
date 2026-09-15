@@ -18,8 +18,9 @@ var (
 )
 
 var headCmd = &cobra.Command{
-	Use:   "head [-n N | --bytes N] <s3://bucket/key|LOCAL_PATH>",
-	Short: "Output the first part of object/file",
+	GroupID: "content",
+	Use:     "head [-n N | --bytes N] <s3://bucket/key|LOCAL_PATH>",
+	Short:   "Output the first part of object/file",
 	Long: `Stream-read the head of an object/file without downloading it to disk.
 -n shows the first N lines (default 10); --bytes shows the first N bytes; the two are mutually exclusive.
 
