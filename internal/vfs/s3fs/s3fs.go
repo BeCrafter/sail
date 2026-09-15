@@ -320,6 +320,31 @@ func (f *FS) OpenRead(ctx context.Context, p string) (vfs.ReadSeekCloser, error)
 	return &readFile{ctx: ctx, client: f.client, bucket: f.bucket, key: key, info: fi, size: fi.Size}, nil
 }
 
+// OpenReadWithInfo 是 OpenRead 的快路径:调用方已通过 Stat 拿到 fi,
+// 普通文件据此可直接构造读句柄,省掉 OpenRead 内部重复的一次 HEAD。
+// 分片文件需要 manifest 里的版本号与片表,而 FileInfo 不含这些,故退回
+// OpenRead 的完整路径(HEAD + 读 manifest),不牺牲正确性。
+func (f *FS) OpenReadWithInfo(ctx context.Context, p string, fi vfs.FileInfo) (vfs.ReadSeekCloser, error) {
+	if fi.Chunked {
+		return f.OpenRead(ctx, p)
+	}
+	logical, err := normalize(p)
+	if err != nil {
+		return nil, err
+	}
+	if logical == "/" || fi.IsDir {
+		return nil, vfs.ErrNotSupported
+	}
+	return &readFile{
+		ctx:    ctx,
+		client: f.client,
+		bucket: f.bucket,
+		key:    f.key(logical),
+		info:   fi,
+		size:   fi.Size,
+	}, nil
+}
+
 // Remove 删除单个对象;recursive 为真时删除该前缀下的全部对象(
 // 含目录标记对象),批量 DeleteObjects 每批 1000 个。
 //

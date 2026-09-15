@@ -61,18 +61,22 @@ Examples:
 		"write staging directory, defaults to the system temp dir; peak is about one file's size x concurrent uploads": "写暂存目录,默认系统临时目录;峰值 ≈ 单文件大小 × 并发上传数",
 		"store files larger than --chunk-size as chunks plus a manifest (default off: 1 file = 1 object)":              "把超过 --chunk-size 的文件拆成分片 + manifest 存储(默认关:1 文件 = 1 对象)",
 		"max physical chunk size and the chunked-storage threshold (5MiB ~ 5GiB); requires --chunked-upload":           "单个物理片上限,同时是分片阈值(5MiB ~ 5GiB);需配合 --chunked-upload",
-		"print the Windows client registry setup and mount command, then exit":                                         "打印 Windows 客户端注册表配置与挂载命令后退出",
+		"how long a directory listing is cached (e.g. 60s, 10m; 0 disables); expired entries are served stale while refreshing in the background, so a warm directory never blocks. External bucket changes become visible after at most this long": "目录列表缓存时长(如 60s、10m;0 关闭);过期条目会先返回旧值再后台刷新,热目录永不阻塞。外部对桶的改动最长该时长后可见",
+		"directories to keep hot in the background (comma-separated logical paths, e.g. /yiche,/modelImage); each is listed once at startup then refreshed, so the first visit does not pay the full listing cost":                                  "需要后台保热的目录(逗号分隔的逻辑路径,如 /yiche,/modelImage);启动时各列一次后按周期刷新,首次访问不再承担完整列举的开销",
+		"print the Windows client registry setup and mount command, then exit": "打印 Windows 客户端注册表配置与挂载命令后退出",
 
 		// serve.go — runtime messages
-		"--user and --password are required: this gateway does not allow anonymous sharing":                         "--user 与 --password 必填:本网关不允许匿名共享",
+		"--user and --password are required: this gateway does not allow anonymous sharing":                                             "--user 与 --password 必填:本网关不允许匿名共享",
 		"--user and --password are required (from flags or profile %q \"serve\" config): this gateway does not allow anonymous sharing": "--user 与 --password 必填(来自 flag 或 profile %q 的 \"serve\" 配置):本网关不允许匿名共享",
-		"--tls-cert and --tls-key must be supplied together":                                                        "--tls-cert 与 --tls-key 必须同时提供",
-		"invalid --backend-max-object-size: %w":                                                                     "--backend-max-object-size 非法: %w",
-		"invalid --max-upload-size: %w":                                                                             "--max-upload-size 非法: %w",
-		"invalid --chunk-size: %v":                                                                                  "--chunk-size 非法: %v",
-		"--chunk-size must be between %s and %s, got %s":                                                            "--chunk-size 必须在 %s 与 %s 之间,当前 %s",
-		"--chunk-size (%s) exceeds --backend-max-object-size (%s): raise the backend limit or lower the chunk size": "--chunk-size(%s)超过 --backend-max-object-size(%s):请调高后端上限或调小片大小",
-		"sail webdav started: %s://%s  bucket=%s profile=%s%s user=%s max-object-size=%s staging=%s chunked=%s\n":   "sail webdav 已启动: %s://%s  bucket=%s profile=%s%s user=%s 单对象上限=%s 暂存=%s 分片=%s\n",
+		"--tls-cert and --tls-key must be supplied together":                                                                            "--tls-cert 与 --tls-key 必须同时提供",
+		"invalid --backend-max-object-size: %w":                                                                                         "--backend-max-object-size 非法: %w",
+		"invalid --max-upload-size: %w":                                                                                                 "--max-upload-size 非法: %w",
+		"invalid --chunk-size: %v":                                                                                                      "--chunk-size 非法: %v",
+		"--chunk-size must be between %s and %s, got %s":                                                                                "--chunk-size 必须在 %s 与 %s 之间,当前 %s",
+		"--chunk-size (%s) exceeds --backend-max-object-size (%s): raise the backend limit or lower the chunk size":                     "--chunk-size(%s)超过 --backend-max-object-size(%s):请调高后端上限或调小片大小",
+		"sail webdav started: %s://%s  bucket=%s profile=%s%s user=%s max-object-size=%s staging=%s chunked=%s\n":                       "sail webdav 已启动: %s://%s  bucket=%s profile=%s%s user=%s 单对象上限=%s 暂存=%s 分片=%s\n",
+		"  mount at: %s\n": "  挂载地址: %s\n",
+		"  (localhost = this machine; LAN IP = other devices)\n": "  (localhost = 本机;局域网 IP = 其它设备)\n",
 
 		// serve.go — --print-windows-setup output
 		`Mount a sail WebDAV drive in Windows Explorer

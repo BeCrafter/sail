@@ -332,13 +332,13 @@ sail serve webdav --print-windows-setup
 三处都取不到桶时拒绝启动;启动横幅打印 `bucket=`、`profile=`、`prefix=`,
 让「到底暴露了什么」始终可断言。
 
-除 `--bucket`/`--profile` 外,下表参数都可同时写进 profile 的 `serve:` 块(见上文「serve 块」),
+除 `--profile` 与全局 `--bucket` 外,下表参数都可写进 profile 的 `serve:` 块(见上文「serve 块」),
 启动时省略对应 flag 即从配置读取;flag 显式给出时仍覆盖配置。
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
+| `--profile` | 配置的 default-profile | 选择共享哪个 profile:桶取该 profile 的 `bucket`(可被全局 `--bucket` 或 `SAIL_BUCKET` 覆盖);三处都为空时拒绝启动 |
 | `--listen` | `:8080` | 监听地址(`serve.listen`) |
-| `--bucket` | 取自配置解析 | 共享的桶:`--bucket` > `SAIL_BUCKET` > `profile.bucket`;三处都为空时拒绝启动 |
 | `--prefix` | 空 | 共享根前缀(映射为 `/`);越界路径一律拒绝(`serve.prefix`) |
 | `--user` / `--password` | 空 | Basic 认证,**为空拒绝启动**,不允许匿名共享(`serve.user`/`serve.password`) |
 | `--tls-cert` / `--tls-key` | 空 | 同时提供即启用 HTTPS(`serve.tls-cert`/`serve.tls-key`) |
@@ -347,7 +347,13 @@ sail serve webdav --print-windows-setup
 | `--staging-dir` | 系统临时目录 | 写暂存目录;峰值 ≈ 单文件最大值 × 并发上传数(`serve.staging-dir`) |
 | `--chunked-upload` | `false` | 把超过 `--chunk-size` 的文件拆成分片 + manifest 存储(关:1 文件 = 1 对象)(`serve.chunked-upload`) |
 | `--chunk-size` | `4GiB` | 单个物理片上限,同时是分片阈值(5MiB ~ 5GiB);需配合 `--chunked-upload`(`serve.chunk-size`) |
+| `--dir-cache-ttl` | `60s` | 目录列表缓存时长(如 `60s`、`10m`);过期条目**先返回旧值再后台刷新**,热目录永不阻塞;写操作即时失效,`0` 关闭。外部对桶的改动最长该时长后可见 |
+| `--prewarm` | 空 | 需要后台保热的目录(逗号分隔逻辑路径,如 `/yiche,/modelImage`);启动时各列一次、之后按 TTL 周期刷新,首次访问不再承担完整列举的开销。用于超大目录(十几万条,首次列举可达数十秒) |
 | `--print-windows-setup` | — | 打印 `.reg` 内容 + PowerShell + 「必须重启 WebClient 服务」提醒后退出 |
+
+启动横幅会按绑定给出挂载地址:通配地址(`:8080`/`0.0.0.0:8080`)时同时列出 `http://localhost:端口/`(本机挂载)和各网卡的局域网 IP(其它设备挂载);显式绑定具体主机时只列该地址。
+
+> **性能**:上传/下载走服务端 Range 流式读写,不整文件入内存;HTTP 连接池按 S3 高并发调优,并发打开多个文件时复用长连接;目录列表带短时缓存。单次打开文件只做 1 次 `HeadObject` + 1 次 `GetObject`。
 
 ### 客户端挂载
 

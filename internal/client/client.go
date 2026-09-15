@@ -52,9 +52,29 @@ func New(ctx context.Context, r *config.Resolved) (*s3.Client, error) {
 		// 部分自建服务返回的 XML 时间格式不合 AWS 标准(空格分隔而非 ISO8601),
 		// SDK 反序列化会整体失败。包装 HTTPClient 在传输层规范化时间格式,
 		// 对后续 SDK 解析透明。
-		o.HTTPClient = &xmlTimeNormalizer{base: http.DefaultClient}
+		o.HTTPClient = &xmlTimeNormalizer{base: newHTTPClient()}
 	})
 	return c, nil
+}
+
+// newHTTPClient 返回按 S3 高并发场景调优的 HTTP 客户端。
+//
+// 默认 http.DefaultTransport 的 MaxIdleConnsPerHost 是 0(即
+// DefaultMaxIdleConnsPerHost=2):同一 host 只保留 2 条空闲连接,超出的会被关闭。
+// serve webdav 下 Finder 会并发打开多个文件,并发度一旦超过 2,后续请求每次都
+// 要重新建连(TCP + 跨区域 RTT),这正是「打开目录很慢」的主因之一。
+// 调高每个 host 的空闲连接上限后,并发请求得以复用长连接。
+func newHTTPClient() *http.Client {
+	tr, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return http.DefaultClient
+	}
+	t := tr.Clone()
+	// 并发上传/下载会同时占用多条连接;空闲池留足,避免复用前被回收。
+	t.MaxIdleConns = 128
+	t.MaxIdleConnsPerHost = 64
+	t.MaxConnsPerHost = 0 // 0 = 不限,连接数由上层并发度决定
+	return &http.Client{Transport: t}
 }
 
 // xmlTimeNormalizer 包装 HTTPClient:在传输层把响应 XML 中的

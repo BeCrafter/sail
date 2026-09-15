@@ -212,6 +212,7 @@ func (f *FS) detectMeta(ctx context.Context, logical, key string, h *s3.HeadObje
 			ModTime:     aws.ToTime(h.LastModified),
 			ETag:        unquote(aws.ToString(h.ETag)),
 			ContentType: aws.ToString(h.ContentType),
+			Chunked:     true,
 		}
 		return metaHit{version: h.Metadata["sail-manifest-key"], size: total}, fi, true, nil
 	}
@@ -237,6 +238,7 @@ func (f *FS) detectMeta(ctx context.Context, logical, key string, h *s3.HeadObje
 		ModTime:     aws.ToTime(h.LastModified),
 		ETag:        unquote(aws.ToString(h.ETag)),
 		ContentType: m.ContentType,
+		Chunked:     true,
 	}
 	if fi.ContentType == "" {
 		fi.ContentType = aws.ToString(h.ContentType)
