@@ -36,8 +36,9 @@ type tnode struct {
 }
 
 var treeCmd = &cobra.Command{
-	Use:   "tree [s3://bucket/prefix/ | LOCAL_PATH]",
-	Short: "Show object/file tree",
+	GroupID: "list",
+	Use:     "tree [s3://bucket/prefix/ | LOCAL_PATH]",
+	Short:   "Show object/file tree",
 	Long: `Show a tree of S3 objects or a local file tree.
 
 Flags:

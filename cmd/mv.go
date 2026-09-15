@@ -22,8 +22,9 @@ var (
 )
 
 var mvCmd = &cobra.Command{
-	Use:   "mv <src> <dst>",
-	Short: "Move objects/files (copy then delete source)",
+	GroupID: "transfer",
+	Use:     "mv <src> <dst>",
+	Short:   "Move objects/files (copy then delete source)",
 	Long: `Move objects/files: copy then delete the source. s3-to-s3 uses server-side CopyObject + Delete with zero bandwidth.
 
 Examples:

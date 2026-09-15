@@ -19,8 +19,9 @@ var (
 )
 
 var duCmd = &cobra.Command{
-	Use:   "du [s3://bucket/prefix]",
-	Short: "Summarize object size under a prefix",
+	GroupID: "list",
+	Use:     "du [s3://bucket/prefix]",
+	Short:   "Summarize object size under a prefix",
 	Long: `Sum the size of objects under a prefix, broken down by directory level
 (each level is cumulative; the root is the grand total).
 With no arguments, sums the default bucket; --max-depth limits the printed levels;

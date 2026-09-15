@@ -25,6 +25,7 @@ var (
 )
 
 var cpCmd = &cobra.Command{
+	GroupID: "transfer",
 	Use:     "cp <src> <dst>",
 	Aliases: []string{"upload", "download"},
 	Short:   "Copy objects/files (local↔s3, s3↔s3)",

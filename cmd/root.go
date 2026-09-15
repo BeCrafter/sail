@@ -50,39 +50,22 @@ func init() {
 	// 自定义 --version / -v 的输出格式,默认模板会带 "sail version" 前缀。
 	rootCmd.SetVersionTemplate("sail version {{.Version}}\n")
 
-	// 按主题分组展示,组内按名称字母序(EnableCommandSorting 开启后 cobra 对全部命令排序,
-	// help 模板再按 GroupID 过滤输出,故组内自动 A→Z)。
+	// 按主题分组展示。分组由各命令在自己的定义处声明 GroupID(见 cmd/*.go),
+	// 不再集中在此按命令名 switch——命令与其分组同处,新增命令时不会漏改。
+	// 组内按名称字母序(cobra.EnableCommandSorting)。
 	cobra.EnableCommandSorting = true
 	rootCmd.AddGroup(
 		&cobra.Group{ID: "transfer", Title: "Object / bucket transfer"},
 		&cobra.Group{ID: "list", Title: "List and stats"},
 		&cobra.Group{ID: "content", Title: "View content"},
 		&cobra.Group{ID: "verify", Title: "Checksum and access"},
+		&cobra.Group{ID: "server", Title: "Server"},
 		&cobra.Group{ID: "config", Title: "Config"},
 	)
 	// serve 的子命令 webdav 由 cmd/serve.go 的 init() 挂载。
 	rootCmd.AddCommand(cpCmd, mvCmd, rmCmd, mkdirCmd, rmdirCmd, mbCmd, rbCmd, syncCmd, lsCmd, treeCmd, findCmd, duCmd, statCmd, viewCmd, headCmd, tailCmd, wcCmd, grepCmd, checksumCmd, presignCmd, urlCmd, serveCmd, configCmd)
-	assignGroups()
 	// help 归入「Config」组末尾(Additional 命令区只有内置 completion,已隐藏)
 	rootCmd.SetHelpCommandGroupID("config")
-}
-
-// assignGroups 为每个顶层命令分配主题分组(组内字母序由 EnableCommandSorting 提供)。
-func assignGroups() {
-	for _, c := range rootCmd.Commands() {
-		switch c.Name() {
-		case "cp", "mb", "mkdir", "mv", "rb", "rm", "rmdir", "serve", "sync":
-			c.GroupID = "transfer"
-		case "du", "find", "ls", "stat", "tree":
-			c.GroupID = "list"
-		case "grep", "head", "tail", "view", "wc":
-			c.GroupID = "content"
-		case "checksum", "presign", "url":
-			c.GroupID = "verify"
-		case "config":
-			c.GroupID = "config"
-		}
-	}
 }
 
 // Execute 运行根命令

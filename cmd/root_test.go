@@ -74,3 +74,31 @@ func TestConfigFlagFromArgs(t *testing.T) {
 		}
 	}
 }
+
+// 每个顶层命令都必须显式声明 GroupID:分组在命令定义处声明(见 cmd/*.go),
+// 漏声明会掉进 help 的 "Additional Commands" 区。本测试兜住这类回归。
+func TestEveryTopLevelCommandHasGroup(t *testing.T) {
+	valid := map[string]bool{
+		"transfer": true, "list": true, "content": true,
+		"verify": true, "server": true, "config": true,
+	}
+	for _, c := range rootCmd.Commands() {
+		if c.Name() == "help" {
+			continue
+		}
+		if c.GroupID == "" {
+			t.Errorf("命令 %q 未声明 GroupID", c.Name())
+			continue
+		}
+		if !valid[c.GroupID] {
+			t.Errorf("命令 %q 的 GroupID %q 不是已注册分组", c.Name(), c.GroupID)
+		}
+	}
+}
+
+// serve 属于「Server」组,不应混入对象传输组。
+func TestServeGroupedUnderServer(t *testing.T) {
+	if serveCmd.GroupID != "server" {
+		t.Errorf("serve 的 GroupID = %q,期望 server", serveCmd.GroupID)
+	}
+}

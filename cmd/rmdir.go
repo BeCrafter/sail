@@ -14,8 +14,9 @@ import (
 )
 
 var rmdirCmd = &cobra.Command{
-	Use:   "rmdir <s3://bucket/prefix/>...",
-	Short: "Delete empty directory placeholder objects",
+	GroupID: "transfer",
+	Use:     "rmdir <s3://bucket/prefix/>...",
+	Short:   "Delete empty directory placeholder objects",
 	Long: `Delete empty directory placeholder objects (no recursive deletion). Errors if the directory contains other objects; use sail rm -r instead.
 A directory with no placeholder object is treated as already deleted (idempotent).
 

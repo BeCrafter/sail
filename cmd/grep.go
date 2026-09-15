@@ -22,8 +22,9 @@ var (
 )
 
 var grepCmd = &cobra.Command{
-	Use:   "grep [options] <pattern> <src>...",
-	Short: "Search object/file contents",
+	GroupID: "content",
+	Use:     "grep [options] <pattern> <src>...",
+	Short:   "Search object/file contents",
 	Long: `Stream-search object/file contents line by line with a regex, without downloading to disk.
 -i ignore case; -v invert (print non-matching lines); -l list only sources with matches; -c print match count; -n show line numbers.
 A single source prints bare matching lines; multiple sources prefix each line with "source:line". Exit code 1 when no source matches (GNU grep convention).

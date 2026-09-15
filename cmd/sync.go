@@ -80,8 +80,9 @@ func (sp *syncPath) display(relKey string) string {
 }
 
 var syncCmd = &cobra.Command{
-	Use:   "sync <src> <dst>",
-	Short: "rsync-style incremental sync (local↔s3, s3↔s3)",
+	GroupID: "transfer",
+	Use:     "sync <src> <dst>",
+	Short:   "rsync-style incremental sync (local↔s3, s3↔s3)",
 	Long: `rsync-style incremental sync: by default it compares by size + mtime and transfers only entries that differ.
 Supports local→s3, s3→local, and s3→s3 (server-side copy); for local↔local use the system rsync.
 

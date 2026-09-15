@@ -17,8 +17,9 @@ var (
 )
 
 var wcCmd = &cobra.Command{
-	Use:   "wc <src>...",
-	Short: "Count lines, words, and bytes",
+	GroupID: "content",
+	Use:     "wc <src>...",
+	Short:   "Count lines, words, and bytes",
 	Long: `Stream-count lines, words, and bytes of an object/file.
 With no options, print three columns (lines words bytes, GNU wc order); with options, print only the selected columns.
 

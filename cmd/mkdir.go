@@ -15,8 +15,9 @@ import (
 )
 
 var mkdirCmd = &cobra.Command{
-	Use:   "mkdir <s3://bucket/prefix/>...",
-	Short: "Create directory placeholder objects",
+	GroupID: "transfer",
+	Use:     "mkdir <s3://bucket/prefix/>...",
+	Short:   "Create directory placeholder objects",
 	Long: `Create directory placeholder objects (zero bytes, key ending in /).
 S3 has no real directories; placeholder objects are the conventional directory marker. mkdir is naturally idempotent — rerunning simply overwrites the placeholder.
 
