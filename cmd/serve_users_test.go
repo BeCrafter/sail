@@ -365,3 +365,36 @@ func mustBody(t *testing.T, resp *http.Response) string {
 	n, _ := resp.Body.Read(b)
 	return string(b[:n])
 }
+
+// 场景(P2 热加载修改配额):改 quota 不重建栈,quotafs 原子改参数,
+// 既有对象与在途连接不受影响,后续准入立即按新口径计算。
+func TestServeRuntimeQuotaHotUpdate(t *testing.T) {
+	users := usersFrom("alice")
+	users[0].Quota = "1KiB"
+	f := newRuntimeFixture(t, users)
+
+	if resp := f.doAs(t, "alice", "pw-alice", "PUT", "/a.txt", strings.Repeat("x", 800)); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("1KiB 内写 800B 期望 201,实际 %d: %s", resp.StatusCode, mustBody(t, resp))
+	}
+	// 800(已用)+ 500 > 1024 → 507。
+	if resp := f.doAs(t, "alice", "pw-alice", "PUT", "/b.txt", strings.Repeat("y", 500)); resp.StatusCode != http.StatusInsufficientStorage {
+		t.Fatalf("旧配额 800+500>1024 期望 507,实际 %d", resp.StatusCode)
+	}
+	// 热更新配额为 2KiB:同一用户栈,无需重建。
+	table2 := usersFrom("alice")
+	table2[0].Quota = "2KiB"
+	before := f.rt.stacks["team/alice-space"].fs
+	if err := f.rt.applyUserTable(table2); err != nil {
+		t.Fatalf("applyUserTable 失败: %v", err)
+	}
+	if after := f.rt.stacks["team/alice-space"].fs; after != before {
+		t.Fatal("改 quota 不得重建栈")
+	}
+	if resp := f.doAs(t, "alice", "pw-alice", "PUT", "/b.txt", strings.Repeat("y", 500)); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("2KiB 口径下 800+500≤2048 应放行,实际 %d", resp.StatusCode)
+	}
+	// 既有对象不受影响。
+	if obj, ok := f.s3.Get("b", "team/alice-space/a.txt"); !ok || string(obj.Data) != strings.Repeat("x", 800) {
+		t.Error("热更新不得影响既有对象")
+	}
+}

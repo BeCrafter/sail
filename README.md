@@ -363,12 +363,20 @@ profile's `serve:` block — every user gets a Basic-auth identity and their own
         - name: alice
           password: ${ALICE_PASSWORD}   # ${VAR} reference, same as other serve fields
           prefix: alice/                # relative to prefix; omitted = the base prefix itself
-          # quota: 10GiB                # syntax validated at startup; enforcement lands with MERC-11 P2
+          quota: 10GiB                  # per-user space limit; hot-applies without restart
         - name: bob
           password: ${BOB_PASSWORD}
           prefix: shared/bob-data/      # any relative segment
 ```
 
+- **Space quota (`quota`).** Each user's `quota` (e.g. `10GiB`, `500MiB`, or plain bytes) caps the
+  physical bytes stored under their prefix — the billable size, including `.sail/` chunk parts and
+  manifests. Over-quota writes return **507** with actionable guidance: before the body is read when
+  the request declares a Content-Length, or at the commit point for COPY (which has none); overwrites
+  get the old object's size released from the arithmetic. Usage is a lazy snapshot (default TTL 5
+  minutes) plus in-flight reservations — best-effort within the window, so writes made outside the
+  gateway (e.g. `sail cp` directly to the bucket) become visible at the next refresh. Changing
+  `quota` in the config hot-applies without a restart.
 - **Structural isolation.** A user's effective prefix is the base `prefix` + their `prefix`
   segment; every object key they touch (including `.sail/` chunk parts) lands inside it. A user's
   `/` is their own space — other users' objects are structurally unreachable, `..` traversal is

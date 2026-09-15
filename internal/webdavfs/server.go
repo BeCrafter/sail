@@ -492,6 +492,14 @@ func guidance(cause error, maxUploadText string) string {
   2) 或改用 sail cp 上传到同一 bucket。
 `, limit)
 	case errors.Is(cause, vfs.ErrInsufficientStorage):
+		if errors.Is(cause, vfs.ErrQuotaExceeded) {
+			return `上传被拒绝:超出该用户的空间配额(507)。
+
+可操作指引:
+  1) 清理该用户空间内的旧文件释放空间;
+  2) 或由运维调大配置文件中该用户的 quota,保存后热生效,无需重启。
+`
+		}
 		return `上传被拒绝:服务端暂存盘空间不足,无法接收本次上传。
 
 可操作指引:

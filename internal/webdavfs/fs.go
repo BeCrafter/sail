@@ -95,6 +95,13 @@ func (fs *FileSystem) Mkdir(ctx context.Context, name string, perm os.FileMode) 
 	return w.Close()
 }
 
+// writeAdmitter 由写句柄可选实现(quotafs 的配额会计):在读取请求体之前
+// 做配额准入。失败语义为 vfs.ErrInsufficientStorage(壳经 guardWriter 输出
+// 507),桶内无残留。
+type writeAdmitter interface {
+	AdmitWrite(ctx context.Context, contentLength int64) error
+}
+
 // OpenFile 实现 webdav.FileSystem。读路径不做任何 S3 请求:
 // 元信息来自请求级缓存,真正的 GetObject 推迟到第一次 Read/Seek。
 func (fs *FileSystem) OpenFile(ctx context.Context, name string, flag int, perm os.FileMode) (webdav.File, error) {
@@ -112,6 +119,15 @@ func (fs *FileSystem) OpenFile(ctx context.Context, name string, flag int, perm 
 				ContentType:   requestContentType(ctx),
 				ContentLength: requestContentLength(ctx),
 			})
+		}
+		// 配额准入必须发生在读取请求体之前(Content-Length 已知即可判):
+		// 失败登记 fatal,guardWriter 把 webdav 默认的 500 换成 507 + 指引。
+		if adm, ok := w.(writeAdmitter); ok {
+			if err := adm.AdmitWrite(ctx, requestContentLength(ctx)); err != nil {
+				registerFatal(ctx, err)
+				w.Close()
+				return nil, err
+			}
 		}
 		return &davFile{ctx: ctx, fs: fs, name: logical, w: w}, nil
 	}
@@ -564,6 +580,9 @@ func (f *davFile) Stat() (os.FileInfo, error) {
 		f.statDone = true
 		fi, err := f.w.Commit(f.ctx)
 		if err != nil {
+			// 提交点超限(配额复核)等可映射错误:登记 fatal 让壳输出
+			// 507/413,而非 webdav 默认的 500。
+			registerFatal(f.ctx, err)
 			return nil, err
 		}
 		invalidateCache(f.ctx, f.name)
@@ -648,6 +667,9 @@ func (f *davFile) Close() error {
 			// copyFiles):不在此补一次提交,暂存就会被清掉、目标对象静默消失。
 			if _, err := w.Commit(f.ctx); err != nil {
 				w.Close()
+				// COPY 无 Content-Length,配额超限只能在提交点发现:
+				// 登记 fatal 把 webdav 默认的 500 换成 507,且目标不落桶。
+				registerFatal(f.ctx, err)
 				return err
 			}
 			invalidateCache(f.ctx, f.name)

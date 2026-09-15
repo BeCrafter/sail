@@ -368,12 +368,17 @@ sail serve webdav --print-windows-setup
         - name: alice
           password: ${ALICE_PASSWORD}   # ${VAR} 引用,与 serve 其余字段一致
           prefix: alice/                # 相对 base;省略 = base 前缀本身
-          # quota: 10GiB                # 启动/reload 校验语法;配额执行随 MERC-11 P2 落地
+          quota: 10GiB                  # 每用户空间上限;热生效,无需重启
         - name: bob
           password: ${BOB_PASSWORD}
           prefix: shared/bob-data/      # 任意相对段
 ```
 
+- **空间配额(`quota`)**。每个用户的 `quota`(如 `10GiB`、`500MiB`,或纯字节数)限制其前缀下的
+  物理字节消耗——即账单口径,含 `.sail/` 分片部件与 manifest。超限写返回 **507** + 可操作指引:
+  请求声明了 Content-Length 时在读请求体之前拦截,COPY(无 Content-Length)在提交点复核;
+  覆盖写会扣减旧对象的大小。用量为惰性快照(默认 TTL 5 分钟)+ 在途预留——窗口内尽力准确,
+  网关外直写(如 `sail cp`)在下次刷新后可见。配置中修改 `quota` 热生效,无需重启。
 - **结构性隔离**。用户生效前缀 = base `prefix` + 该用户的 `prefix` 段;其触碰的所有对象 key
   (含 `.sail/` 分片部件)都落在前缀内。用户的 `/` 即自己的空间——其他用户的对象结构性不可达,
   `..` 越界被拒绝,访问日志对每个请求归因 `user=<名字>`。

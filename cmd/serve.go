@@ -19,6 +19,7 @@ import (
 	"github.com/BeCrafter/sail/internal/client"
 	"github.com/BeCrafter/sail/internal/config"
 	"github.com/BeCrafter/sail/internal/i18n"
+	"github.com/BeCrafter/sail/internal/vfs/quotafs"
 	"github.com/BeCrafter/sail/internal/vfs/s3fs"
 	"github.com/BeCrafter/sail/internal/webdavfs"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -299,12 +300,19 @@ type serveRuntime struct {
 	logger   *log.Logger
 
 	reloadMu sync.Mutex
-	// stacks 是生效前缀 → 根文件系统的栈缓存。栈按生效前缀一一对应
-	// (I6 已禁前缀相等),改密码/名字复用同一栈,删用户/改前缀退役。
-	stacks map[string]*webdavfs.FileSystem
+	// stacks 是生效前缀 → 栈的缓存。栈按生效前缀一一对应(I6 已禁前缀相等),
+	// 改密码/名字/配额复用同一栈,删用户/改前缀退役。
+	stacks map[string]*userStack
 	// ensured 是已完成目录标记创建的生效前缀;ensure 失败不登记,下次
 	// reload 重试(I10)。
 	ensured map[string]bool
+}
+
+// userStack 是一名用户的栈:s3fs 内核 → quotafs 配额装饰器 → webdavfs 壳层
+// 文件系统。配额热更新只动 qfs(SetQuota 原子改参数,不重建栈)。
+type userStack struct {
+	fs  *webdavfs.FileSystem
+	qfs *quotafs.FS
 }
 
 // effectiveUserTable 把生效参数归一为用户表:多用户取配置表;单用户是
@@ -330,7 +338,7 @@ func newServeRuntime(o serveWebdavFlags, r *config.Resolved, s serveSettings, ch
 		profile:  r.ProfileName,
 		s3c:      s3c,
 		logger:   logger,
-		stacks:   map[string]*webdavfs.FileSystem{},
+		stacks:   map[string]*userStack{},
 		ensured:  map[string]bool{},
 	}
 	if err := rt.applyUserTable(effectiveUserTable(s)); err != nil {
@@ -340,13 +348,18 @@ func newServeRuntime(o serveWebdavFlags, r *config.Resolved, s serveSettings, ch
 }
 
 // buildEntries 为用户表构建路由条目:栈按生效前缀复用缓存,缺失则新建
-// (共享同一 S3 client,构建是内存操作)。前缀基点用运行中的 settings.prefix
-// ——base 属冷区,热加载按它解释用户前缀。
+// (共享同一 S3 client,构建是内存操作),并按用户配置原子设定配额
+// (复用栈时即配额热更新)。前缀基点用运行中的 settings.prefix——base
+// 属冷区,热加载按它解释用户前缀。
 func (rt *serveRuntime) buildEntries(users []config.UserConfig) ([]webdavfs.UserEntry, error) {
 	entries := make([]webdavfs.UserEntry, 0, len(users))
 	for _, u := range users {
 		eff := config.EffectivePrefix(rt.settings.prefix, u.Prefix)
-		fs, ok := rt.stacks[eff]
+		limit, err := quotaBytes(u.Quota)
+		if err != nil {
+			return nil, err
+		}
+		st, ok := rt.stacks[eff]
 		if !ok {
 			core, err := s3fs.New(s3fs.Config{
 				Client:        rt.s3c,
@@ -360,17 +373,31 @@ func (rt *serveRuntime) buildEntries(users []config.UserConfig) ([]webdavfs.User
 			if err != nil {
 				return nil, err
 			}
-			fs = webdavfs.NewWithListingCache(core, rt.settings.dirCacheTTL)
-			rt.stacks[eff] = fs
+			// 内核 → quotafs 配额装饰器 → 壳层。配额上限可由 SetQuota 热改,
+			// 不必重建栈(I7)。
+			qfs := quotafs.New(core, core, limit, 0, rt.logger)
+			st = &userStack{fs: webdavfs.NewWithListingCache(qfs, rt.settings.dirCacheTTL), qfs: qfs}
+			rt.stacks[eff] = st
+		} else {
+			// 复用栈:配额原子热更新(改 quota 不重建栈,P2 场景)。
+			st.qfs.SetQuota(limit)
 		}
 		entries = append(entries, webdavfs.UserEntry{
 			Name:        u.Name,
 			Password:    u.Password,
-			FileSystem:  fs,
+			FileSystem:  st.fs,
 			PrewarmDirs: rt.settings.prewarm,
 		})
 	}
 	return entries, nil
+}
+
+// quotaBytes 解析用户的配额字符串;空 = 不限额(0)。
+func quotaBytes(raw string) (int64, error) {
+	if raw == "" {
+		return 0, nil
+	}
+	return config.ParseQuota(raw)
 }
 
 // applyUserTable 校验并应用一份用户表,是启动与热加载共用的单一闸门:

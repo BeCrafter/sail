@@ -151,7 +151,8 @@ Mount with **macOS Finder** (⌘K, `https://host:8443`) or **Windows Explorer** 
 **Multi-user (`serve.users`)**: write a user table into the profile's `serve:` block and each user
 gets a Basic-auth identity with a private namespace under the base prefix — structural isolation,
 seconds-level hot reload of the user table (no restart for adding/removing users or changing
-passwords), and automatic creation of each user's root directory. `users` and `user`/`password`
+passwords), per-user space quotas (`quota`, over-quota writes return 507 with guidance), and
+automatic creation of each user's root directory. `users` and `user`/`password`
 are mutually exclusive; prefixes must be pairwise non-nested (fail-loud). Single-user mode is
 unchanged. Details in the [repo README](https://github.com/BeCrafter/sail#multi-user-serveusers).
 
