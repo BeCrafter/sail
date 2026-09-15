@@ -28,3 +28,11 @@ jobs:
 
       - name: Unit tests
         run: go test ./...
+
+      # npm 包的 README 是独立维护的精简版,新增命令或主 README 改版时
+      # 容易漏改,导致发布出去的包文档缺内容。这条检查以真实命令树为准,
+      # 强制两个 README 覆盖同一批命令。
+      - name: README sync check
+        run: |
+          go build -o sail .
+          ./scripts/check-readme-sync.sh

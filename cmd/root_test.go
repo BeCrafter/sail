@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/BeCrafter/sail/internal/config"
@@ -100,5 +102,47 @@ func TestEveryTopLevelCommandHasGroup(t *testing.T) {
 func TestServeGroupedUnderServer(t *testing.T) {
 	if serveCmd.GroupID != "server" {
 		t.Errorf("serve 的 GroupID = %q,期望 server", serveCmd.GroupID)
+	}
+}
+
+// __commands 是 scripts/check-readme-sync.sh 的唯一事实来源:
+// 它必须列出全部顶层命令且带分组,否则文档同步检查会失去意义。
+func TestCommandsDumpListsAllTopLevelCommands(t *testing.T) {
+	// 从 rootCmd 直接算期望集合,与实现同源但独立成算。
+	want := map[string]string{}
+	for _, c := range rootCmd.Commands() {
+		if !c.IsAvailableCommand() {
+			continue
+		}
+		want[c.Name()] = c.GroupID
+	}
+	if len(want) == 0 {
+		t.Fatal("rootCmd 没有任何可用命令")
+	}
+
+	// 驱动 __commands 命令,收集输出。
+	var buf bytes.Buffer
+	commandsDumpCmd.SetOut(&buf)
+	if err := commandsDumpCmd.RunE(commandsDumpCmd, nil); err != nil {
+		t.Fatalf("__commands 执行失败: %v", err)
+	}
+
+	got := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		name, group, _ := strings.Cut(line, "\t")
+		got[name] = group
+	}
+	if len(got) != len(want) {
+		t.Fatalf("命令数不符: __commands %d 个, rootCmd %d 个", len(got), len(want))
+	}
+	for name, group := range want {
+		if g, ok := got[name]; !ok {
+			t.Errorf("__commands 缺少命令 %q", name)
+		} else if g != group {
+			t.Errorf("命令 %q 分组不符: __commands=%q rootCmd=%q", name, g, group)
+		}
 	}
 }

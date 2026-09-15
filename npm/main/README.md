@@ -66,6 +66,20 @@ profiles:
 
 Keys reference environment variables via `${VAR}`, avoiding plaintext storage in the config file.
 
+All `sail serve webdav` flags can also be pinned in a profile's `serve:` block, so startup does not need them on the command line (explicit flags still override):
+
+```yaml
+profiles:
+  prod:
+    # ...connection settings above...
+    bucket: mybucket
+    serve:
+      listen: ":8443"
+      user: alice
+      password: ${SAIL_PROD_SERVE_PASSWORD}   # plaintext or ${VAR}
+      # prefix, tls-cert, tls-key, staging-dir, chunked-upload, ... also supported
+```
+
 ## Common commands
 
 | Group | Command | Description |
@@ -88,9 +102,54 @@ Keys reference environment variables via `${VAR}`, avoiding plaintext storage in
 | Checksum & access | `sail checksum` | Compute md5/sha256 or show the raw ETag |
 | Checksum & access | `sail presign` | Generate a presigned download URL |
 | Checksum & access | `sail url` | Generate a CDN access URL |
+| Server | `sail serve webdav` | Share a bucket as a mountable network drive (macOS Finder / Windows Explorer) |
 | Config | `sail config` | Manage configuration (`config setup` wizard) |
 
 All commands support `--help` for detailed usage and examples.
+
+## WebDAV gateway (`sail serve webdav`)
+
+Mount a bucket (or the prefix given by `--prefix`) as a network drive: clients read and write
+directly through the WebDAV support built into the OS, with no software to install. Listing,
+uploading, downloading, dragging the progress bar with Range requests, renaming, and deleting
+all behave like an ordinary network drive.
+
+```bash
+# Start (HTTPS recommended; supplying both --tls-cert/--tls-key enables it)
+sail serve webdav --bucket mybucket --listen :8443 \
+  --user alice --password '***' --tls-cert cert.pem --tls-key key.pem
+
+# Share only a prefix inside the bucket (mapped to /, out-of-prefix paths are always rejected)
+sail serve webdav --bucket mybucket --prefix tenant-a --user alice --password '***'
+
+# Omit --bucket: resolved like every other command (--bucket > SAIL_BUCKET > profile.bucket)
+sail serve webdav --profile prod --user alice --password '***'
+
+# Print the one-time Windows client registry setup and mount command, then exit
+sail serve webdav --print-windows-setup
+```
+
+The bucket is taken from the same resolution chain every other command uses: `--bucket` >
+`SAIL_BUCKET` > `profile.bucket`. Startup is refused when none of the three yields a bucket;
+the startup banner prints `bucket=`, `profile=`, `prefix=`, and the mountable addresses.
+
+| Flag | Default | Description |
+|---|---|---|
+| `--listen` | `:8080` | Listen address (`serve.listen`) |
+| `--prefix` | empty | Shared root prefix (mapped to `/`); out-of-prefix paths are always rejected (`serve.prefix`) |
+| `--user` / `--password` | empty | Basic auth; startup is refused when empty, anonymous sharing is not allowed |
+| `--tls-cert` / `--tls-key` | empty | Supplying both enables HTTPS |
+| `--staging-dir` | system temp dir | Write staging directory; peak ≈ largest single file × concurrent uploads |
+| `--chunked-upload` / `--chunk-size` | `false` / `4GiB` | Store files larger than `--chunk-size` as chunks + a manifest (off: 1 file = 1 object) |
+| `--dir-cache-ttl` | `60s` | Directory listing cache; expired entries are served stale and refreshed in the background |
+| `--prewarm` | empty | Directories to keep hot in the background (comma-separated, e.g. `/bigdir`) |
+| `--print-windows-setup` | — | Print the Windows client registry setup and mount command, then exit |
+
+Mount with **macOS Finder** (⌘K, `https://host:8443`) or **Windows Explorer** (run
+`--print-windows-setup` first to lift the ~50MB WebClient registry gate, then `net use Z: \\host@SSL@8443\DavWWWRoot`).
+
+See the [repo README](https://github.com/BeCrafter/sail#webdav-gateway-sail-serve-webdav) for the
+full flag table, design boundaries (in-process LOCK, 501 on directory MOVE/COPY), and chunked storage.
 
 ## Documentation
 

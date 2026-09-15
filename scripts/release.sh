@@ -113,6 +113,10 @@ fi
 info "版本 $VERSION (最近 tag: ${LAST_TAG:-无})$($DRY_RUN && echo ' [dry-run]')"
 go build ./... || die "go build 失败"
 go vet ./...   || die "go vet 失败"
+# 发布的 npm 包 README 取自 npm/main/README.md。发布前强制它与真实命令树
+# 同步,避免把缺内容的文档发出去(CI 也跑同一条检查,这里再兜一道)。
+go build -o "$ROOT/sail" . || die "构建 sail 失败"
+"$ROOT/scripts/check-readme-sync.sh" || die "README 与命令清单不同步,请先补齐 npm/main/README.md"
 node --check scripts/publish-npm.js || die "publish-npm.js 语法错误"
 node --check npm/main/bin/sail.js   || die "sail.js 语法错误"
 check_npm_env

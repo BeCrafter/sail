@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/BeCrafter/sail/internal/config"
@@ -66,6 +68,34 @@ func init() {
 	rootCmd.AddCommand(cpCmd, mvCmd, rmCmd, mkdirCmd, rmdirCmd, mbCmd, rbCmd, syncCmd, lsCmd, treeCmd, findCmd, duCmd, statCmd, viewCmd, headCmd, tailCmd, wcCmd, grepCmd, checksumCmd, presignCmd, urlCmd, serveCmd, configCmd)
 	// help 归入「Config」组末尾(Additional 命令区只有内置 completion,已隐藏)
 	rootCmd.SetHelpCommandGroupID("config")
+	// 隐藏的诊断命令:输出顶层命令清单,供 scripts/check-readme-sync.sh
+	// 做文档同步检查。以真实命令树为唯一事实来源,避免脚本里再维护一份
+	// 命令名单(那本身就会漂移)。
+	rootCmd.AddCommand(commandsDumpCmd)
+}
+
+// commandsDumpCmd 打印顶层命令名与分组,供文档同步检查使用。
+// 每行 "name\tgroup"。单独跑 `sail __commands` 可见,不出现在根 help 里。
+var commandsDumpCmd = &cobra.Command{
+	Use:     "__commands",
+	Short:   "print top-level commands as name<TAB>group (used by doc-sync checks)",
+	GroupID: "config",
+	Hidden:  true,
+	Args:    cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		var lines []string
+		for _, c := range rootCmd.Commands() {
+			if !c.IsAvailableCommand() {
+				continue
+			}
+			lines = append(lines, c.Name()+"\t"+c.GroupID)
+		}
+		sort.Strings(lines)
+		for _, l := range lines {
+			fmt.Fprintln(cmd.OutOrStdout(), l)
+		}
+		return nil
+	},
 }
 
 // Execute 运行根命令
