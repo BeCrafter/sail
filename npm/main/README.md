@@ -78,8 +78,11 @@ profiles:
       user: alice
       password: ${SAIL_PROD_SERVE_PASSWORD}   # plaintext or ${VAR}
       # users: …                              # multi-user mode — see "Multi-user" below; mutually exclusive with user/password
-      # prefix, tls-cert, tls-key, staging-dir, chunked-upload, ... also supported
+      # prefix, tls-cert, tls-key, staging-dir, chunked-upload, dir-cache-ttl, prewarm, ... also supported
 ```
+
+`sail config setup` guides these fields interactively (including generating and validating the multi-user
+table); fields it does not ask are kept as written in the config file.
 
 ## Common commands
 
@@ -142,8 +145,8 @@ the startup banner prints `bucket=`, `profile=`, `prefix=`, and the mountable ad
 | `--tls-cert` / `--tls-key` | empty | Supplying both enables HTTPS |
 | `--staging-dir` | system temp dir | Write staging directory; peak ≈ largest single file × concurrent uploads |
 | `--chunked-upload` / `--chunk-size` | `false` / `4GiB` | Store files larger than `--chunk-size` as chunks + a manifest (off: 1 file = 1 object) |
-| `--dir-cache-ttl` | `60s` | Directory listing cache; expired entries are served stale and refreshed in the background |
-| `--prewarm` | empty | Directories to keep hot in the background (comma-separated, e.g. `/bigdir`) |
+| `--dir-cache-ttl` | `60s` | Directory listing cache; expired entries are served stale and refreshed in the background (`serve.dir-cache-ttl`) |
+| `--prewarm` | empty | Directories to keep hot in the background (comma-separated, e.g. `/bigdir`) (`serve.prewarm`) |
 | `--print-windows-setup` | — | Print the Windows client registry setup and mount command, then exit |
 
 Mount with **macOS Finder** (⌘K, `https://host:8443`) or **Windows Explorer** (run
@@ -162,7 +165,7 @@ profile's `serve:` block — every user gets a Basic-auth identity and their own
         - name: alice
           password: ${ALICE_PASSWORD}   # ${VAR} reference, same as other serve fields
           prefix: alice/                # relative to prefix; omitted = the base prefix itself
-          quota: 10GiB                  # per-user space limit; hot-applies without restart
+          quota: 10GB                   # per-user space limit (MB/GB/TB); hot-applies without restart
         - name: bob
           password: ${BOB_PASSWORD}
           prefix: shared/bob-data/      # any relative segment
@@ -173,11 +176,15 @@ profile's `serve:` block — every user gets a Basic-auth identity and their own
   `/` is their own space — other users' objects are structurally unreachable, `..` traversal is
   rejected, and the access log attributes every request as `user=<name>`.
 - **Space quota (`quota`).** Caps the physical bytes stored under the user's prefix — the billable
-  size, including `.sail/` chunk parts and manifests. Over-quota writes return **507** with
+  size, including `.sail/` chunk parts and manifests. `quota` units are `MB`/`GB`/`TB`
+  (a plain number means bytes). Over-quota writes return **507** with
   actionable guidance; overwrites release the old object's size from the arithmetic. Usage is a
   lazy snapshot (default TTL 5 minutes) plus in-flight reservations, so writes made outside the
-  gateway (e.g. `sail cp` directly to the bucket) become visible at the next refresh. Changing
-  `quota` in the config hot-applies without a restart.
+  gateway (e.g. `sail cp` directly to the bucket) become visible at the next refresh; expired
+  snapshots keep serving the old value while a background refresh runs, so a large prefix never
+  blocks writes. The quota is also reported to clients (RFC 4331 `DAV:quota-available-bytes`), so
+  Finder / Explorer show the remaining space. Changing `quota` in the config hot-applies without a
+  restart.
 - **Hot reload.** The user table is watched: add/remove users or change passwords, prefixes or
   quotas by editing the config file — effective within seconds, no restart. `listen`, TLS
   certificates, `staging-dir`, chunked-upload settings and the base `prefix` are cold zone

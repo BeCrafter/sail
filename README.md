@@ -73,6 +73,14 @@ Interactively generates or updates `~/.sail/config.yaml` (`--reset` resets to a 
 - `endpoint` is required — leaving it empty re-prompts in place
 - `access-key` / `secret-key` can be entered in plaintext; press Enter on empty to reference per-profile env vars (see "Key security" below). After writing, it prints the variable names you need to `export`
 - When reconfiguring an existing profile, already-configured plaintext keys are not echoed — press Enter to keep them
+- The WebDAV gateway (`serve:` block) is guided as well: listen / prefix / auth (single or multi-user) / TLS /
+  chunked-upload / staging-dir. An existing `serve` block defaults to "keep" — choose to append users to the
+  existing table, reconfigure it, or remove it; multi-user tables are validated as you enter them (duplicate
+  names, nested prefixes, quota syntax), and the fields the wizard does not ask (size limits, `dir-cache-ttl`,
+  `prewarm`) are kept as configured
+- Inputs are normalized where possible: a bare port gets its colon (`8443` → `:8443`), a URL without a
+  scheme gets `https://`, single-letter quota units become `MB`/`GB`/`TB`, `~` is expanded in paths, and
+  y/n answers accept `yes`/`true`/`1`/`on`; invalid values are re-prompted with an explanation
 - After writing, prints a config summary with empty fields clearly marked, for easy review of missing items
 
 ```yaml
@@ -124,6 +132,11 @@ profiles:
       prefix: ""                 # shared root prefix; empty = whole bucket
       user: alice
       password: ${SAIL_PROD_SERVE_PASSWORD}   # plaintext or ${VAR} reference
+      # users:                    # multi-user mode (see "Multi-user" below); mutually exclusive with user/password
+      #   - name: alice
+      #     password: ${ALICE_PASSWORD}
+      #     prefix: alice/        # relative to serve.prefix; omitted = the base prefix itself
+      #     quota: 10GB         # units: MB/GB/TB (decimal); a plain number means bytes
       # tls-cert: /etc/cert.pem   # with tls-key enables HTTPS
       # tls-key: /etc/key.pem
       # staging-dir: /tmp/sail-stage
@@ -131,9 +144,11 @@ profiles:
       # max-upload-size: 5TiB     # empty = follow backend-max-object-size
       # chunked-upload: false
       # chunk-size: 4GiB
+      # dir-cache-ttl: 60s
+      # prewarm: [/bigdir]        # directories to keep hot in the background
 ```
 
-Each `serve` field maps one-to-one to the same-named `serve webdav` flag (size fields use the same string format as the flags, e.g. `5TiB`). `user`/`password` accept plaintext or a `${VAR}` environment-variable reference, matching the access-key/secret-key key-security mechanism; empty fields fall back to the flag defaults. The optional `users` list enables multi-user mode — see "Multi-user" under the WebDAV gateway.
+Each `serve` field maps one-to-one to the same-named `serve webdav` flag (size fields use the same string format as the flags, e.g. `5TiB`). `user`/`password` accept plaintext or a `${VAR}` environment-variable reference, matching the access-key/secret-key key-security mechanism; empty fields fall back to the flag defaults. The optional `users` list enables multi-user mode — see "Multi-user" under the WebDAV gateway. `sail config setup` guides these fields interactively (including generating and validating the `users` table); fields it does not ask are kept as written in the file.
 
 ### cdn-domain notes
 
@@ -342,8 +357,8 @@ it explicitly to override the config value.
 | `--staging-dir` | system temp dir | Write staging directory; peak ≈ largest single file × concurrent uploads (`serve.staging-dir`) |
 | `--chunked-upload` | `false` | Store files larger than `--chunk-size` as chunks + a manifest (off: 1 file = 1 object) (`serve.chunked-upload`) |
 | `--chunk-size` | `4GiB` | Max physical chunk size, also the chunked-storage threshold (5MiB ~ 5GiB); requires `--chunked-upload` (`serve.chunk-size`) |
-| `--dir-cache-ttl` | `60s` | How long a directory listing is cached (e.g. `60s`, `10m`); expired entries are served stale and refreshed in the background, so a warm directory never blocks; writes invalidate immediately, `0` disables. External bucket changes become visible after at most this long |
-| `--prewarm` | empty | Directories to keep hot in the background (comma-separated logical paths, e.g. `/yiche,/modelImage`); each is listed once at startup then refreshed on a cycle, so the first visit does not pay the full listing cost. Intended for very large directories (100k+ entries, tens of seconds on first listing) |
+| `--dir-cache-ttl` | `60s` | How long a directory listing is cached (e.g. `60s`, `10m`); expired entries are served stale and refreshed in the background, so a warm directory never blocks; writes invalidate immediately, `0` disables. External bucket changes become visible after at most this long (`serve.dir-cache-ttl`) |
+| `--prewarm` | empty | Directories to keep hot in the background (comma-separated logical paths, e.g. `/yiche,/modelImage`); each is listed once at startup then refreshed on a cycle, so the first visit does not pay the full listing cost. Intended for very large directories (100k+ entries, tens of seconds on first listing). In multi-user mode the same list applies inside each user's own space (`serve.prewarm`) |
 | `--print-windows-setup` | — | Print the `.reg` content + PowerShell + a "you must restart the WebClient service" reminder, then exit |
 
 The startup banner derives mount URLs from the bind address: for a wildcard bind (`:8080`/`0.0.0.0:8080`) it lists both `http://localhost:PORT/` (this machine) and each interface's LAN IP (other devices); for an explicit host it lists only that address.
@@ -363,28 +378,34 @@ profile's `serve:` block — every user gets a Basic-auth identity and their own
         - name: alice
           password: ${ALICE_PASSWORD}   # ${VAR} reference, same as other serve fields
           prefix: alice/                # relative to prefix; omitted = the base prefix itself
-          quota: 10GiB                  # per-user space limit; hot-applies without restart
+          quota: 10GB                   # per-user space limit (MB/GB/TB); hot-applies without restart
         - name: bob
           password: ${BOB_PASSWORD}
           prefix: shared/bob-data/      # any relative segment
 ```
 
-- **Space quota (`quota`).** Each user's `quota` (e.g. `10GiB`, `500MiB`, or plain bytes) caps the
+- **Space quota (`quota`).** Each user's `quota` (e.g. `500MB`, `10GB`, `1TB`; units are decimal `MB`/`GB`/`TB`, and a plain number means bytes) caps the
   physical bytes stored under their prefix — the billable size, including `.sail/` chunk parts and
   manifests. Over-quota writes return **507** with actionable guidance: before the body is read when
   the request declares a Content-Length, or at the commit point for COPY (which has none); overwrites
   get the old object's size released from the arithmetic. Usage is a lazy snapshot (default TTL 5
   minutes) plus in-flight reservations — best-effort within the window, so writes made outside the
-  gateway (e.g. `sail cp` directly to the bucket) become visible at the next refresh. Changing
-  `quota` in the config hot-applies without a restart.
+  gateway (e.g. `sail cp` directly to the bucket) become visible at the next refresh. An expired
+  snapshot keeps serving the previous value while a background refresh runs (single-flight), so a
+  large prefix never blocks writes; only the first write after startup may wait briefly (≤3s) for the
+  initial snapshot. Changing `quota` in the config hot-applies without a restart.
+  The quota is also reported to WebDAV clients (RFC 4331 `DAV:quota-available-bytes` /
+  `DAV:quota-used-bytes` on directory PROPFIND), so Finder / Explorer show the remaining space.
+  Deleting or renaming invalidates the snapshot immediately, so space freed through the gateway counts
+  on the next write instead of waiting out the TTL.
 - **Structural isolation.** A user's effective prefix is the base `prefix` + their `prefix`
   segment; every object key they touch (including `.sail/` chunk parts) lands inside it. A user's
   `/` is their own space — other users' objects are structurally unreachable, `..` traversal is
   rejected, and the access log attributes every request as `user=<name>`.
 - **Hot reload.** The user table is watched: editing the config file (add/remove users, change
-  passwords or prefixes) takes effect within seconds, no restart. `listen`, TLS certificates,
-  `staging-dir`, chunked-upload settings and the base `prefix` are cold zone — changing them logs
-  a "restart required" warning and keeps the running values. A broken YAML keeps the previous
+  passwords, prefixes or quotas) takes effect within seconds, no restart. `listen`, TLS certificates,
+  `staging-dir`, chunked-upload settings, `dir-cache-ttl`, `prewarm` and the base `prefix` are cold
+  zone — changing them logs a "restart required" warning and keeps the running values. A broken YAML keeps the previous
   user table (with a warning); deleting and recreating the config file does not kill the watcher,
   and the new content is picked up automatically.
 - **Directory auto-create.** When a user comes into effect (startup or reload), sail asynchronously
@@ -424,8 +445,9 @@ client-side procedure.
   `--staging-dir` at a disk with enough room when large files are common.
 
 Other trade-offs: directory-level `MOVE`/`COPY` returns **501**, leaving the client to fall back to
-"copy + delete" (P1 only does object-level moves); `.sail/` is a reserved prefix and is filtered out
-when listing directories.
+"copy + delete" (P1 only does object-level moves); `.sail/` is a reserved prefix — it is filtered out
+of directory listings and any direct access to it is answered as "not found", so clients can neither
+read nor damage the chunk parts.
 
 ### Chunked storage (`--chunked-upload`)
 
