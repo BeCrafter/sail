@@ -11,6 +11,7 @@ import (
 	"github.com/BeCrafter/sail/internal/client"
 	"github.com/BeCrafter/sail/internal/config"
 	"github.com/BeCrafter/sail/internal/i18n"
+	"github.com/BeCrafter/sail/internal/s3del"
 	"github.com/BeCrafter/sail/internal/s3path"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spf13/cobra"
@@ -149,13 +150,10 @@ func rmFromStdin(ctx context.Context, s3c *s3.Client, r *config.Resolved, recurs
 	return total, scanner.Err()
 }
 
-// deleteOne 删除单个对象并打印结果。
+// deleteOne 删除单个对象并打印结果。统一走 s3del:单键会命中它的直删快路径
+// (不触碰批量端点),删除策略只有一处实现。
 func deleteOne(ctx context.Context, s3c *s3.Client, bucket, key string) error {
-	_, err := s3c.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: &bucket,
-		Key:    &key,
-	})
-	if err != nil {
+	if err := s3del.New(s3c, bucket).DeleteKeys(ctx, []string{key}); err != nil {
 		return fmt.Errorf(i18n.T("delete failed: %w"), err)
 	}
 	fmt.Printf(i18n.T("deleted s3://%s/%s\n"), bucket, key)

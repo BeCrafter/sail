@@ -17,11 +17,11 @@ Use --help on any command for detailed usage and examples.`: `sail 是 S3 协议
 单二进制零运行时依赖,兼容 AWS S3 / MinIO / 阿里云 OSS 及自建 S3 兼容服务。
 
 所有命令统一用 --help 查看详细说明与示例。`,
-		"config file path (default ~/.sail/config.yaml)": "配置文件路径 (默认 ~/.sail/config.yaml)",
-		"profile to use (default default-profile)":       "使用哪个 profile (默认 default-profile)",
-		"override endpoint":                              "覆盖 endpoint",
-		"override default bucket":                        "覆盖默认 bucket",
-		"language (en|zh; default: auto-detect)":         "语言 (en|zh;默认自动检测)",
+		"config file path (default ~/.config/sail/config.yaml)": "配置文件路径 (默认 ~/.config/sail/config.yaml)",
+		"profile to use (default default-profile)":              "使用哪个 profile (默认 default-profile)",
+		"override endpoint":                      "覆盖 endpoint",
+		"override default bucket":                "覆盖默认 bucket",
+		"language (en|zh; default: auto-detect)": "语言 (en|zh;默认自动检测)",
 		"no bucket specified, use s3://bucket/key or s3:///key (uses the configured default bucket)": "未指定 bucket,请用 s3://bucket/key 或 s3:///key(用配置默认 bucket)",
 
 		// root.go — command group titles

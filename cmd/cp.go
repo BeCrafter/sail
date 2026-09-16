@@ -12,6 +12,7 @@ import (
 	"github.com/BeCrafter/sail/internal/client"
 	"github.com/BeCrafter/sail/internal/config"
 	"github.com/BeCrafter/sail/internal/i18n"
+	"github.com/BeCrafter/sail/internal/s3del"
 	"github.com/BeCrafter/sail/internal/s3path"
 	"github.com/BeCrafter/sail/internal/uploader"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -244,6 +245,23 @@ func cpS3ToLocal(ctx context.Context, s3c *s3.Client, src *s3path.S3Path, dstLoc
 			Prefix: &src.Key,
 		})
 		count := 0
+		// 源删除按页收集、交给 s3del 统一处理:逐对象直删在「单次删除固定
+		// ~28s」的网关上会退化成 N×28s,批量化后这一页只付常数轮。
+		// defer flush 保证中途失败时,已成功传输的对象仍会被清理。
+		var pending []string
+		deleter := s3del.New(s3c, src.Bucket)
+		flush := func() {
+			if len(pending) == 0 {
+				return
+			}
+			if err := deleter.DeleteKeys(ctx, pending); err != nil {
+				fmt.Fprintf(os.Stderr, i18n.T("warning: source deletion failed: %v\n"), err)
+			}
+			pending = nil
+		}
+		if deleteSource {
+			defer flush()
+		}
 		for paginator.HasMorePages() {
 			page, err := paginator.NextPage(ctx)
 			if err != nil {
@@ -256,12 +274,11 @@ func cpS3ToLocal(ctx context.Context, s3c *s3.Client, src *s3path.S3Path, dstLoc
 					return err
 				}
 				if deleteSource {
-					if _, err := s3c.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &src.Bucket, Key: obj.Key}); err != nil {
-						fmt.Fprintf(os.Stderr, i18n.T("warning: source deletion failed s3://%s/%s: %v\n"), src.Bucket, *obj.Key, err)
-					}
+					pending = append(pending, *obj.Key)
 				}
 				count++
 			}
+			flush()
 		}
 		fmt.Printf(i18n.T("downloaded %d objects\n"), count)
 		return nil
@@ -281,7 +298,7 @@ func cpS3ToLocal(ctx context.Context, s3c *s3.Client, src *s3path.S3Path, dstLoc
 		return err
 	}
 	if deleteSource {
-		if _, err := s3c.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &src.Bucket, Key: &src.Key}); err != nil {
+		if err := s3del.New(s3c, src.Bucket).DeleteKeys(ctx, []string{src.Key}); err != nil {
 			fmt.Fprintf(os.Stderr, i18n.T("warning: source deletion failed s3://%s/%s: %v\n"), src.Bucket, src.Key, err)
 		}
 	}
@@ -328,6 +345,21 @@ func cpS3ToS3(ctx context.Context, s3c *s3.Client, src, dst *s3path.S3Path, recu
 			Prefix: &src.Key,
 		})
 		count := 0
+		// 同 cpS3ToLocal:源删除按页收集,交给 s3del 统一处理(见那里的注释)。
+		var pending []string
+		deleter := s3del.New(s3c, src.Bucket)
+		flush := func() {
+			if len(pending) == 0 {
+				return
+			}
+			if err := deleter.DeleteKeys(ctx, pending); err != nil {
+				fmt.Fprintf(os.Stderr, i18n.T("warning: source deletion failed: %v\n"), err)
+			}
+			pending = nil
+		}
+		if deleteSource {
+			defer flush()
+		}
 		for paginator.HasMorePages() {
 			page, err := paginator.NextPage(ctx)
 			if err != nil {
@@ -344,12 +376,11 @@ func cpS3ToS3(ctx context.Context, s3c *s3.Client, src, dst *s3path.S3Path, recu
 					return err
 				}
 				if deleteSource {
-					if _, err := s3c.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &src.Bucket, Key: obj.Key}); err != nil {
-						fmt.Fprintf(os.Stderr, i18n.T("warning: source deletion failed s3://%s/%s: %v\n"), src.Bucket, *obj.Key, err)
-					}
+					pending = append(pending, *obj.Key)
 				}
 				count++
 			}
+			flush()
 		}
 		fmt.Printf(i18n.T("copied %d objects\n"), count)
 		return nil
@@ -369,7 +400,7 @@ func cpS3ToS3(ctx context.Context, s3c *s3.Client, src, dst *s3path.S3Path, recu
 		return err
 	}
 	if deleteSource {
-		if _, err := s3c.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: &src.Bucket, Key: &src.Key}); err != nil {
+		if err := s3del.New(s3c, src.Bucket).DeleteKeys(ctx, []string{src.Key}); err != nil {
 			fmt.Fprintf(os.Stderr, i18n.T("warning: source deletion failed s3://%s/%s: %v\n"), src.Bucket, src.Key, err)
 		}
 	}

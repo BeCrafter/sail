@@ -68,11 +68,16 @@ cd sail && go build -o sail .
 sail config setup
 ```
 
-交互式生成或更新 `~/.sail/config.yaml`(`--reset` 重置为全新配置;文件已存在时新增或重配一个 profile,保留其它),并可选安装 shell 自动补全。向导要点:
+交互式生成或更新 `~/.config/sail/config.yaml`(`--reset` 重置为全新配置;文件已存在时新增或重配一个 profile,保留其它),并可选安装 shell 自动补全。向导要点:
 
 - `endpoint` 为必填项,留空会原地重问
 - `access-key` / `secret-key` 可直接输入明文;回车留空则引用按 profile 派生的环境变量(机制见下方"密钥安全"),写盘后会打印需要 `export` 的变量名
 - 重配已有 profile 时,已配置的明文密钥不回显,回车即保留
+- WebDAV 网关(`serve:` 块)同样引导配置:listen / prefix / 认证方式(单用户或多用户) / TLS /
+  chunked-upload / staging-dir。已有 `serve` 块默认保留,可选追加用户、重新配置或删除;多用户表随输入即校验
+  (重名、前缀嵌套、quota 语法);向导不提问的字段(尺寸上限、`dir-cache-ttl`、`prewarm`)原样保留
+- 输入会尽量归一化:裸端口自动补冒号(`8443` → `:8443`)、URL 缺协议头补 `https://`、quota 单字母单位
+  补全为 `MB`/`GB`/`TB`、路径中的 `~` 自动展开、y/n 回答接受 `yes`/`true`/`1`/`on`;非法值会说明原因后重问
 - 写盘后输出配置摘要,空字段明确标注,便于核对缺失项
 
 ```yaml
@@ -124,6 +129,11 @@ profiles:
       prefix: ""                 # 共享根前缀,空 = 整桶
       user: alice
       password: ${SAIL_PROD_SERVE_PASSWORD}   # 支持明文或 ${VAR} 引用
+      # users:                    # 多用户模式(见下文「多用户」),与 user/password 互斥
+      #   - name: alice
+      #     password: ${ALICE_PASSWORD}
+      #     prefix: alice/        # 相对 serve.prefix;省略 = base 前缀本身
+      #     quota: 10GB         # 单位只支持 MB/GB/TB;纯数字=字节数
       # tls-cert: /etc/cert.pem   # 与 tls-key 同时提供即启用 HTTPS
       # tls-key: /etc/key.pem
       # staging-dir: /tmp/sail-stage
@@ -131,9 +141,11 @@ profiles:
       # max-upload-size: 5TiB     # 空 = 跟随 backend-max-object-size
       # chunked-upload: false
       # chunk-size: 4GiB
+      # dir-cache-ttl: 60s
+      # prewarm: [/bigdir]        # 需要后台保热的目录
 ```
 
-`serve` 块各字段与 `serve webdav` 的同名 flag 一一对应(大小类字段用与 flag 相同的字符串格式,如 `5TiB`)。`user`/`password` 可写明文或 `${VAR}` 引用环境变量,与 access-key/secret-key 的密钥安全机制一致;空字段由 flag 默认值兜底。
+`serve` 块各字段与 `serve webdav` 的同名 flag 一一对应(大小类字段用与 flag 相同的字符串格式,如 `5TiB`)。`user`/`password` 可写明文或 `${VAR}` 引用环境变量,与 access-key/secret-key 的密钥安全机制一致;空字段由 flag 默认值兜底。可选的 `users` 列表开启多用户模式——见 WebDAV 网关一节的「多用户」。`sail config setup` 会交互式引导上述字段(含生成并校验 `users` 表);它不提问的字段按文件原样保留。
 
 ### cdn-domain 说明
 
@@ -340,20 +352,64 @@ sail serve webdav --print-windows-setup
 | `--profile` | 配置的 default-profile | 选择共享哪个 profile:桶取该 profile 的 `bucket`(可被全局 `--bucket` 或 `SAIL_BUCKET` 覆盖);三处都为空时拒绝启动 |
 | `--listen` | `:8080` | 监听地址(`serve.listen`) |
 | `--prefix` | 空 | 共享根前缀(映射为 `/`);越界路径一律拒绝(`serve.prefix`) |
-| `--user` / `--password` | 空 | Basic 认证,**为空拒绝启动**,不允许匿名共享(`serve.user`/`serve.password`) |
+| `--user` / `--password` | 空 | Basic 认证,**为空拒绝启动**,不允许匿名共享(`serve.user`/`serve.password`)。与 `serve.users` 互斥 |
 | `--tls-cert` / `--tls-key` | 空 | 同时提供即启用 HTTPS(`serve.tls-cert`/`serve.tls-key`) |
 | `--backend-max-object-size` | `5TiB` | 声明的后端单对象上限(S3 无能力协商,不可探测)(`serve.backend-max-object-size`) |
 | `--max-upload-size` | 跟随上一项 | 请求体上限,超限在读满请求体前返回 413 + 可操作指引(`serve.max-upload-size`) |
 | `--staging-dir` | 系统临时目录 | 写暂存目录;峰值 ≈ 单文件最大值 × 并发上传数(`serve.staging-dir`) |
 | `--chunked-upload` | `false` | 把超过 `--chunk-size` 的文件拆成分片 + manifest 存储(关:1 文件 = 1 对象)(`serve.chunked-upload`) |
 | `--chunk-size` | `4GiB` | 单个物理片上限,同时是分片阈值(5MiB ~ 5GiB);需配合 `--chunked-upload`(`serve.chunk-size`) |
-| `--dir-cache-ttl` | `60s` | 目录列表缓存时长(如 `60s`、`10m`);过期条目**先返回旧值再后台刷新**,热目录永不阻塞;写操作即时失效,`0` 关闭。外部对桶的改动最长该时长后可见 |
-| `--prewarm` | 空 | 需要后台保热的目录(逗号分隔逻辑路径,如 `/yiche,/modelImage`);启动时各列一次、之后按 TTL 周期刷新,首次访问不再承担完整列举的开销。用于超大目录(十几万条,首次列举可达数十秒) |
+| `--dir-cache-ttl` | `60s` | 目录列表缓存时长(如 `60s`、`10m`);过期条目**先返回旧值再后台刷新**,热目录永不阻塞;写操作即时失效,`0` 关闭。外部对桶的改动最长该时长后可见(`serve.dir-cache-ttl`) |
+| `--prewarm` | 空 | 需要后台保热的目录(逗号分隔逻辑路径,如 `/yiche,/modelImage`);启动时各列一次、之后按 TTL 周期刷新,首次访问不再承担完整列举的开销。用于超大目录(十几万条,首次列举可达数十秒)。多用户模式下同一清单在每个用户各自空间内生效(`serve.prewarm`) |
 | `--print-windows-setup` | — | 打印 `.reg` 内容 + PowerShell + 「必须重启 WebClient 服务」提醒后退出 |
 
 启动横幅会按绑定给出挂载地址:通配地址(`:8080`/`0.0.0.0:8080`)时同时列出 `http://localhost:端口/`(本机挂载)和各网卡的局域网 IP(其它设备挂载);显式绑定具体主机时只列该地址。
 
 > **性能**:上传/下载走服务端 Range 流式读写,不整文件入内存;HTTP 连接池按 S3 高并发调优,并发打开多个文件时复用长连接;目录列表带短时缓存。单次打开文件只做 1 次 `HeadObject` + 1 次 `GetObject`。
+
+### 多用户(`serve.users`)
+
+一个网关可同时服务多个用户,每人一个独立空间。用户表写进 profile 的 `serve:` 块——每个用户
+获得一个 Basic 认证身份和自己的命名空间:
+
+```yaml
+    serve:
+      listen: ":8443"
+      prefix: team/            # base 前缀(冷区:变更需重启)
+      users:
+        - name: alice
+          password: ${ALICE_PASSWORD}   # ${VAR} 引用,与 serve 其余字段一致
+          prefix: alice/                # 相对 base;省略 = base 前缀本身
+          quota: 10GB                   # 每用户空间上限(单位 MB/GB/TB);热生效,无需重启
+        - name: bob
+          password: ${BOB_PASSWORD}
+          prefix: shared/bob-data/      # 任意相对段
+```
+
+- **空间配额(`quota`)**。每个用户的 `quota`(如 `500MB`、`10GB`、`1TB`;单位只支持十进制 `MB`/`GB`/`TB`,纯数字表示字节数)限制其前缀下的
+  物理字节消耗——即账单口径,含 `.sail/` 分片部件与 manifest。超限写返回 **507** + 可操作指引:
+  请求声明了 Content-Length 时在读请求体之前拦截,COPY(无 Content-Length)在提交点复核;
+  覆盖写会扣减旧对象的大小。用量为惰性快照(默认 TTL 5 分钟)+ 在途预留——窗口内尽力准确,
+  网关外直写(如 `sail cp`)在下次刷新后可见。快照过期时先沿用旧值、后台单飞刷新,大前缀不会
+  阻塞写入;只有启动后的第一次写入会为初始快照短暂等待(≤3 秒)。配置中修改 `quota` 热生效,
+  无需重启。配额还会通过 WebDAV 属性播报给客户端(RFC 4331 `DAV:quota-available-bytes` /
+  `DAV:quota-used-bytes`,目录 PROPFIND),Finder / 资源管理器因此能显示剩余空间。删除或改名会
+  立即作废用量快照,经网关释放的空间在下一次写入即生效,不必等 TTL 走完。
+- **结构性隔离**。用户生效前缀 = base `prefix` + 该用户的 `prefix` 段;其触碰的所有对象 key
+  (含 `.sail/` 分片部件)都落在前缀内。用户的 `/` 即自己的空间——其他用户的对象结构性不可达,
+  `..` 越界被拒绝,访问日志对每个请求归因 `user=<名字>`。
+- **热加载**。用户表被监听:编辑配置文件(新增/删除用户、改密码、改前缀、改配额)秒级生效,
+  无需重启。`listen`、TLS 证书、`staging-dir`、分片参数、`dir-cache-ttl`、`prewarm` 与 base
+  `prefix` 属冷区——变更仅告警「需重启」,运行参数不变。坏 YAML 保留原用户表并告警;配置文件被误删后重建不破坏监听,新内容自动加载。
+- **目录自动创建**。用户生效(启动或 reload)时,sail 异步在其前缀写入 0 字节目录标记对象,
+  让目录在 S3 控制台与 `sail ls` 中可见。创建幂等且尽力而为:S3 抖动仅告警、用户照常使用
+  ——marker 是可见性,不是挂载硬前提。
+- **冲突 fail-loud**。`users` 与 `user`/`password` 互斥(跨来源同罪:`--user`/`--password`
+  flag 搭配配置 `users` 表同样拒绝)。生效前缀必须两两互异且互不嵌套——`alice/` 与
+  `alice/logs/` 不能共存,否则外层用户会列举到内层用户的对象。两项检查在启动与每次 reload
+  时执行,违规拒绝并保留原状态。
+- **单用户模式不变**。`--user`/`--password`(或 `serve.user`/`serve.password`)行为与以往
+  完全一致:base 前缀上的单隐式用户。凭据来自 flag 时关闭热加载,启动时明确告警。
 
 ### 客户端挂载
 
@@ -374,7 +430,8 @@ Windows 默认把单次上传卡在约 50MB,这道闸门在**客户端注册表*
   大文件多的场景请把 `--staging-dir` 指向空间足够的磁盘。
 
 其他取舍:目录级 `MOVE`/`COPY` 返回 **501**,由客户端退化为「复制 + 删除」(P1 只做对象级移动);
-`.sail/` 为保留前缀,列目录时会过滤掉。
+`.sail/` 为保留前缀:列目录时过滤掉,直接按路径访问一律按「不存在」处理
+(客户端既读不到、也删不掉分片部件)。
 
 ### 分片存储(`--chunked-upload`)
 

@@ -191,6 +191,35 @@ func TestPick(t *testing.T) {
 	}
 }
 
+// TestPickList 覆盖 prewarm 的「flag > 配置 > flag 默认」合并。
+func TestPickList(t *testing.T) {
+	cases := []struct {
+		name    string
+		changed bool
+		flagVal []string
+		cfgVal  []string
+		want    []string
+	}{
+		{"flag 显式设置覆盖配置", true, []string{"/flag"}, []string{"/cfg"}, []string{"/flag"}},
+		{"未设置 flag 取配置", false, nil, []string{"/cfg"}, []string{"/cfg"}},
+		{"配置为空落回 flag 默认(nil)", false, nil, nil, nil},
+		{"flag 显式设置且配置为空取 flag", true, []string{"/x"}, nil, []string{"/x"}},
+	}
+	for _, c := range cases {
+		got := pickList(c.changed, c.flagVal, c.cfgVal)
+		if len(got) != len(c.want) {
+			t.Errorf("%s: pickList(%v,%v,%v) = %v,期望 %v", c.name, c.changed, c.flagVal, c.cfgVal, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%s: pickList(%v,%v,%v) = %v,期望 %v", c.name, c.changed, c.flagVal, c.cfgVal, got, c.want)
+				break
+			}
+		}
+	}
+}
+
 // writeServeConfig 写一份最小可用配置(含凭据与所需 bucket),并把全局 flag 指向它。
 // bucket 传空串即写出「profile 未配置 bucket」的合法配置 —— config.Resolve 不校验 Bucket 非空。
 func writeServeConfig(t *testing.T, bucket string) {

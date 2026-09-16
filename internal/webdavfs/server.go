@@ -10,101 +10,257 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/BeCrafter/sail/internal/vfs"
 	"golang.org/x/net/webdav"
 )
 
-// Config 是 WebDAV HTTP 外壳的构造参数。
+// Config 是 WebDAV HTTP 外壳的构造参数。单用户模式填 FileSystem/User/Password;
+// 多用户模式填 Users,两种模式互斥。
 type Config struct {
+	// 单用户模式:该文件系统 + 一对 Basic 凭据。
 	FileSystem *FileSystem
 	User       string
 	Password   string
+	// Users 是多用户路由表(每用户一个已构建好的 FileSystem)。非空时启用
+	// 多用户模式,上方 FileSystem/User/Password 必须为空。
+	Users []UserEntry
 	// MaxUploadSize 是请求体上限(字节);<= 0 表示不限制。
 	MaxUploadSize int64
 	// MaxUploadSizeText 是上限的人类可读文本,只用于 413 指引文案。
 	MaxUploadSizeText string
 	// Logger 为空则不记录访问日志。
 	Logger *log.Logger
-	// PrewarmDirs 是需要后台预热的目录路径(逻辑路径,如 "/yiche")。
+	// PrewarmDirs 是单用户模式下需要后台预热的目录路径(逻辑路径,如 "/yiche")。
+	// 多用户模式下每个用户自己的预热目录在 UserEntry.PrewarmDirs 里。
 	// 首个请求到达时启动,按缓存 TTL 周期刷新,让超大目录在用户访问前
 	// 就处于热状态——它们的首次列举可能长达数十秒。
 	PrewarmDirs []string
 }
 
+// UserEntry 是一名用户的路由表条目:凭据 + 该用户已构建好的文件系统。
+// 两次 SwapUsers 传入同一 FileSystem 指针即视为同一栈复用(handler、
+// MemLS 与预热 goroutine 原样保留,凭据热替换)。
+type UserEntry struct {
+	Name        string
+	Password    string
+	FileSystem  *FileSystem
+	PrewarmDirs []string
+}
+
+// stack 是一名用户的协议栈:文件系统 + 预构建的 webdav.Handler(独立 MemLS)。
+// 栈按 FileSystem 指针对应,凭据变化不重建;退役时只需停掉预热 goroutine,
+// 在途请求持有的 handler 引用自然完成(I9)。
+type stack struct {
+	fs          *FileSystem
+	handler     http.Handler
+	prewarmStop func()
+}
+
+// userEntry 是路由表里的一条凭据记录,指向共享的栈。
+type userEntry struct {
+	password string
+	stack    *stack
+}
+
 // Server 是 WebDAV 网关的 HTTP 外壳。
 type Server struct {
-	fs            *FileSystem
-	user          string
-	password      string
+	// stacks 是当前生效的用户路由表(name → entry),atomic.Value 快照替换:
+	// 认证与路由 O(1),reload 换表对在途请求无感。
+	stacks        atomic.Value // map[string]*userEntry
 	maxUploadSize int64
 	maxUploadText string
 	logger        *log.Logger
-	handler       http.Handler
-
-	// prewarmDirs 是需要后台预热的目录;NewServer 时即启动,随进程存活。
-	prewarmDirs []string
 }
 
-// NewServer 组装中间件链:
-// Basic 认证 → 请求态/上传闸门 → 目录级 MOVE/COPY 退化 → webdav.Handler。
+// NewServer 组装中间件链:Basic 认证(查表)→ 按用户路由 → 请求态/上传闸门 →
+// 目录级 MOVE/COPY 退化 → webdav.Handler。
 func NewServer(cfg Config) (*Server, error) {
-	if cfg.FileSystem == nil {
+	if cfg.FileSystem == nil && len(cfg.Users) == 0 {
 		return nil, errors.New("webdavfs: 缺少 FileSystem")
 	}
-	if cfg.User == "" || cfg.Password == "" {
-		return nil, errors.New("webdavfs: 必须提供 --user / --password,不允许匿名共享")
+	if len(cfg.Users) > 0 {
+		if cfg.FileSystem != nil || cfg.User != "" || cfg.Password != "" {
+			return nil, errors.New("webdavfs: Users 与单用户 FileSystem/User/Password 不能同时配置")
+		}
+	} else {
+		if cfg.User == "" || cfg.Password == "" {
+			return nil, errors.New("webdavfs: 必须提供 --user / --password,不允许匿名共享")
+		}
 	}
 	s := &Server{
-		fs:            cfg.FileSystem,
-		user:          cfg.User,
-		password:      cfg.Password,
 		maxUploadSize: cfg.MaxUploadSize,
 		maxUploadText: cfg.MaxUploadSizeText,
 		logger:        cfg.Logger,
-		prewarmDirs:   cfg.PrewarmDirs,
 	}
-	dav := &webdav.Handler{
-		FileSystem: cfg.FileSystem,
-		// 进程内锁:重启即失效,不跨实例。P1 的取舍见 README。
-		LockSystem: webdav.NewMemLS(),
+	entries := cfg.Users
+	if len(entries) == 0 {
+		entries = []UserEntry{{
+			Name:        cfg.User,
+			Password:    cfg.Password,
+			FileSystem:  cfg.FileSystem,
+			PrewarmDirs: cfg.PrewarmDirs,
+		}}
 	}
-	s.handler = s.withBasicAuth(s.withRequestState(s.withDirCopyMove(dav)))
-	// 构造即启动后台预热:进程生命周期内持续刷新,让热点目录在用户首次
-	// 访问前就处于热状态。这些目录的首次列举可能长达数十秒,预热把这份
-	// 代价挪到点击之前。cmd/serve.go 仅在真正要监听时才构造本对象,
+	// 构造即启动各用户的后台预热:进程生命周期内持续刷新,让热点目录在用户
+	// 首次访问前就处于热状态。cmd/serve.go 仅在真正要监听时才构造本对象,
 	// 故不会在「构造即丢弃」的场景平白发起后端列举。
-	if len(s.prewarmDirs) > 0 {
-		s.fs.prewarm(context.Background(), s.prewarmDirs)
+	if err := s.SwapUsers(entries); err != nil {
+		return nil, err
 	}
 	return s, nil
 }
 
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	s.handler.ServeHTTP(w, r)
+// SwapUsers 原子替换用户路由表(热加载的 Swap 步,I8/I9):
+//   - 同一 FileSystem 指针 = 同一栈:只换凭据条目,handler/MemLS/预热保留,
+//     密码热替换、改 quota(未来)都不重建栈;
+//   - 新出现的 FileSystem 构建新栈(含启动预热);
+//   - 消失的栈退役:预热 goroutine 取消,在途请求持旧 handler 引用自然完成。
+func (s *Server) SwapUsers(entries []UserEntry) error {
+	if len(entries) == 0 {
+		return errors.New("webdavfs: 用户路由表不能为空,至少保留一名用户")
+	}
+	seenName := map[string]bool{}
+	seenFS := map[*FileSystem]bool{}
+	for _, e := range entries {
+		if e.Name == "" {
+			return errors.New("webdavfs: 用户名不能为空")
+		}
+		if e.Password == "" {
+			return fmt.Errorf("webdavfs: 用户 %q 缺少密码,不允许匿名共享", e.Name)
+		}
+		if e.FileSystem == nil {
+			return fmt.Errorf("webdavfs: 用户 %q 缺少 FileSystem", e.Name)
+		}
+		if seenName[e.Name] {
+			return fmt.Errorf("webdavfs: 用户名 %q 重复", e.Name)
+		}
+		if seenFS[e.FileSystem] {
+			return fmt.Errorf("webdavfs: 用户 %q 与其他用户共用同一 FileSystem", e.Name)
+		}
+		seenName[e.Name] = true
+		seenFS[e.FileSystem] = true
+	}
+
+	old := s.current()
+	oldByFS := map[*FileSystem]*userEntry{}
+	for _, e := range old {
+		oldByFS[e.stack.fs] = e
+	}
+	next := make(map[string]*userEntry, len(entries))
+	for _, en := range entries {
+		if oldE, ok := oldByFS[en.FileSystem]; ok {
+			// 同栈复用:换凭据,不重建。
+			next[en.Name] = &userEntry{password: en.Password, stack: oldE.stack}
+			delete(oldByFS, en.FileSystem)
+			continue
+		}
+		next[en.Name] = &userEntry{password: en.Password, stack: s.buildStack(en.FileSystem, en.PrewarmDirs)}
+	}
+	// 退役:未被新表复用的栈,停掉其预热 goroutine。
+	for _, e := range oldByFS {
+		if e.stack.prewarmStop != nil {
+			e.stack.prewarmStop()
+		}
+	}
+	s.stacks.Store(next)
+	return nil
 }
 
-// withBasicAuth 拒绝一切未认证请求,但放行 OPTIONS。
-// OPTIONS 是能力探测(返回 DAV/Allow 头),不含任何资源数据;macOS Finder /
-// Windows WebClient 挂载时会先发一个不带凭据的 OPTIONS,收到 401 后不会带凭据
-// 重试,而是停在「连接中」。故 OPTIONS 必须在认证之前放行。
-func (s *Server) withBasicAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions {
-			next.ServeHTTP(w, r)
-			return
-		}
-		user, pass, ok := r.BasicAuth()
-		if !ok ||
-			subtle.ConstantTimeCompare([]byte(user), []byte(s.user)) != 1 ||
-			subtle.ConstantTimeCompare([]byte(pass), []byte(s.password)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="sail webdav", charset="UTF-8"`)
-			http.Error(w, "需要认证", http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+// buildStack 构建单用户协议栈。预热 goroutine 挂在可取消 ctx 上,
+// 栈退役时随 prewarmStop 停止,不泄漏(I9)。
+func (s *Server) buildStack(fs *FileSystem, prewarmDirs []string) *stack {
+	st := &stack{fs: fs}
+	dav := &webdav.Handler{
+		FileSystem: fs,
+		// 进程内锁:重启即失效,不跨实例。P1 的取舍见 README。
+		LockSystem: webdav.NewMemLS(),
+	}
+	st.handler = s.withRequestState(s.withDirCopyMove(fs, dav))
+	if len(prewarmDirs) > 0 && fs.dirs != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		fs.prewarm(ctx, prewarmDirs)
+		st.prewarmStop = cancel
+	}
+	return st
+}
+
+func (s *Server) current() map[string]*userEntry {
+	m, _ := s.stacks.Load().(map[string]*userEntry)
+	return m
+}
+
+// allowMethods 是 OPTIONS 的能力头。取 x/net/webdav 对目录与文件的并集,
+// 不区分具体资源——能力头是进程级常量,不该为它去查后端。
+const allowMethods = "OPTIONS, LOCK, GET, HEAD, POST, PUT, DELETE, PROPPATCH, COPY, MOVE, UNLOCK, PROPFIND"
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		// OPTIONS 是能力探测(返回 DAV/Allow 头),不含任何资源数据;macOS Finder /
+		// Windows WebClient 挂载时会先发一个不带凭据的 OPTIONS,收到 401 后不会带
+		// 凭据重试,而是停在「连接中」。故 OPTIONS 在认证之前放行。
+		//
+		// 这里直接应答、不转给 webdav.Handler:后者会 Stat(reqPath) 才能决定
+		// Allow 头(x/net/webdav/webdav.go),那等于让无凭据请求也能触达后端,
+		// 且 Allow 会随「路由表里首个用户」的数据漂移。
+		start := time.Now()
+		w.Header().Set("DAV", "1, 2")
+		w.Header().Set("MS-Author-Via", "DAV")
+		w.Header().Set("Allow", allowMethods)
+		w.WriteHeader(http.StatusOK)
+		// 不转栈就没有栈里的访问日志中间件,这里补记一条,保持审计完整
+		// (OPTIONS 无凭据,归因恒为 user=-)。
+		s.logRequest(r, http.StatusOK, time.Since(start))
+		return
+	}
+	e, name := s.authenticate(r)
+	if e == nil {
+		s.unauthorizedWithLog(w, r)
+		return
+	}
+	ctx := context.WithValue(r.Context(), userCtxKey{}, name)
+	e.stack.handler.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// authenticate 查表认证:按用户名 O(1) 定位条目,密码做常量时间比较。
+// 用户名存在性经 map 命中即可见——这是冻结契约认可的取舍(map + 单次常量时间比较)。
+func (s *Server) authenticate(r *http.Request) (*userEntry, string) {
+	user, pass, ok := r.BasicAuth()
+	if !ok {
+		return nil, ""
+	}
+	e := s.current()[user]
+	if e == nil {
+		return nil, ""
+	}
+	if subtle.ConstantTimeCompare([]byte(pass), []byte(e.password)) != 1 {
+		return nil, ""
+	}
+	return e, user
+}
+
+// unauthorizedWithLog 在 401 的同时记一条日志:认证失败此前完全不可见,
+// 排查「谁在用错密码」只能靠猜。
+func (s *Server) unauthorizedWithLog(w http.ResponseWriter, r *http.Request) {
+	s.logRequest(r, http.StatusUnauthorized, 0)
+	s.unauthorized(w)
+}
+
+func (s *Server) unauthorized(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", `Basic realm="sail webdav", charset="UTF-8"`)
+	http.Error(w, "需要认证", http.StatusUnauthorized)
+}
+
+// userCtxKey 是请求级「已认证用户名」的键,供访问日志归因。
+type userCtxKey struct{}
+
+func requestUser(ctx context.Context) string {
+	if u, ok := ctx.Value(userCtxKey{}).(string); ok {
+		return u
+	}
+	return "-"
 }
 
 // withRequestState 建立请求级状态(元信息缓存 + 上传闸门),并在读请求体之前
@@ -143,15 +299,15 @@ func (s *Server) withRequestState(next http.Handler) http.Handler {
 //   - 源是目录:webdav 会把 Rename 的任何错误映射成 403,拿不到 501;
 //   - 目标是已存在的目录:webdav 的 moveFiles 会先 RemoveAll(目标) 再
 //     Rename,那样会把整个目录递归删掉。
-func (s *Server) withDirCopyMove(next http.Handler) http.Handler {
+func (s *Server) withDirCopyMove(fs *FileSystem, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "MOVE" || r.Method == "COPY" {
-			if isDir, err := s.isDir(r, r.URL.Path); err == nil && isDir {
+			if isDir, err := isDirOf(fs, r, r.URL.Path); err == nil && isDir {
 				http.Error(w, "目录级 MOVE/COPY 在 P1 不支持(501),请退化为复制 + 删除", http.StatusNotImplemented)
 				return
 			}
 			if dst := destinationPath(r); dst != "" {
-				if isDir, err := s.isDir(r, dst); err == nil && isDir {
+				if isDir, err := isDirOf(fs, r, dst); err == nil && isDir {
 					http.Error(w, "目标是目录时不做 MOVE/COPY(501),请退化为复制 + 删除", http.StatusNotImplemented)
 					return
 				}
@@ -161,8 +317,8 @@ func (s *Server) withDirCopyMove(next http.Handler) http.Handler {
 	})
 }
 
-func (s *Server) isDir(r *http.Request, name string) (bool, error) {
-	fi, err := s.fs.Stat(r.Context(), name)
+func isDirOf(fs *FileSystem, r *http.Request, name string) (bool, error) {
+	fi, err := fs.Stat(r.Context(), name)
 	if err != nil {
 		return false, err
 	}
@@ -182,11 +338,30 @@ func destinationPath(r *http.Request) string {
 	return u.Path
 }
 
+// slowRequestThreshold 超过即标记 SLOW,便于在日志里直接筛出慢请求。
+const slowRequestThreshold = time.Second
+
 func (s *Server) logRequest(r *http.Request, status int, elapsed time.Duration) {
 	if s.logger == nil {
 		return
 	}
-	s.logger.Printf("%s %s %d %s", r.Method, r.URL.Path, status, elapsed.Round(time.Millisecond))
+	// user= 是审计归因:已认证请求取自路由表命中项;OPTIONS 等未认证放行
+	// 请求记为 "-"。cache=命中/未命中 用于判断目录缓存是否真的在起作用;
+	// 上传被 413/507 拒时附上原因,省得再去翻响应体。
+	line := fmt.Sprintf("%s %s %d %s user=%s", r.Method, r.URL.Path, status, elapsed.Round(time.Millisecond), requestUser(r.Context()))
+	if st := stateOf(r.Context()); st != nil {
+		hits, misses := st.cacheStats()
+		if hits+misses > 0 {
+			line += fmt.Sprintf(" cache=%d/%d", hits, misses)
+		}
+		if st.fatalErr() != nil {
+			line += fmt.Sprintf(" rejected=%v", st.fatalErr())
+		}
+	}
+	if elapsed >= slowRequestThreshold {
+		line += " SLOW"
+	}
+	s.logger.Print(line)
 }
 
 // stateCtxKey 是请求级状态在 context 中的键。
@@ -212,8 +387,10 @@ func (s *requestState) overridesContentType() bool {
 }
 
 func (s *requestState) setFatal(err error) {
-	// 只登记能映射成明确状态码的错误;其余交给 webdav 的默认映射。
-	if !errors.Is(err, vfs.ErrTooLarge) && !errors.Is(err, vfs.ErrInsufficientStorage) {
+	// 只登记能映射成明确状态码的错误(vfs 契约的五类);其余交给 webdav 的
+	// 默认映射 —— 后端真实故障仍是 5xx,不会被这里吞掉。
+	if !errors.Is(err, vfs.ErrTooLarge) && !errors.Is(err, vfs.ErrInsufficientStorage) &&
+		!errors.Is(err, vfs.ErrNotExist) && !errors.Is(err, vfs.ErrExist) && !errors.Is(err, vfs.ErrNotSupported) {
 		return
 	}
 	s.mu.Lock()
@@ -221,6 +398,21 @@ func (s *requestState) setFatal(err error) {
 	if s.fatal == nil {
 		s.fatal = err
 	}
+}
+
+// fatalErr 返回本请求登记的上传拒绝原因(413/507),无则 nil。
+func (st *requestState) fatalErr() error {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.fatal
+}
+
+// cacheStats 返回请求级缓存的命中/未命中数。
+func (st *requestState) cacheStats() (hits, misses int) {
+	if st.cache == nil {
+		return 0, 0
+	}
+	return st.cache.stats()
 }
 
 func stateOf(ctx context.Context) *requestState {
@@ -298,6 +490,25 @@ func (w *guardWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
+// ReadFrom 让 io.Copy(GET 的响应体搬运)用上底层 ResponseWriter 的
+// ReaderFrom(通常是 sendfile/大缓冲路径);不实现的话每次拷贝退化为
+// 32KB 缓冲循环。注意转发前先补齐状态码,且不得递归调用自身。
+func (w *guardWriter) ReadFrom(src io.Reader) (int64, error) {
+	if rf, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		w.state.mu.Lock()
+		muted := w.state.muted
+		w.state.mu.Unlock()
+		if muted {
+			return io.Copy(io.Discard, src) // 已被 413/507 接管:丢弃剩余数据
+		}
+		if w.status == 0 {
+			w.WriteHeader(http.StatusOK)
+		}
+		return rf.ReadFrom(src)
+	}
+	return io.Copy(struct{ io.Writer }{w}, src)
+}
+
 func (w *guardWriter) Write(p []byte) (int, error) {
 	w.state.mu.Lock()
 	muted := w.state.muted
@@ -319,6 +530,12 @@ func writeGuardResponse(w *guardWriter, cause error) {
 		status = http.StatusRequestEntityTooLarge
 	case errors.Is(cause, vfs.ErrInsufficientStorage):
 		status = http.StatusInsufficientStorage
+	case errors.Is(cause, vfs.ErrNotExist):
+		status = http.StatusNotFound
+	case errors.Is(cause, vfs.ErrExist):
+		status = http.StatusMethodNotAllowed
+	case errors.Is(cause, vfs.ErrNotSupported):
+		status = http.StatusNotImplemented
 	}
 	w.ResponseWriter.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.ResponseWriter.WriteHeader(status)
@@ -341,13 +558,27 @@ func guidance(cause error, maxUploadText string) string {
   2) 或改用 sail cp 上传到同一 bucket。
 `, limit)
 	case errors.Is(cause, vfs.ErrInsufficientStorage):
+		if errors.Is(cause, vfs.ErrQuotaExceeded) {
+			return `上传被拒绝:超出该用户的空间配额(507)。
+
+可操作指引:
+  1) 清理该用户空间内的旧文件释放空间;
+  2) 或由运维调大配置文件中该用户的 quota,保存后热生效,无需重启。
+`
+		}
 		return `上传被拒绝:服务端暂存盘空间不足,无法接收本次上传。
 
 可操作指引:
   1) 清理 --staging-dir 指向的目录;
   2) 或将 --staging-dir 指向空间更大的磁盘后重启。
 `
+	case errors.Is(cause, vfs.ErrNotExist):
+		return "资源不存在\n"
+	case errors.Is(cause, vfs.ErrExist):
+		return "目标已存在\n"
+	case errors.Is(cause, vfs.ErrNotSupported):
+		return "该操作在此路径上不受支持\n"
 	default:
-		return "上传失败\n"
+		return "操作失败\n"
 	}
 }

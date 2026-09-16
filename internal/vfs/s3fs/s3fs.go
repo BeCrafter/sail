@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/BeCrafter/sail/internal/s3del"
 	"github.com/BeCrafter/sail/internal/s3path"
 	"github.com/BeCrafter/sail/internal/vfs"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -27,8 +28,10 @@ const (
 	maxParts = 10000
 	// defaultConcurrency 是显式并发度。内存预算 ≈ (Concurrency+1) × PartSize。
 	defaultConcurrency = 4
-	// deleteBatchSize 是 DeleteObjects 的单批上限。
+	// deleteBatchSize 是 DeleteObjects 的单批上限,也是删除后列举分页的大小。
 	deleteBatchSize = 1000
+	// objectOpsConcurrency 是分片复制的并发上限(删除回退的并发度在 s3del 内)。
+	objectOpsConcurrency = 10
 	// maxChunkSize 是单片的硬上界:S3 PutObject 单次请求上限 5GiB。
 	maxChunkSize = 5 << 30
 	// metaConcurrency 是列目录补元信息时对 HEAD 的并发上限。
@@ -69,6 +72,8 @@ type FS struct {
 	concurrency   int
 	chunkedUpload bool
 	chunkSize     int64
+	// deleter 统一处理批量端点探测与并发回退(见 internal/s3del)。
+	deleter *s3del.Deleter
 }
 
 // New 校验配置并确保暂存目录可用。
@@ -110,6 +115,7 @@ func New(cfg Config) (*FS, error) {
 		concurrency:   concurrency,
 		chunkedUpload: cfg.ChunkedUpload,
 		chunkSize:     cfg.ChunkSize,
+		deleter:       s3del.New(cfg.Client, cfg.Bucket),
 	}, nil
 }
 
@@ -362,17 +368,25 @@ func (f *FS) Remove(ctx context.Context, p string, recursive bool) error {
 	key := f.key(logical)
 	if !recursive {
 		// 分片文件:先删逻辑 key(提交点),再清片目录。
-		handled, err := f.removeChunkedPath(ctx, logical, key)
+		handled, exists, err := f.removeChunkedPath(ctx, logical, key)
 		if err != nil {
 			return err
 		}
 		if handled {
 			return nil
 		}
+		// 对象不存在就不发那次注定空转的 DELETE:单次删除的延迟可能高达数十
+		// 秒(实测某网关固定 ~28s),而删除本身幂等,不删与删了的结果一致。
+		if !exists {
+			return nil
+		}
 		return f.deleteObjects(ctx, []string{key})
 	}
 	// 递归删除:按前缀整体清。先回收该路径名下的片(此时逻辑 key 仍可见,
 	// 失败只留可判定孤儿,不会把文件删成半截),再删逻辑前缀。
+	// 末尾把「同名对象本身」(逻辑路径是文件、同时存在同前缀时)并入同一批,
+	// 而不是再发一次删除:单次删除的延迟可能高达数十秒,多一次调用就是多一份
+	// 串行等待,而删除本身幂等,合并无副作用。
 	if f.chunkedUpload {
 		f.cleanupPrefix(ctx, f.partsPath(logical), "分片")
 	}
@@ -385,21 +399,21 @@ func (f *FS) Remove(ctx context.Context, p string, recursive bool) error {
 		Prefix:  aws.String(prefix),
 		MaxKeys: aws.Int32(deleteBatchSize),
 	})
+	var doomed []string
 	for paginator.HasMorePages() {
 		page, perr := paginator.NextPage(ctx)
 		if perr != nil {
 			return fmt.Errorf("s3fs: 列举待删除对象 %s 失败: %w", logical, perr)
 		}
-		keys := make([]string, 0, len(page.Contents))
 		for _, o := range page.Contents {
-			keys = append(keys, aws.ToString(o.Key))
-		}
-		if err := f.deleteObjects(ctx, keys); err != nil {
-			return err
+			doomed = append(doomed, aws.ToString(o.Key))
 		}
 	}
-	// 同名对象本身(逻辑路径是文件、同时存在同前缀时)。
-	return f.deleteObjects(ctx, []string{key})
+	// 「同名对象本身」放在队首:并发删除按队列取任务,若它排在末尾而队列恰好
+	// 是并发度的整数倍,它就要等整轮跑完才启动——单次删除延迟数十秒时,这一等
+	// 就是白加的几十秒。放队首可确保它落在第一轮里。
+	doomed = append([]string{key}, doomed...)
+	return f.deleteObjects(ctx, doomed)
 }
 
 // Rename 是对象级重命名(CopyObject + DeleteObject)。目录级在 P1 不支持,
@@ -461,39 +475,44 @@ func (f *FS) Rename(ctx context.Context, oldPath, newPath string) error {
 	}); err != nil {
 		return fmt.Errorf("s3fs: 复制 %s -> %s 失败: %w", oldLogical, newLogical, err)
 	}
-	if _, err := f.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(f.bucket),
-		Key:    aws.String(oldKey),
-	}); err != nil {
+	// 删除源对象统一走 s3del(单键会走它的直删快路径,代价与直接调用一致)。
+	if err := f.deleteObjects(ctx, []string{oldKey}); err != nil {
 		return fmt.Errorf("s3fs: 删除源对象 %s 失败: %w", oldLogical, err)
 	}
 	return nil
 }
 
 func (f *FS) deleteObjects(ctx context.Context, keys []string) error {
-	for i := 0; i < len(keys); i += deleteBatchSize {
-		end := i + deleteBatchSize
-		if end > len(keys) {
-			end = len(keys)
-		}
-		ids := make([]types.ObjectIdentifier, 0, end-i)
-		for _, k := range keys[i:end] {
-			ids = append(ids, types.ObjectIdentifier{Key: aws.String(k)})
-		}
-		out, err := f.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
-			Bucket: aws.String(f.bucket),
-			Delete: &types.Delete{Objects: ids},
-		})
-		if err != nil || len(out.Errors) > 0 {
-			// 部分 S3 兼容服务不支持批量删除,回退逐个删除(对已删除对象幂等)。
-			for _, k := range keys[i:end] {
-				if _, derr := f.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-					Bucket: aws.String(f.bucket),
-					Key:    aws.String(k),
-				}); derr != nil {
-					return fmt.Errorf("s3fs: 删除 %s 失败: %w", k, derr)
-				}
+	return f.deleter.DeleteKeys(ctx, keys)
+}
+
+// runConcurrently 以 objectOpsConcurrency 为上限并发对每个元素执行 fn,
+// 返回首个错误。等全部跑完再汇总:部分完成的中间态与批量端点「部分成功」
+// 的语义一致,早退只会让调用方看到一个不完整的结果。
+func runConcurrently[T any](items []T, fn func(T) error) error {
+	if len(items) == 0 {
+		return nil
+	}
+	sem := make(chan struct{}, objectOpsConcurrency)
+	errCh := make(chan error, len(items))
+	var wg sync.WaitGroup
+
+	for _, item := range items {
+		wg.Add(1)
+		go func(item T) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if err := fn(item); err != nil {
+				errCh <- err
 			}
+		}(item)
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			return err
 		}
 	}
 	return nil
@@ -536,6 +555,17 @@ func (f *FS) key(logical string) string {
 	return s3path.JoinKey(f.prefix, strings.TrimPrefix(logical, "/"))
 }
 
+// rootPrefix 返回本核前缀的「目录边界」形态:非空时补尾 "/"。
+// S3 的 Prefix 是字面匹配,少了这个斜杠,`alice` 会把 `alice2/...` 的对象
+// 也算进来(前缀统计会串到相邻用户的空间);ReadDir 对每个目录都做了同样的
+// 边界处理,这里保持一致。空前缀(桶根)保持空 = 整桶。
+func (f *FS) rootPrefix() string {
+	if f.prefix != "" && !strings.HasSuffix(f.prefix, "/") {
+		return f.prefix + "/"
+	}
+	return f.prefix
+}
+
 // normalize 规范化逻辑路径:强制以 "/" 开头,拒绝任何 ".." 段(越界),
 // 保留尾随 "/"(目录标记对象),根固定为 "/"。
 func normalize(p string) (string, error) {
@@ -549,6 +579,12 @@ func normalize(p string) (string, error) {
 		if seg == ".." {
 			return "", notExist(p)
 		}
+	}
+	// 保留前缀(.sail/):列目录时本就过滤,这里再堵住「直接按路径访问」——
+	// 否则客户端不仅能读到自己的分片部件,还能删掉部件把文件变成损坏态
+	// (manifest 还在、内容没了)。一律按「不存在」处理,与列目录的隐藏语义一致。
+	if first := strings.SplitN(strings.TrimPrefix(p, "/"), "/", 2)[0]; first == sailDir {
+		return "", notExist(p)
 	}
 	trailing := len(p) > 1 && strings.HasSuffix(p, "/")
 	clean := path.Clean(p)

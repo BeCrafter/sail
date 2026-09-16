@@ -43,7 +43,7 @@ Use --help on any command for detailed usage and examples.`,
 }
 
 func init() {
-	rootCmd.PersistentFlags().StringVarP(&cfgPath, "config", "c", "", "config file path (default ~/.sail/config.yaml)")
+	rootCmd.PersistentFlags().StringVarP(&cfgPath, "config", "c", "", "config file path (default ~/.config/sail/config.yaml)")
 	rootCmd.PersistentFlags().StringVarP(&profile, "profile", "p", "", "profile to use (default default-profile)")
 	rootCmd.PersistentFlags().StringVar(&cfgEndpoint, "endpoint", "", "override endpoint")
 	rootCmd.PersistentFlags().StringVar(&cfgBucket, "bucket", "", "override default bucket")

@@ -28,24 +28,46 @@ type Profile struct {
 	Serve ServeConfig `mapstructure:"serve"`
 }
 
+// UserConfig 是 serve.users 用户表里的一名用户。字段支持 ${VAR} 环境变量
+// 展开(与 serve 其余字段一致),密码可留环境变量、不落明文。
+type UserConfig struct {
+	Name     string `mapstructure:"name"`
+	Password string `mapstructure:"password"`
+	// Prefix 是相对 serve.prefix 的空间段;省略 = base 前缀本身。
+	Prefix string `mapstructure:"prefix"`
+	// Quota 是空间配额(如 "10GB",支持 MB/GB/TB);省略 = 不限额。语法校验见 users.go,
+	// 配额执行由 P2 的 quotafs 落地。
+	Quota string `mapstructure:"quota"`
+}
+
 // ServeConfig 是 serve webdav 的全部 flag 参数的配置落点。字段语义与
 // cmd/serve.go 里的同名 flag 一一对应;大小类字段保持 flag 的字符串格式
 // (如 "5TiB"),合并后在 cmd 层统一 parseSize。
+//
+// 注意:新增 serve flag 时必须同步加到这里——config.Load 按结构体反序列化,
+// 结构体之外的键会在 config setup 重写文件时被静默丢弃。
 type ServeConfig struct {
-	Listen         string `mapstructure:"listen"`
-	Prefix         string `mapstructure:"prefix"`
-	User           string `mapstructure:"user"`
-	Password       string `mapstructure:"password"`
-	TLSCert        string `mapstructure:"tls-cert"`
-	TLSKey         string `mapstructure:"tls-key"`
-	StagingDir     string `mapstructure:"staging-dir"`
-	BackendMaxSize string `mapstructure:"backend-max-object-size"`
-	MaxUploadSize  string `mapstructure:"max-upload-size"`
-	ChunkedUpload  bool   `mapstructure:"chunked-upload"`
-	ChunkSize      string `mapstructure:"chunk-size"`
+	Listen         string       `mapstructure:"listen"`
+	Prefix         string       `mapstructure:"prefix"`
+	User           string       `mapstructure:"user"`
+	Password       string       `mapstructure:"password"`
+	Users          []UserConfig `mapstructure:"users"`
+	TLSCert        string       `mapstructure:"tls-cert"`
+	TLSKey         string       `mapstructure:"tls-key"`
+	StagingDir     string       `mapstructure:"staging-dir"`
+	BackendMaxSize string       `mapstructure:"backend-max-object-size"`
+	MaxUploadSize  string       `mapstructure:"max-upload-size"`
+	ChunkedUpload  bool         `mapstructure:"chunked-upload"`
+	ChunkSize      string       `mapstructure:"chunk-size"`
+	// DirCacheTTL 是目录列表缓存时长(flag --dir-cache-ttl);空 = 用 flag
+	// 默认(60s),"0" = 关闭缓存。
+	DirCacheTTL string `mapstructure:"dir-cache-ttl"`
+	// Prewarm 是后台保热的目录清单(flag --prewarm);空 = 不预热。
+	// 多用户模式下同一清单会在每个用户自己的空间内生效。
+	Prewarm []string `mapstructure:"prewarm"`
 }
 
-// Config 是 ~/.sail/config.yaml 的整体结构
+// Config 是 ~/.config/sail/config.yaml 的整体结构
 type Config struct {
 	DefaultProfile string             `mapstructure:"default-profile"`
 	Lang           string             `mapstructure:"lang"`
@@ -91,13 +113,33 @@ func EnvVarName(profile, field string) string {
 	return "SAIL_" + field
 }
 
-// ConfigPath 返回配置文件默认路径 ~/.sail/config.yaml
+// ConfigPath 返回配置文件默认路径 ~/.config/sail/config.yaml。
+// 刻意不读 $XDG_CONFIG_HOME:行为可预测优先(见 README「配置」)。
 func ConfigPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".sail", "config.yaml"), nil
+	return filepath.Join(home, ".config", "sail", "config.yaml"), nil
+}
+
+// legacyHint 在「用的是默认路径、且迁移前的旧文件仍在」时返回一句提示,否则空串。
+// 只提示、不读取旧文件:配置位置已迁移,不做静默回退(旧文件可能属于旧版本,
+// 悄悄生效反而更意外)。
+func legacyHint(usedPath string) string {
+	def, err := ConfigPath()
+	if err != nil || usedPath != def {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	old := filepath.Join(home, ".sail", "config.yaml")
+	if _, err := os.Stat(old); err != nil {
+		return ""
+	}
+	return i18n.Tf(" (note: an older config still exists at %s; the default location is now %s — move it over to keep your profiles)", old, def)
 }
 
 // Load 从给定路径加载配置;path 为空则用默认路径。
@@ -113,7 +155,11 @@ func Load(path string) (*Config, error) {
 	v := viper.New()
 	v.SetConfigFile(path)
 	if err := v.ReadInConfig(); err != nil {
-		return nil, fmt.Errorf(i18n.T("read config %s failed: %w"), path, err)
+		base := fmt.Errorf(i18n.T("read config %s failed: %w"), path, err)
+		if hint := legacyHint(path); hint != "" {
+			return nil, fmt.Errorf("%w%s", base, hint)
+		}
+		return nil, base
 	}
 	var c Config
 	if err := v.Unmarshal(&c); err != nil {
@@ -136,6 +182,15 @@ func (c *Config) Resolve(profile string) (*Resolved, error) {
 		return nil, fmt.Errorf(i18n.T("profile %q not found in config file"), profile)
 	}
 
+	var users []UserConfig
+	for _, u := range p.Serve.Users {
+		users = append(users, UserConfig{
+			Name:     expandEnv(u.Name),
+			Password: expandEnv(u.Password),
+			Prefix:   expandEnv(u.Prefix),
+			Quota:    expandEnv(u.Quota),
+		})
+	}
 	r := &Resolved{
 		ProfileName:   profile,
 		Endpoint:      expandEnv(p.Endpoint),
@@ -151,6 +206,7 @@ func (c *Config) Resolve(profile string) (*Resolved, error) {
 			Prefix:         expandEnv(p.Serve.Prefix),
 			User:           expandEnv(p.Serve.User),
 			Password:       expandEnv(p.Serve.Password),
+			Users:          users,
 			TLSCert:        expandEnv(p.Serve.TLSCert),
 			TLSKey:         expandEnv(p.Serve.TLSKey),
 			StagingDir:     expandEnv(p.Serve.StagingDir),
@@ -158,6 +214,8 @@ func (c *Config) Resolve(profile string) (*Resolved, error) {
 			MaxUploadSize:  expandEnv(p.Serve.MaxUploadSize),
 			ChunkedUpload:  p.Serve.ChunkedUpload,
 			ChunkSize:      expandEnv(p.Serve.ChunkSize),
+			DirCacheTTL:    expandEnv(p.Serve.DirCacheTTL),
+			Prewarm:        expandEnvList(p.Serve.Prewarm),
 		},
 	}
 
@@ -197,4 +255,16 @@ func expandEnv(s string) string {
 		name := strings.TrimSuffix(strings.TrimPrefix(m, "${"), "}")
 		return os.Getenv(name)
 	})
+}
+
+// expandEnvList 对 []string 逐项做 ${VAR} 展开,供 serve.prewarm 这类列表字段使用。
+func expandEnvList(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		out = append(out, expandEnv(s))
+	}
+	return out
 }

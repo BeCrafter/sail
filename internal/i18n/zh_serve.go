@@ -76,7 +76,22 @@ Examples:
 		"--chunk-size (%s) exceeds --backend-max-object-size (%s): raise the backend limit or lower the chunk size":                     "--chunk-size(%s)超过 --backend-max-object-size(%s):请调高后端上限或调小片大小",
 		"sail webdav started: %s://%s  bucket=%s profile=%s%s user=%s max-object-size=%s staging=%s chunked=%s\n":                       "sail webdav 已启动: %s://%s  bucket=%s profile=%s%s user=%s 单对象上限=%s 暂存=%s 分片=%s\n",
 		"  mount at: %s\n": "  挂载地址: %s\n",
-		"  (localhost = this machine; LAN IP = other devices)\n": "  (localhost = 本机;局域网 IP = 其它设备)\n",
+		"  (localhost = this machine; LAN IP = other devices)\n":                                                                               "  (localhost = 本机;局域网 IP = 其它设备)\n",
+		"  users come from --user/--password flags: config file changes will NOT hot-apply; restart to change users\n":                         "  用户来自 --user/--password flag:配置文件变更不会热生效,增删用户需重启\n",
+		"  no config file path resolved: hot reload disabled\n":                                                                                "  未解析到配置文件路径:热加载已关闭\n",
+		"serve.users and user/password are mutually exclusive (profile %q): configure either the users list or the single-user pair, not both": "serve.users 与 user/password 互斥(profile %q):两者只能配置其一",
+		"config change detected: reloading user table":                                                                                         "检测到配置变更:正在重载用户表",
+		"reload rejected, keeping previous user table: %v":                                                                                     "重载被拒绝,沿用原用户表: %v",
+		"user table reloaded: %d user(s), %d stack(s), gen=%d":                                                                                 "用户表已重载: %d 名用户, %d 个栈, gen=%d",
+		"invalid --dir-cache-ttl: %w":                                                                                                          "非法的 --dir-cache-ttl: %w",
+		"no bucket to share: pass --bucket, set SAIL_BUCKET, or add \"bucket\" to profile %q in the config file — WebDAV exposes a whole bucket, and without one there is nothing to share": "没有可共享的 bucket:请传 --bucket、设置 SAIL_BUCKET,或在配置文件里给 profile %q 添加 \"bucket\" —— WebDAV 共享的是整桶,没有桶就无从共享",
+		"config change on %q is a cold-zone field and requires a restart to take effect":                                                                                                    "配置项 %q 属冷区,需重启才能生效",
+		"WARN: creating directory for user space %q failed (users still work; retried on next reload): %v":                                                                                  "WARN: 为用户空间 %q 创建目录失败(不影响用户使用;下次 reload 会重试): %v",
+		"directory created for user space: %s/":                                        "已为用户空间创建目录: %s/",
+		"WARN: hot reload unavailable (fsnotify error: %v); will retry":                "警告: 热加载不可用(fsnotify 错误: %v);稍后重试",
+		"WARN: cannot watch config directory %s: %v; will retry":                       "警告: 无法监听配置目录 %s: %v;稍后重试",
+		"WARN: config watcher lost (directory replaced or watcher closed); rebuilding": "警告: 配置监听已失效(目录被替换或监听通道关闭);正在重建",
+		"WARN: config watch error: %v":                                                 "WARN: 配置监听出错: %v",
 
 		// serve.go — --print-windows-setup output
 		`Mount a sail WebDAV drive in Windows Explorer

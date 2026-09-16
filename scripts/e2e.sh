@@ -8,7 +8,7 @@
 # 用法:
 #   # 方式一:复用已有配置(推荐,不碰凭证;可用 SAIL_E2E_PROFILE 指定 profile,
 #   #        配置的默认桶须等于 SAIL_E2E_BUCKET)
-#   SAIL_E2E_CONFIG=~/.sail/config.yaml SAIL_E2E_PROFILE=test \
+#   SAIL_E2E_CONFIG=~/.config/sail/config.yaml SAIL_E2E_PROFILE=test \
 #     SAIL_E2E_BUCKET=<该 profile 默认桶> ./scripts/e2e.sh
 #   # 方式二:交互输入凭证
 #   ./scripts/e2e.sh
@@ -72,7 +72,7 @@ else
         read -rp "CDN 域名 (可留空): " CDN_DOMAIN
     fi
     [[ -z "$ENDPOINT" || -z "$ACCESS_KEY" || -z "$SECRET_KEY" || -z "$BUCKET" ]] && { echo -e "${RED}endpoint/access-key/secret-key/bucket 不能为空${NC}"; exit 1; }
-    WORK_DIR_CFG="$(mktemp -d)"; CONFIG_FILE="$WORK_DIR_CFG/.sail/config.yaml"
+    WORK_DIR_CFG="$(mktemp -d)"; CONFIG_FILE="$WORK_DIR_CFG/.config/sail/config.yaml"
     mkdir -p "$(dirname "$CONFIG_FILE")"
     cat > "$CONFIG_FILE" <<EOF
 default-profile: $PROFILE

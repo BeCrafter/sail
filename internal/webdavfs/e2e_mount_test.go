@@ -27,6 +27,19 @@ func TestMountOptionsAllowedWithoutAuth(t *testing.T) {
 	if allow := resp.Header.Get("Allow"); !strings.Contains(allow, "PROPFIND") {
 		t.Fatalf("Allow 头应含 PROPFIND,实际 %q", allow)
 	}
+
+	// 且不得触达文件系统:OPTIONS 在认证之前放行,若转发给 webdav.Handler,
+	// 后者会 Stat(reqPath) 才能决定 Allow 头——那等于让无凭据请求也能放大
+	// 后端请求(且 Allow 随路由表首个用户的数据漂移)。用不存在的路径探测:
+	// 旧实现在这里必然发一次 HEAD(无标记对象时再加一次 LIST)。
+	before := g.s3.Counts.Head.Load() + g.s3.Counts.List.Load() + g.s3.Counts.Get.Load()
+	resp2 := g.do(t, "OPTIONS", "/no-such-dir/whatever", "", false, nil)
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("OPTIONS(任意路径)应 200,实际 %d", resp2.StatusCode)
+	}
+	if after := g.s3.Counts.Head.Load() + g.s3.Counts.List.Load() + g.s3.Counts.Get.Load(); after != before {
+		t.Errorf("OPTIONS 不得触达后端,期间新增了 %d 次后端请求", after-before)
+	}
 }
 
 // 挂载后 Finder 看到的完整序列:OPTIONS(探测)→ PROPFIND Depth:1(列根)。
@@ -197,5 +210,57 @@ func TestPropfindListingsSortedByName(t *testing.T) {
 	}
 	if !sort.StringsAreSorted(names) {
 		t.Fatalf("列目录未按名字排序: %v", names)
+	}
+}
+
+// 保留前缀 .sail/ 不只是「列目录时隐藏」:直接按路径访问也必须按不存在处理。
+// 否则客户端能读到自己的分片部件,甚至删掉部件把文件删成损坏态
+// (manifest 还在、内容没了)。
+func TestReservedPrefixNotDirectlyAccessible(t *testing.T) {
+	g := newGateway(t, "", 0)
+	g.s3.Put(bucket, ".sail/parts/f.txt/abc/00000", []byte("chunk-part"), "")
+
+	// 列目录看不见。
+	pf := g.do(t, "PROPFIND", "/", propfindAll, true, map[string]string{"Depth": "1"})
+	if strings.Contains(bodyOf(t, pf), ".sail") {
+		t.Fatal("列目录不应出现 .sail")
+	}
+
+	// 直接访问一律 404(与「隐藏」语义一致,不泄露内部结构)。
+	for _, m := range []string{"GET", "HEAD", "DELETE"} {
+		if resp := g.do(t, m, "/.sail/parts/f.txt/abc/00000", "", true, nil); resp.StatusCode != http.StatusNotFound {
+			t.Errorf("%s /.sail/... 期望 404,实际 %d", m, resp.StatusCode)
+		}
+	}
+	if resp := g.do(t, "PUT", "/.sail/evil.txt", "x", true, nil); resp.StatusCode < 400 {
+		t.Errorf("PUT /.sail/... 应被拒绝,实际 %d", resp.StatusCode)
+	}
+
+	// 部件仍在桶里:拒绝访问不等于删除。
+	if _, ok := g.s3.Get(bucket, ".sail/parts/f.txt/abc/00000"); !ok {
+		t.Error("部件不应因拒绝访问而被删除")
+	}
+}
+
+// 契约错误类按 vfs 契约映射,而不是 webdav 对 OpenFile 失败的默认映射:
+// 根路径不可写 → 501(此前 PUT / 是 404、PROPPATCH / 是 500)。
+func TestErrorMappingForContractErrors(t *testing.T) {
+	g := newGateway(t, "", 0)
+
+	if r := g.do(t, "PUT", "/", "x", true, nil); r.StatusCode != http.StatusNotImplemented {
+		t.Errorf("PUT / 期望 501,实际 %d: %s", r.StatusCode, bodyOf(t, r))
+	}
+	propBody := `<?xml version="1.0"?><D:propertyupdate xmlns:D="DAV:"><D:set><D:prop>` +
+		`<Z:foo xmlns:Z="z"/></D:prop></D:set></D:propertyupdate>`
+	if r := g.do(t, "PROPPATCH", "/", propBody, true, nil); r.StatusCode != http.StatusNotImplemented {
+		t.Errorf("PROPPATCH / 期望 501,实际 %d: %s", r.StatusCode, bodyOf(t, r))
+	}
+
+	// 既有映射不受影响。
+	if r := g.do(t, "GET", "/nope", "", true, nil); r.StatusCode != http.StatusNotFound {
+		t.Errorf("GET 不存在期望 404,实际 %d", r.StatusCode)
+	}
+	if r := g.do(t, "PUT", "/ok.txt", "hi", true, nil); r.StatusCode != http.StatusCreated {
+		t.Errorf("正常 PUT 期望 201,实际 %d", r.StatusCode)
 	}
 }

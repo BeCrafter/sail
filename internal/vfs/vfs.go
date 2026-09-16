@@ -106,4 +106,8 @@ var (
 	ErrTooLarge = errors.New("vfs: exceeds backend limit")
 	// ErrInsufficientStorage → 507
 	ErrInsufficientStorage = errors.New("vfs: insufficient storage")
+	// ErrQuotaExceeded 是 ErrInsufficientStorage 的配额语境限定符:配额会计
+	// (quotafs)用它包装底层错误,协议壳据此输出配额专属指引。状态码映射
+	// 仍以 ErrInsufficientStorage 为准(→ 507),它不是新的错误码(I2)。
+	ErrQuotaExceeded = errors.New("vfs: quota exceeded")
 )

@@ -7,7 +7,7 @@
 # 不测极限(大文件/海量对象)。
 #
 # 用法一(复用已有配置,推荐,不碰凭证;桶取自 profile 的 bucket,无需再指定):
-#   SAIL_E2E_CONFIG=~/.sail/config.yaml SAIL_E2E_PROFILE=test ./scripts/e2e-serve.sh
+#   SAIL_E2E_CONFIG=~/.config/sail/config.yaml SAIL_E2E_PROFILE=test ./scripts/e2e-serve.sh
 # 用法二(环境变量传凭证,自建临时配置,需指定桶):
 #   SAIL_E2E_ENDPOINT=... SAIL_E2E_ACCESS_KEY=... SAIL_E2E_SECRET_KEY=... \
 #     SAIL_E2E_BUCKET=... ./scripts/e2e-serve.sh
@@ -57,7 +57,7 @@ else
     [[ -z "$ENDPOINT" || -z "$ACCESS_KEY" || -z "$SECRET_KEY" || -z "$BUCKET" ]] && {
         echo -e "${RED}方式二需 SAIL_E2E_ENDPOINT/ACCESS_KEY/SECRET_KEY/BUCKET${NC}"; exit 1; }
     PROFILE="${SAIL_E2E_PROFILE:-e2e-serve}"
-    WORK_DIR_CFG="$(mktemp -d)"; CONFIG_FILE="$WORK_DIR_CFG/.sail/config.yaml"
+    WORK_DIR_CFG="$(mktemp -d)"; CONFIG_FILE="$WORK_DIR_CFG/.config/sail/config.yaml"
     mkdir -p "$(dirname "$CONFIG_FILE")"
     cat > "$CONFIG_FILE" <<EOF
 default-profile: $PROFILE
@@ -81,6 +81,7 @@ BASE="http://127.0.0.1:${LISTEN#:}"
 cleanup() {
     echo -e "\n${CYAN}━━━ 清理 ━━━${NC}"
     [[ -n "${SERVE_PID:-}" ]] && kill "$SERVE_PID" 2>/dev/null || true
+    [[ -n "${MU_PID:-}" ]] && kill "$MU_PID" 2>/dev/null || true
     $SAIL rm -r "$S3_ROOT/" >/dev/null 2>&1 || true
     rm -rf "${WORK_DIR_CFG:-}" 2>/dev/null || true
     echo -e "${GREEN}清理完成${NC}"
@@ -186,6 +187,72 @@ GONE_CODE="$(dav GET "/$TEST_PREFIX/renamed.txt" -o /dev/null -w '%{http_code}')
 step "7. 认证兜底:未认证请求应 401"
 NOAUTH="$(curl -sS -o /dev/null -w '%{http_code}' -X PROPFIND -H 'Depth: 0' --data '<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>' "$BASE/")"
 [[ "$NOAUTH" == "401" ]] && ok "未认证 PROPFIND 返回 401" || err "未认证 PROPFIND 返回 $NOAUTH"
+
+# ════════════════════════════════════════════════════════
+step "8. 多用户隔离(RFC 4331 配额属性)"
+# 需要一个带 serve.users 的临时配置;方式二知道 endpoint/密钥,可以直接写;
+# 方式一(复用已有配置)拿不到凭据,跳过本步(可用方式二单独覆盖)。
+if [[ -z "${ENDPOINT:-}" ]]; then
+    skip "方式一无法构造多用户临时配置(用方式二可覆盖多用户/配额用例)"
+else
+    MU_LISTEN=":$(( ${LISTEN#:} + 1 ))"
+    MU_CFG="$(mktemp -d)/config.yaml"
+    cat > "$MU_CFG" <<EOF
+default-profile: e2e-mu
+profiles:
+  e2e-mu:
+    endpoint: $ENDPOINT
+    access-key: $ACCESS_KEY
+    secret-key: $SECRET_KEY
+    bucket: "$BUCKET"
+    path-style: true
+    serve:
+      listen: "$MU_LISTEN"
+      prefix: $PREFIX
+      users:
+        - name: alice
+          password: alice-pw
+          prefix: $TEST_PREFIX/alice/
+          quota: 1MB
+        - name: bob
+          password: bob-pw
+          prefix: $TEST_PREFIX/bob/
+EOF
+    MU_BASE="http://127.0.0.1:${MU_LISTEN#:}"
+    "$SAIL_BIN" -c "$MU_CFG" serve webdav >/tmp/sail-serve-e2e-mu.log 2>&1 &
+    MU_PID=$!
+    mu_ready=""
+    for _ in $(seq 1 50); do
+        if curl -sS -o /dev/null "$MU_BASE/" 2>/dev/null; then mu_ready=1; break; fi
+        sleep 0.2
+    done
+    if [[ -z "$mu_ready" ]]; then
+        err "多用户实例未就绪: $(tail -3 /tmp/sail-serve-e2e-mu.log)"
+    else
+        ok "多用户实例已监听 $MU_LISTEN"
+
+        # 前缀隔离:alice 写,bob 读不到。
+        printf 'alice-data' > /tmp/sail-serve-e2e-a
+        A_PUT="$(curl -sS -u alice:alice-pw -T /tmp/sail-serve-e2e-a -o /dev/null -w '%{http_code}' "$MU_BASE/a.txt")"
+        [[ "$A_PUT" == "201" ]] && ok "  alice PUT 201" || err "  alice PUT 返回 $A_PUT"
+        B_GET="$(curl -sS -u bob:bob-pw -o /dev/null -w '%{http_code}' "$MU_BASE/a.txt")"
+        [[ "$B_GET" == "404" ]] && ok "  bob 看不到 alice 的对象(前缀隔离)" || err "  bob 读到 alice 的对象: $B_GET"
+
+        # 配额:1MB 上限,写 2MB 应在读 body 前被拦(507)。
+        head -c 2097152 /dev/zero > /tmp/sail-serve-e2e-big
+        A_BIG="$(curl -sS -u alice:alice-pw -T /tmp/sail-serve-e2e-big -o /dev/null -w '%{http_code}' "$MU_BASE/big.bin")"
+        [[ "$A_BIG" == "507" ]] && ok "  超配额写入返回 507" || err "  超配额写入返回 $A_BIG(期望 507)"
+
+        # RFC 4331:目录 PROPFIND 播报配额属性(挂载端据此显示剩余空间)。
+        PFQ="$(curl -sS -u alice:alice-pw -X PROPFIND -H 'Depth: 0' \
+            --data '<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>' "$MU_BASE/")"
+        echo "$PFQ" | grep -q 'quota-available-bytes' && ok "  PROPFIND 播报 quota-available-bytes" \
+            || err "  PROPFIND 未播报配额属性"
+    fi
+    kill "$MU_PID" 2>/dev/null || true
+    unset MU_PID
+    rm -f /tmp/sail-serve-e2e-a /tmp/sail-serve-e2e-big
+fi
 
 # ════════════════════════════════════════════════════════
 echo -e "\n${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"

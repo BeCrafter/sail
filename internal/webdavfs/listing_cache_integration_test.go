@@ -121,3 +121,38 @@ func TestListingCacheInvalidatedOnDelete(t *testing.T) {
 		}
 	}
 }
+
+// COPY 落地后必须立刻失效服务级目录缓存:webdav 的 copyFiles 只 Write+Close、
+// 不调 Stat,提交落在 davFile.Close 分支 —— 该分支曾漏掉 invalidateDir,
+// 导致新副本在缓存 TTL 内不出现在 PROPFIND 里。
+func TestListingCacheInvalidatedByCopy(t *testing.T) {
+	g := newCachedGateway(t, time.Minute)
+	g.s3.Put(bucket, "src.txt", []byte("s"), "")
+
+	// 预热缓存:此时只有源文件。
+	resp := g.do(t, "PROPFIND", "/", propfindAll, true, map[string]string{"Depth": "1"})
+	if hrefs := multiHrefs(t, resp); hrefs["/copy.txt"] {
+		t.Fatal("前置:副本不应存在")
+	}
+
+	if resp := g.do(t, "COPY", "/src.txt", "", true, map[string]string{
+		"Destination": g.ts.URL + "/copy.txt",
+	}); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("COPY 期望 201,实际 %d", resp.StatusCode)
+	}
+
+	resp = g.do(t, "PROPFIND", "/", propfindAll, true, map[string]string{"Depth": "1"})
+	if hrefs := multiHrefs(t, resp); !hrefs["/copy.txt"] {
+		t.Errorf("COPY 后 PROPFIND 应立即可见 /copy.txt(目录缓存未失效),实际 %v", hrefs)
+	}
+}
+
+// multiHrefs 把 PROPFIND 响应的 href 收集成集合,便于断言成员存在与否。
+func multiHrefs(t *testing.T, resp *http.Response) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	for _, r := range parseMulti(t, resp).Responses {
+		out[r.Href] = true
+	}
+	return out
+}

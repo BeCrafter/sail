@@ -41,7 +41,7 @@ After install, npm automatically downloads only the one platform binary matching
 ## Quick start
 
 ```bash
-sail config setup                               # interactively generate/update ~/.sail/config.yaml
+sail config setup                               # interactively generate/update ~/.config/sail/config.yaml
 sail cp local.txt s3://mybucket/path/local.txt  # upload
 sail ls s3://mybucket/                          # list
 sail cp s3://mybucket/key local.txt             # download
@@ -77,8 +77,12 @@ profiles:
       listen: ":8443"
       user: alice
       password: ${SAIL_PROD_SERVE_PASSWORD}   # plaintext or ${VAR}
-      # prefix, tls-cert, tls-key, staging-dir, chunked-upload, ... also supported
+      # users: …                              # multi-user mode — see "Multi-user" below; mutually exclusive with user/password
+      # prefix, tls-cert, tls-key, staging-dir, chunked-upload, dir-cache-ttl, prewarm, ... also supported
 ```
+
+`sail config setup` guides these fields interactively (including generating and validating the multi-user
+table); fields it does not ask are kept as written in the config file.
 
 ## Common commands
 
@@ -137,16 +141,65 @@ the startup banner prints `bucket=`, `profile=`, `prefix=`, and the mountable ad
 |---|---|---|
 | `--listen` | `:8080` | Listen address (`serve.listen`) |
 | `--prefix` | empty | Shared root prefix (mapped to `/`); out-of-prefix paths are always rejected (`serve.prefix`) |
-| `--user` / `--password` | empty | Basic auth; startup is refused when empty, anonymous sharing is not allowed |
+| `--user` / `--password` | empty | Basic auth; startup is refused when empty, anonymous sharing is not allowed. Mutually exclusive with `serve.users` |
 | `--tls-cert` / `--tls-key` | empty | Supplying both enables HTTPS |
 | `--staging-dir` | system temp dir | Write staging directory; peak ≈ largest single file × concurrent uploads |
 | `--chunked-upload` / `--chunk-size` | `false` / `4GiB` | Store files larger than `--chunk-size` as chunks + a manifest (off: 1 file = 1 object) |
-| `--dir-cache-ttl` | `60s` | Directory listing cache; expired entries are served stale and refreshed in the background |
-| `--prewarm` | empty | Directories to keep hot in the background (comma-separated, e.g. `/bigdir`) |
+| `--dir-cache-ttl` | `60s` | Directory listing cache; expired entries are served stale and refreshed in the background (`serve.dir-cache-ttl`) |
+| `--prewarm` | empty | Directories to keep hot in the background (comma-separated, e.g. `/bigdir`) (`serve.prewarm`) |
 | `--print-windows-setup` | — | Print the Windows client registry setup and mount command, then exit |
 
 Mount with **macOS Finder** (⌘K, `https://host:8443`) or **Windows Explorer** (run
 `--print-windows-setup` first to lift the ~50MB WebClient registry gate, then `net use Z: \\host@SSL@8443\DavWWWRoot`).
+
+### Multi-user (`serve.users`)
+
+One gateway can serve multiple users, each with a private space. Write the user table into the
+profile's `serve:` block — every user gets a Basic-auth identity and their own namespace:
+
+```yaml
+    serve:
+      listen: ":8443"
+      prefix: team/            # base prefix (cold zone: changes need a restart)
+      users:
+        - name: alice
+          password: ${ALICE_PASSWORD}   # ${VAR} reference, same as other serve fields
+          prefix: alice/                # relative to prefix; omitted = the base prefix itself
+          quota: 10GB                   # per-user space limit (MB/GB/TB); hot-applies without restart
+        - name: bob
+          password: ${BOB_PASSWORD}
+          prefix: shared/bob-data/      # any relative segment
+```
+
+- **Structural isolation.** Each user's effective prefix is the base `prefix` + their `prefix`
+  segment; every object key they touch (including `.sail/` chunk parts) lands inside it. A user's
+  `/` is their own space — other users' objects are structurally unreachable, `..` traversal is
+  rejected, and the access log attributes every request as `user=<name>`.
+- **Space quota (`quota`).** Caps the physical bytes stored under the user's prefix — the billable
+  size, including `.sail/` chunk parts and manifests. `quota` units are `MB`/`GB`/`TB`
+  (a plain number means bytes). Over-quota writes return **507** with
+  actionable guidance; overwrites release the old object's size from the arithmetic. Usage is a
+  lazy snapshot (default TTL 5 minutes) plus in-flight reservations, so writes made outside the
+  gateway (e.g. `sail cp` directly to the bucket) become visible at the next refresh; expired
+  snapshots keep serving the old value while a background refresh runs, so a large prefix never
+  blocks writes. The quota is also reported to clients (RFC 4331 `DAV:quota-available-bytes`), so
+  Finder / Explorer show the remaining space. Changing `quota` in the config hot-applies without a
+  restart.
+- **Hot reload.** The user table is watched: add/remove users or change passwords, prefixes or
+  quotas by editing the config file — effective within seconds, no restart. `listen`, TLS
+  certificates, `staging-dir`, chunked-upload settings and the base `prefix` are cold zone
+  (changing them logs a "restart required" warning). A broken YAML keeps the previous user table
+  with a warning.
+- **Directory auto-create.** On startup/reload, sail asynchronously creates a 0-byte directory
+  marker at each user's prefix so the folder is visible in S3 consoles and to `sail ls`.
+  Idempotent and best-effort: an S3 hiccup only logs a warning.
+- **Fail-loud conflicts.** `users` and `user`/`password` are mutually exclusive (across sources
+  too: `--user`/`--password` flags plus a config `users` table is refused). Effective prefixes
+  must be pairwise distinct and non-nested; violations are refused and the previous state is kept.
+- **Single-user mode stays.** `--user`/`--password` behaves exactly as before; credentials from
+  flags disable hot reload (a warning is printed at startup).
+
+Full details in the [repo README](https://github.com/BeCrafter/sail#multi-user-serveusers).
 
 See the [repo README](https://github.com/BeCrafter/sail#webdav-gateway-sail-serve-webdav) for the
 full flag table, design boundaries (in-process LOCK, 501 on directory MOVE/COPY), and chunked storage.

@@ -28,7 +28,7 @@ func TestT(t *testing.T) {
 
 	SetLang(Zh)
 	// Existing zh key returns Chinese.
-	if got := T("config file path (default ~/.sail/config.yaml)"); got != "配置文件路径 (默认 ~/.sail/config.yaml)" {
+	if got := T("config file path (default ~/.config/sail/config.yaml)"); got != "配置文件路径 (默认 ~/.config/sail/config.yaml)" {
 		t.Errorf("Zh T() = %q, want Chinese", got)
 	}
 	// Missing key degrades to English.
@@ -37,7 +37,7 @@ func TestT(t *testing.T) {
 	}
 
 	SetLang(En)
-	if got := T("config file path (default ~/.sail/config.yaml)"); got != "config file path (default ~/.sail/config.yaml)" {
+	if got := T("config file path (default ~/.config/sail/config.yaml)"); got != "config file path (default ~/.config/sail/config.yaml)" {
 		t.Errorf("En fallback = %q, want verbatim", got)
 	}
 }

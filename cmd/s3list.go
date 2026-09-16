@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/BeCrafter/sail/internal/i18n"
-	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/BeCrafter/sail/internal/s3del"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
@@ -28,51 +28,12 @@ func collectAllObjects(ctx context.Context, s3c *s3.Client, bucket, prefix strin
 	return objs, nil
 }
 
-// deleteObjectsBatch 批量删除对象(DeleteObjects 每次最多 1000 个)。
-// 部分 S3 兼容服务对批量删除接口支持不佳(500/NotImplemented 等),
-// 失败时自动回退为逐对象 DeleteObject 组合(幂等),保证删除一定完成。
+// deleteObjectsBatch 批量删除对象,返回删除数量。
+// 走 internal/s3del:批量端点优先,网关不支持时并发单删回退——串行回退会让
+// 删除退化成「对象数 × 单次延迟」(实测某网关单次删除固定 ~28s)。
 func deleteObjectsBatch(ctx context.Context, s3c *s3.Client, bucket string, keys []string) (int, error) {
-	const batchSize = 1000
-	count := 0
-	for i := 0; i < len(keys); i += batchSize {
-		end := i + batchSize
-		if end > len(keys) {
-			end = len(keys)
-		}
-		ids := make([]types.ObjectIdentifier, end-i)
-		for j, k := range keys[i:end] {
-			ids[j] = types.ObjectIdentifier{Key: aws.String(k)}
-		}
-		out, err := s3c.DeleteObjects(ctx, &s3.DeleteObjectsInput{
-			Bucket: &bucket,
-			Delete: &types.Delete{Objects: ids},
-		})
-		if err != nil {
-			n, ferr := deleteKeysOneByOne(ctx, s3c, bucket, keys[i:])
-			return count + n, ferr
-		}
-		if len(out.Errors) > 0 {
-			n, ferr := deleteKeysOneByOne(ctx, s3c, bucket, keys[i:])
-			return count + n, ferr
-		}
-		count += len(ids)
+	if err := s3del.New(s3c, bucket).DeleteKeys(ctx, keys); err != nil {
+		return 0, fmt.Errorf(i18n.T("delete failed: %w"), err)
 	}
-	return count, nil
-}
-
-// deleteKeysOneByOne 逐对象删除(组合式回退,对已删除对象幂等)。
-// 返回删除数量;失败即终止。
-func deleteKeysOneByOne(ctx context.Context, s3c *s3.Client, bucket string, keys []string) (int, error) {
-	count := 0
-	for _, k := range keys {
-		_, err := s3c.DeleteObject(ctx, &s3.DeleteObjectInput{
-			Bucket: &bucket,
-			Key:    &k,
-		})
-		if err != nil {
-			return count, fmt.Errorf(i18n.T("failed to delete s3://%s/%s: %w"), bucket, k, err)
-		}
-		count++
-	}
-	return count, nil
+	return len(keys), nil
 }
