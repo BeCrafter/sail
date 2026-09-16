@@ -133,7 +133,14 @@ func (f *FS) copyParts(ctx context.Context, oldLogical, newLogical string, parts
 		total += c.Length
 	}
 	version := newVersion(srcVersion, newLogical, total)
+
+	// 并发复制:逐片串行会让大文件重命名退化成「片数 × 单次 RTT」。复制是
+	// 服务端内部搬字节,服务端可并行处理(与删除回退同理)。
+	indexes := make([]int, len(parts))
 	for i := range parts {
+		indexes[i] = i
+	}
+	if err := runConcurrently(indexes, func(i int) error {
 		src := f.partKey(oldLogical, srcVersion, i)
 		dst := f.partKey(newLogical, version, i)
 		if _, err := f.client.CopyObject(ctx, &s3.CopyObjectInput{
@@ -141,8 +148,11 @@ func (f *FS) copyParts(ctx context.Context, oldLogical, newLogical string, parts
 			Key:        aws.String(dst),
 			CopySource: aws.String(f.bucket + "/" + src),
 		}); err != nil {
-			return "", fmt.Errorf("复制片 %d 失败: %w", i, err)
+			return fmt.Errorf("复制片 %d 失败: %w", i, err)
 		}
+		return nil
+	}); err != nil {
+		return "", err
 	}
 	return version, nil
 }
@@ -156,24 +166,25 @@ func newVersion(srcVersion, newLogical string, size int64) string {
 }
 
 // removeChunkedPath 是 Remove 的分片分支入口:先 HEAD 定论,再决定是否走分片删除。
-// 返回 (true, err) 表示已按分片处理。
-func (f *FS) removeChunkedPath(ctx context.Context, logical, key string) (bool, error) {
+// handled=true 表示已按分片处理(调用方不必再删);exists 表示逻辑 key 确实存在
+// (调用方可据此跳过注定空转的删除请求)。
+func (f *FS) removeChunkedPath(ctx context.Context, logical, key string) (handled, exists bool, err error) {
 	h, err := f.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(f.bucket),
 		Key:    aws.String(key),
 	})
 	if err != nil {
 		if isNotFound(err) {
-			return false, nil
+			return false, false, nil
 		}
-		return false, fmt.Errorf("s3fs: 读取 %s 元信息失败: %w", logical, err)
+		return false, false, fmt.Errorf("s3fs: 读取 %s 元信息失败: %w", logical, err)
 	}
 	m, ok, err := f.detectManifest(ctx, key, h)
 	if err != nil {
-		return false, err
+		return false, true, err
 	}
 	if !ok {
-		return false, nil
+		return false, true, nil
 	}
-	return true, f.removeChunked(ctx, logical, key, m)
+	return true, true, f.removeChunked(ctx, logical, key, m)
 }

@@ -35,13 +35,14 @@ type Object struct {
 
 // Counts 记录各类请求次数。
 type Counts struct {
-	Head      atomic.Int64
-	Get       atomic.Int64
-	Put       atomic.Int64
-	List      atomic.Int64
-	Delete    atomic.Int64
-	Copy      atomic.Int64
-	Multipart atomic.Int64
+	Head        atomic.Int64
+	Get         atomic.Int64
+	Put         atomic.Int64
+	List        atomic.Int64
+	Delete      atomic.Int64
+	DeleteBatch atomic.Int64
+	Copy        atomic.Int64
+	Multipart   atomic.Int64
 }
 
 // Server 是内存 S3 端点。
@@ -54,6 +55,15 @@ type Server struct {
 
 	Counts Counts
 	ts     *httptest.Server
+
+	// FailBatchDelete 置真时,批量删除端点(?delete)返回 500——模拟不支持
+	// DeleteObjects 的 S3 兼容服务(如 xueersi 测试网关),用于验证回退路径。
+	FailBatchDelete atomic.Bool
+	// DeleteDelay 是单对象删除的注入延迟,用于把并发回退与串行回退区分开:
+	// 并发执行时总耗时应接近单个延迟而非 N 倍。
+	DeleteDelay atomic.Int64
+	// CopyDelay 是单对象复制的注入延迟,用途同 DeleteDelay。
+	CopyDelay atomic.Int64
 }
 
 // New 启动一个内存 S3 端点,调用方负责 Close。
@@ -147,7 +157,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		s.Counts.List.Add(1)
 		s.listObjects(w, r, bucket)
 	case r.Method == http.MethodPost && q.Has("delete"):
-		s.Counts.Delete.Add(1)
+		s.Counts.DeleteBatch.Add(1)
+		if s.FailBatchDelete.Load() {
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
 		s.deleteObjects(w, r, bucket)
 	case r.Method == http.MethodPost && q.Has("uploads"):
 		s.createMultipart(w, r, bucket, key)
@@ -169,6 +183,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		s.getObject(w, r, bucket, key)
 	case r.Method == http.MethodDelete:
 		s.Counts.Delete.Add(1)
+		if d := s.DeleteDelay.Load(); d > 0 {
+			time.Sleep(time.Duration(d))
+		}
 		s.mu.Lock()
 		delete(s.objects, bucket+"/"+key)
 		s.mu.Unlock()
@@ -275,6 +292,9 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, bucket, key s
 }
 
 func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	if d := s.CopyDelay.Load(); d > 0 {
+		time.Sleep(time.Duration(d))
+	}
 	src := strings.TrimPrefix(r.Header.Get("X-Amz-Copy-Source"), "/")
 	// SDK 会把源 key 做 URL 编码,这里解回来。
 	if dec, err := urlUnescape(src); err == nil {
