@@ -56,6 +56,12 @@ type Server struct {
 	Counts Counts
 	ts     *httptest.Server
 
+	// BatchDeleteStatus 是 FailBatchDelete 生效时返回的状态码;0 表示 500
+	// (多数网关代答「不支持」的形态),测试可显式设为 501 等。
+	BatchDeleteStatus atomic.Int64
+	// FailBatchDeleteKeys 置真时,批量删除返回 200 但每个 key 都带 <Error>
+	// ——模拟「端点可用、部分对象删不掉」的真实形态。
+	FailBatchDeleteKeys atomic.Bool
 	// FailBatchDelete 置真时,批量删除端点(?delete)返回 500——模拟不支持
 	// DeleteObjects 的 S3 兼容服务(如 xueersi 测试网关),用于验证回退路径。
 	FailBatchDelete atomic.Bool
@@ -159,7 +165,15 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && q.Has("delete"):
 		s.Counts.DeleteBatch.Add(1)
 		if s.FailBatchDelete.Load() {
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			code := int(s.BatchDeleteStatus.Load())
+			if code == 0 {
+				code = http.StatusInternalServerError
+			}
+			http.Error(w, http.StatusText(code), code)
+			return
+		}
+		if s.FailBatchDeleteKeys.Load() {
+			s.deleteObjectsAllFail(w, r, bucket)
 			return
 		}
 		s.deleteObjects(w, r, bucket)
@@ -333,6 +347,22 @@ func (s *Server) deleteObjects(w http.ResponseWriter, r *http.Request, bucket st
 	s.mu.Unlock()
 	w.Header().Set("Content-Type", "application/xml")
 	writeXML(w, deleteResult{})
+}
+
+// deleteObjectsAllFail 返回「端点可用但每个 key 都失败」的形态(200 + 逐 key
+// <Error>),用于验证删除器不把它误判成「批量端点不支持」。
+func (s *Server) deleteObjectsAllFail(w http.ResponseWriter, r *http.Request, bucket string) {
+	var in deleteRequest
+	if err := xml.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	out := deleteResult{}
+	for _, o := range in.Objects {
+		out.Errors = append(out.Errors, deleteError{Key: o.Key, Code: "AccessDenied", Message: "injected failure"})
+	}
+	w.Header().Set("Content-Type", "application/xml")
+	writeXML(w, out)
 }
 
 func (s *Server) createMultipart(w http.ResponseWriter, r *http.Request, bucket, key string) {
@@ -538,7 +568,14 @@ type deleteRequest struct {
 }
 
 type deleteResult struct {
-	XMLName xml.Name `xml:"DeleteResult"`
+	XMLName xml.Name      `xml:"DeleteResult"`
+	Errors  []deleteError `xml:"Error,omitempty"`
+}
+
+type deleteError struct {
+	Key     string `xml:"Key"`
+	Code    string `xml:"Code"`
+	Message string `xml:"Message"`
 }
 
 type initiateResult struct {

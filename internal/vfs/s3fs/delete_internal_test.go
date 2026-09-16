@@ -3,6 +3,7 @@ package s3fs
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"testing"
 	"time"
 )
@@ -73,6 +74,9 @@ func TestDeleteFallbackIsConcurrent(t *testing.T) {
 	fs, srv := newFSForInternal(t)
 	ctx := context.Background()
 	srv.FailBatchDelete.Store(true)
+	// 用 501(端点不支持的规范答法)让一次失败即确证:5xx 走「连续两次」
+	// 判据,预热一次不足以进入冷却,计时窗口会被探测(含 SDK 重试)污染。
+	srv.BatchDeleteStatus.Store(http.StatusNotImplemented)
 	srv.DeleteDelay.Store(int64(200 * time.Millisecond))
 
 	// 预热:先删一个对象,把「批量端点不可用」的探测消耗掉——首次探测含

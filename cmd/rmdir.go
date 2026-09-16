@@ -8,6 +8,7 @@ import (
 
 	"github.com/BeCrafter/sail/internal/client"
 	"github.com/BeCrafter/sail/internal/i18n"
+	"github.com/BeCrafter/sail/internal/s3del"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/spf13/cobra"
@@ -80,11 +81,8 @@ func rmdirOne(ctx context.Context, s3c *s3.Client, bucket, dirKey string) error 
 	if first.Size != nil && *first.Size != 0 {
 		return fmt.Errorf(i18n.T("placeholder object is not empty (%d bytes); delete it with sail rm: s3://%s/%s"), *first.Size, bucket, dirKey)
 	}
-	_, err = s3c.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: &bucket,
-		Key:    &dirKey,
-	})
-	if err != nil {
+	// 统一走 s3del(单键命中直删快路径),删除策略只有一处实现。
+	if err := s3del.New(s3c, bucket).DeleteKeys(ctx, []string{dirKey}); err != nil {
 		return fmt.Errorf(i18n.T("delete failed: %w"), err)
 	}
 	return nil
