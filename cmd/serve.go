@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -140,7 +141,7 @@ func runServeWebdav(cmd *cobra.Command, _ []string) error {
 	if serveUserFromFlags(cmd) {
 		fmt.Fprint(os.Stderr, i18n.T("  users come from --user/--password flags: config file changes will NOT hot-apply; restart to change users\n"))
 	} else if cfgFile := serveWatchTarget(); cfgFile != "" {
-		watchConfig(context.Background(), cfgFile, 500*time.Millisecond, rt.reload, rt.logger)
+		watchConfig(context.Background(), cfgFile, 500*time.Millisecond, watchRebuildBackoff, rt.reload, rt.logger)
 	} else {
 		fmt.Fprint(os.Stderr, i18n.T("  no config file path resolved: hot reload disabled\n"))
 	}
@@ -184,12 +185,22 @@ func usersBanner(s serveSettings) string {
 
 // userSpaceLines 是多用户模式下逐行展开的「用户 → 空间前缀」映射。
 func userSpaceLines(s serveSettings) []string {
-	if len(s.users) == 0 {
+	return userTableLines(s.prefix, s.users)
+}
+
+// userTableLines 渲染用户表摘要(用户 → 生效前缀 + 配额),启动横幅与热加载
+// 日志共用;绝不包含密码。
+func userTableLines(prefix string, users []config.UserConfig) []string {
+	if len(users) == 0 {
 		return nil
 	}
-	lines := make([]string, 0, len(s.users))
-	for _, u := range s.users {
-		lines = append(lines, "  "+u.Name+" → "+config.EffectivePrefix(s.prefix, u.Prefix)+"/\n")
+	lines := make([]string, 0, len(users))
+	for _, u := range users {
+		q := u.Quota
+		if q == "" {
+			q = i18n.T("unlimited")
+		}
+		lines = append(lines, "  "+u.Name+" → "+config.EffectivePrefix(prefix, u.Prefix)+"/  quota="+q+"\n")
 	}
 	return lines
 }
@@ -228,6 +239,8 @@ func mergeServe(o serveWebdavFlags, r *config.Resolved, changed func(string) boo
 	if changed("chunked-upload") {
 		chunkedUpload = o.chunkedUpload
 	}
+	dirCacheTTLRaw := pick(changed("dir-cache-ttl"), o.dirCacheTTL, r.Serve.DirCacheTTL)
+	prewarm := pickList(changed("prewarm"), o.prewarm, r.Serve.Prewarm)
 
 	// 用户表只来自配置文件(users 列表语义不适合 CLI 参数);单 user/password
 	// 是兼容既有用法的隐式一用户表,两者同设属配置冲突,fail-loud(I4)。
@@ -264,7 +277,7 @@ func mergeServe(o serveWebdavFlags, r *config.Resolved, changed func(string) boo
 	if err != nil {
 		return serveSettings{}, err
 	}
-	dirCacheTTL, err := parseDuration(o.dirCacheTTL)
+	dirCacheTTL, err := parseDuration(dirCacheTTLRaw)
 	if err != nil {
 		return serveSettings{}, fmt.Errorf(i18n.T("invalid --dir-cache-ttl: %w"), err)
 	}
@@ -282,7 +295,7 @@ func mergeServe(o serveWebdavFlags, r *config.Resolved, changed func(string) boo
 		chunkedUpload: chunkedUpload,
 		chunkSize:     chunkSize,
 		dirCacheTTL:   dirCacheTTL,
-		prewarm:       o.prewarm,
+		prewarm:       prewarm,
 	}, nil
 }
 
@@ -299,13 +312,20 @@ type serveRuntime struct {
 	gw       *webdavfs.Server
 	logger   *log.Logger
 
+	// reloadMu 序列化 reload 本身(两次配置变更不并发应用);applyUserTable
+	// 在持锁期间被调用,故它内部不得再取本锁(不可重入)。ensured 另有专人
+	// 保护(ensuredMu),避免从持锁路径调用 ensureDirAsync 时自锁。
 	reloadMu sync.Mutex
+	// gen 是用户表代次(每次成功应用 +1),运维据此判断「当前生效的是第几版」。
+	gen int64
 	// stacks 是生效前缀 → 栈的缓存。栈按生效前缀一一对应(I6 已禁前缀相等),
 	// 改密码/名字/配额复用同一栈,删用户/改前缀退役。
 	stacks map[string]*userStack
 	// ensured 是已完成目录标记创建的生效前缀;ensure 失败不登记,下次
-	// reload 重试(I10)。
-	ensured map[string]bool
+	// reload 重试(I10)。由 ensuredMu 保护:reload 路径与 ensure 的异步
+	// 收尾 goroutine 都会读写它,且 reload 路径持着 reloadMu。
+	ensuredMu sync.Mutex
+	ensured   map[string]bool
 }
 
 // userStack 是一名用户的栈:s3fs 内核 → quotafs 配额装饰器 → webdavfs 壳层
@@ -376,7 +396,15 @@ func (rt *serveRuntime) buildEntries(users []config.UserConfig) ([]webdavfs.User
 			// 内核 → quotafs 配额装饰器 → 壳层。配额上限可由 SetQuota 热改,
 			// 不必重建栈(I7)。
 			qfs := quotafs.New(core, core, limit, 0, rt.logger)
-			st = &userStack{fs: webdavfs.NewWithListingCache(qfs, rt.settings.dirCacheTTL), qfs: qfs}
+			qfs.SetLabel("quotafs[" + u.Name + "]") // 多用户下日志可归因
+			if limit > 0 {
+				// 预热用量快照:否则首次写入要走「从未成功」的等待路径
+				// (至多 3s,且期间按 0 计)。异步、失败仅告警,不影响启动。
+				qfs.Refresh(context.Background())
+			}
+			dfs := webdavfs.NewWithListingCache(qfs, rt.settings.dirCacheTTL)
+			dfs.SetLogger(rt.logger) // 后台刷新失败的告警走同一条日志
+			st = &userStack{fs: dfs, qfs: qfs}
 			rt.stacks[eff] = st
 		} else {
 			// 复用栈:配额原子热更新(改 quota 不重建栈,P2 场景)。
@@ -449,6 +477,11 @@ func (rt *serveRuntime) applyUserTable(users []config.UserConfig) error {
 		for eff := range rt.stacks {
 			if !effs[eff] {
 				delete(rt.stacks, eff)
+				// 同步清掉 ensured:否则同前缀的用户被重建时会被误判为
+				// 「marker 已建」而不再补建(I10)。
+				rt.ensuredMu.Lock()
+				delete(rt.ensured, eff)
+				rt.ensuredMu.Unlock()
 			}
 		}
 	}
@@ -461,6 +494,7 @@ func (rt *serveRuntime) applyUserTable(users []config.UserConfig) error {
 			}
 		}
 	}
+	rt.gen++ // 成功应用 = 新一代(启动、reload 共用此闸门)
 	return nil
 }
 
@@ -487,7 +521,10 @@ func (rt *serveRuntime) reload() {
 		rt.logger.Print(i18n.Tf("reload rejected, keeping previous user table: %v", err))
 		return
 	}
-	rt.logger.Print(i18n.Tf("user table reloaded: %d user(s)", len(users)))
+	rt.logger.Print(i18n.Tf("user table reloaded: %d user(s), %d stack(s), gen=%d", len(users), len(rt.stacks), rt.gen))
+	for _, line := range userTableLines(rt.settings.prefix, users) {
+		rt.logger.Print(strings.TrimRight(line, "\n"))
+	}
 }
 
 // warnColdZone 对比重读结果与运行参数,对冷区变更逐项告警「需重启」。
@@ -513,6 +550,14 @@ func (rt *serveRuntime) warnColdZone(r2 *config.Resolved, s2 serveSettings) {
 	if rt.settings.chunkedUpload != s2.chunkedUpload || rt.settings.chunkSize != s2.chunkSize {
 		add("chunked-upload/chunk-size")
 	}
+	// 这两项只在建栈时被读取(缓存 TTL 与预热清单都挂在栈上),复用栈不会
+	// 重新读取 —— 属冷区,改了必须告警,否则静默失效。
+	if rt.settings.dirCacheTTL != s2.dirCacheTTL {
+		add("dir-cache-ttl")
+	}
+	if !slices.Equal(rt.settings.prewarm, s2.prewarm) {
+		add("prewarm")
+	}
 	if rt.bucket != r2.Bucket {
 		add("bucket")
 	}
@@ -526,9 +571,11 @@ func (rt *serveRuntime) warnColdZone(r2 *config.Resolved, s2 serveSettings) {
 
 // ensureDirAsync 为一个生效前缀异步补建目录 marker;已成功过的前缀跳过。
 func (rt *serveRuntime) ensureDirAsync(eff string) {
-	rt.reloadMu.Lock()
+	// 只取 ensuredMu:本函数会被持 reloadMu 的 applyUserTable 调用,
+	// 再取 reloadMu 会自锁(不可重入)。
+	rt.ensuredMu.Lock()
 	done := rt.ensured[eff]
-	rt.reloadMu.Unlock()
+	rt.ensuredMu.Unlock()
 	if done {
 		return
 	}
@@ -547,9 +594,9 @@ func (rt *serveRuntime) ensureDirAsync(eff string) {
 			rt.logger.Print(i18n.Tf("WARN: creating directory for user space %q failed (users still work; retried on next reload): %v", eff, err))
 			return
 		}
-		rt.reloadMu.Lock()
+		rt.ensuredMu.Lock()
 		rt.ensured[eff] = true
-		rt.reloadMu.Unlock()
+		rt.ensuredMu.Unlock()
 		rt.logger.Print(i18n.Tf("directory created for user space: %s/", eff))
 	}()
 }
@@ -557,54 +604,104 @@ func (rt *serveRuntime) ensureDirAsync(eff string) {
 // watchConfig 监听配置文件所在目录,文件名匹配且写入稳定 debounce 后触发一次
 // onChange(防抖:编辑器一次保存常连发多个事件)。文件被删除(Remove)不退出
 // ——监听的是目录,文件重建后的下一个事件自然恢复(I8)。
-func watchConfig(ctx context.Context, path string, debounce time.Duration, onChange func(), logger *log.Logger) {
-	w, err := fsnotify.NewWatcher()
-	if err != nil {
-		logger.Print(i18n.Tf("WARN: hot reload disabled (fsnotify unavailable): %v", err))
-		return
-	}
+// watchRebuildBackoff 是 watcher 失效后的重建退避。
+const watchRebuildBackoff = 5 * time.Second
+
+// watchConfig 监听配置文件所在目录,文件名匹配且写入稳定 debounce 后触发一次
+// onChange;watcher 失效(目录被替换/事件通道关闭)时退避 rebuildBackoff 后重建。
+// 退避作为参数传入(而非包级变量),测试可缩短而不引入共享可变状态。
+func watchConfig(ctx context.Context, path string, debounce, rebuildBackoff time.Duration, onChange func(), logger *log.Logger) {
 	dir := filepath.Dir(path)
-	if err := w.Add(dir); err != nil {
-		logger.Print(i18n.Tf("WARN: hot reload disabled (cannot watch directory %s): %v", dir, err))
-		_ = w.Close()
-		return
+	// 首次必须在调用方 goroutine 里同步建好:否则「启动后立刻改配置」的
+	// 那个写入会落在 Add 之前被漏掉。失败则交给下面的循环退避重试。
+	w, err := fsnotify.NewWatcher()
+	if err == nil {
+		err = w.Add(dir)
+	}
+	if err != nil {
+		if w != nil {
+			w.Close()
+		}
+		w = nil
+		logger.Print(i18n.Tf("WARN: cannot watch config directory %s: %v; will retry", dir, err))
 	}
 	go func() {
-		defer w.Close()
-		// timer 只被事件循环 goroutine 触达;AfterFunc 一次性触发,fire 里
-		// 不再碰 timer,避免跨 goroutine 读写。
-		var timer *time.Timer
-		fire := func() {
-			onChange()
-		}
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case ev, ok := <-w.Events:
-				if !ok {
+		// 外层循环:watcher 失效(监听目录被整体替换、或事件通道关闭)后重建,
+		// 直到 ctx 结束 —— 否则热加载会静默变哑,运维改配置毫无反应。
+		for ctx.Err() == nil {
+			if w == nil {
+				select {
+				case <-ctx.Done():
 					return
+				case <-time.After(rebuildBackoff):
 				}
-				if filepath.Base(ev.Name) != filepath.Base(path) {
+				var err error
+				w, err = fsnotify.NewWatcher()
+				if err == nil {
+					err = w.Add(dir)
+				}
+				if err != nil {
+					if w != nil {
+						w.Close()
+					}
+					w = nil
+					logger.Print(i18n.Tf("WARN: hot reload unavailable (fsnotify error: %v); will retry", err))
 					continue
 				}
-				switch {
-				case ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) != 0:
-					if timer != nil {
-						timer.Stop()
-					}
-					timer = time.AfterFunc(debounce, fire)
-				case ev.Op&fsnotify.Remove != 0:
-					// 文件被误删:不触发 reload,也不退出;重建后自愈。
-				}
-			case err, ok := <-w.Errors:
-				if !ok {
-					return
-				}
-				logger.Print(i18n.Tf("WARN: config watch error: %v", err))
 			}
+			alive := watchLoop(ctx, w, dir, path, debounce, onChange, logger)
+			w.Close()
+			w = nil
+			if !alive {
+				return
+			}
+			logger.Print(i18n.T("WARN: config watcher lost (directory replaced or watcher closed); rebuilding"))
 		}
 	}()
+}
+
+// watchLoop 消费一个已建好的 watcher,直到 ctx 取消(返回 false)或 watcher
+// 失效需重建(返回 true)。
+func watchLoop(ctx context.Context, w *fsnotify.Watcher, dir, path string, debounce time.Duration, onChange func(), logger *log.Logger) bool {
+	// timer 只被本 goroutine 触达;AfterFunc 一次性触发,fire 里不再碰 timer。
+	var timer *time.Timer
+	fire := func() {
+		onChange()
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case ev, ok := <-w.Events:
+			if !ok {
+				return true
+			}
+			// 监听目录自身被删/改名:对该目录的 watch 随之失效(后续事件不会
+			// 再来),交给外层重建。注意不能把 Create 也算进来 —— 在目录里新建
+			// 文件同样会让目录产生事件,误判会把正常写入变成一次重建。
+			if filepath.Clean(ev.Name) == filepath.Clean(dir) &&
+				ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+				return true
+			}
+			if filepath.Base(ev.Name) != filepath.Base(path) {
+				continue
+			}
+			switch {
+			case ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) != 0:
+				if timer != nil {
+					timer.Stop()
+				}
+				timer = time.AfterFunc(debounce, fire)
+			case ev.Op&fsnotify.Remove != 0:
+				// 文件被误删:不触发 reload,也不退出;重建后自愈。
+			}
+		case err, ok := <-w.Errors:
+			if !ok {
+				return true
+			}
+			logger.Print(i18n.Tf("WARN: config watch error: %v", err))
+		}
+	}
 }
 
 // parseDuration 解析 --dir-cache-ttl。空串或 "0" 表示关闭缓存;
@@ -728,6 +825,18 @@ func pick(changed bool, flagVal, cfgVal string) string {
 		return flagVal
 	}
 	if cfgVal != "" {
+		return cfgVal
+	}
+	return flagVal
+}
+
+// pickList 同 pick,用于 []string 类参数(prewarm):显式 flag > 非空配置 >
+// flag 值(默认 nil —— 配置为空时落回 flag 默认)。
+func pickList(changed bool, flagVal, cfgVal []string) []string {
+	if changed {
+		return flagVal
+	}
+	if len(cfgVal) > 0 {
 		return cfgVal
 	}
 	return flagVal

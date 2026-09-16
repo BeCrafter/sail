@@ -7,10 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"maps"
 	"net/http"
 	"net/url"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -194,22 +192,32 @@ func (s *Server) current() map[string]*userEntry {
 	return m
 }
 
+// allowMethods 是 OPTIONS 的能力头。取 x/net/webdav 对目录与文件的并集,
+// 不区分具体资源——能力头是进程级常量,不该为它去查后端。
+const allowMethods = "OPTIONS, LOCK, GET, HEAD, POST, PUT, DELETE, PROPPATCH, COPY, MOVE, UNLOCK, PROPFIND"
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodOptions {
 		// OPTIONS 是能力探测(返回 DAV/Allow 头),不含任何资源数据;macOS Finder /
 		// Windows WebClient 挂载时会先发一个不带凭据的 OPTIONS,收到 401 后不会带
-		// 凭据重试,而是停在「连接中」。故 OPTIONS 在认证之前放行,交给任一栈
-		// 处理(handler 对 OPTIONS 只回能力头,不触文件系统)。
-		if e := s.anyEntry(); e != nil {
-			e.stack.handler.ServeHTTP(w, r)
-		} else {
-			s.unauthorized(w)
-		}
+		// 凭据重试,而是停在「连接中」。故 OPTIONS 在认证之前放行。
+		//
+		// 这里直接应答、不转给 webdav.Handler:后者会 Stat(reqPath) 才能决定
+		// Allow 头(x/net/webdav/webdav.go),那等于让无凭据请求也能触达后端,
+		// 且 Allow 会随「路由表里首个用户」的数据漂移。
+		start := time.Now()
+		w.Header().Set("DAV", "1, 2")
+		w.Header().Set("MS-Author-Via", "DAV")
+		w.Header().Set("Allow", allowMethods)
+		w.WriteHeader(http.StatusOK)
+		// 不转栈就没有栈里的访问日志中间件,这里补记一条,保持审计完整
+		// (OPTIONS 无凭据,归因恒为 user=-)。
+		s.logRequest(r, http.StatusOK, time.Since(start))
 		return
 	}
 	e, name := s.authenticate(r)
 	if e == nil {
-		s.unauthorized(w)
+		s.unauthorizedWithLog(w, r)
 		return
 	}
 	ctx := context.WithValue(r.Context(), userCtxKey{}, name)
@@ -233,12 +241,11 @@ func (s *Server) authenticate(r *http.Request) (*userEntry, string) {
 	return e, user
 }
 
-func (s *Server) anyEntry() *userEntry {
-	m := s.current()
-	for _, name := range slices.Sorted(maps.Keys(m)) {
-		return m[name]
-	}
-	return nil
+// unauthorizedWithLog 在 401 的同时记一条日志:认证失败此前完全不可见,
+// 排查「谁在用错密码」只能靠猜。
+func (s *Server) unauthorizedWithLog(w http.ResponseWriter, r *http.Request) {
+	s.logRequest(r, http.StatusUnauthorized, 0)
+	s.unauthorized(w)
 }
 
 func (s *Server) unauthorized(w http.ResponseWriter) {
@@ -331,13 +338,30 @@ func destinationPath(r *http.Request) string {
 	return u.Path
 }
 
+// slowRequestThreshold 超过即标记 SLOW,便于在日志里直接筛出慢请求。
+const slowRequestThreshold = time.Second
+
 func (s *Server) logRequest(r *http.Request, status int, elapsed time.Duration) {
 	if s.logger == nil {
 		return
 	}
 	// user= 是审计归因:已认证请求取自路由表命中项;OPTIONS 等未认证放行
-	// 请求记为 "-"。
-	s.logger.Printf("%s %s %d %s user=%s", r.Method, r.URL.Path, status, elapsed.Round(time.Millisecond), requestUser(r.Context()))
+	// 请求记为 "-"。cache=命中/未命中 用于判断目录缓存是否真的在起作用;
+	// 上传被 413/507 拒时附上原因,省得再去翻响应体。
+	line := fmt.Sprintf("%s %s %d %s user=%s", r.Method, r.URL.Path, status, elapsed.Round(time.Millisecond), requestUser(r.Context()))
+	if st := stateOf(r.Context()); st != nil {
+		hits, misses := st.cacheStats()
+		if hits+misses > 0 {
+			line += fmt.Sprintf(" cache=%d/%d", hits, misses)
+		}
+		if st.fatalErr() != nil {
+			line += fmt.Sprintf(" rejected=%v", st.fatalErr())
+		}
+	}
+	if elapsed >= slowRequestThreshold {
+		line += " SLOW"
+	}
+	s.logger.Print(line)
 }
 
 // stateCtxKey 是请求级状态在 context 中的键。
@@ -363,8 +387,10 @@ func (s *requestState) overridesContentType() bool {
 }
 
 func (s *requestState) setFatal(err error) {
-	// 只登记能映射成明确状态码的错误;其余交给 webdav 的默认映射。
-	if !errors.Is(err, vfs.ErrTooLarge) && !errors.Is(err, vfs.ErrInsufficientStorage) {
+	// 只登记能映射成明确状态码的错误(vfs 契约的五类);其余交给 webdav 的
+	// 默认映射 —— 后端真实故障仍是 5xx,不会被这里吞掉。
+	if !errors.Is(err, vfs.ErrTooLarge) && !errors.Is(err, vfs.ErrInsufficientStorage) &&
+		!errors.Is(err, vfs.ErrNotExist) && !errors.Is(err, vfs.ErrExist) && !errors.Is(err, vfs.ErrNotSupported) {
 		return
 	}
 	s.mu.Lock()
@@ -372,6 +398,21 @@ func (s *requestState) setFatal(err error) {
 	if s.fatal == nil {
 		s.fatal = err
 	}
+}
+
+// fatalErr 返回本请求登记的上传拒绝原因(413/507),无则 nil。
+func (st *requestState) fatalErr() error {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.fatal
+}
+
+// cacheStats 返回请求级缓存的命中/未命中数。
+func (st *requestState) cacheStats() (hits, misses int) {
+	if st.cache == nil {
+		return 0, 0
+	}
+	return st.cache.stats()
 }
 
 func stateOf(ctx context.Context) *requestState {
@@ -449,6 +490,25 @@ func (w *guardWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
+// ReadFrom 让 io.Copy(GET 的响应体搬运)用上底层 ResponseWriter 的
+// ReaderFrom(通常是 sendfile/大缓冲路径);不实现的话每次拷贝退化为
+// 32KB 缓冲循环。注意转发前先补齐状态码,且不得递归调用自身。
+func (w *guardWriter) ReadFrom(src io.Reader) (int64, error) {
+	if rf, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		w.state.mu.Lock()
+		muted := w.state.muted
+		w.state.mu.Unlock()
+		if muted {
+			return io.Copy(io.Discard, src) // 已被 413/507 接管:丢弃剩余数据
+		}
+		if w.status == 0 {
+			w.WriteHeader(http.StatusOK)
+		}
+		return rf.ReadFrom(src)
+	}
+	return io.Copy(struct{ io.Writer }{w}, src)
+}
+
 func (w *guardWriter) Write(p []byte) (int, error) {
 	w.state.mu.Lock()
 	muted := w.state.muted
@@ -470,6 +530,12 @@ func writeGuardResponse(w *guardWriter, cause error) {
 		status = http.StatusRequestEntityTooLarge
 	case errors.Is(cause, vfs.ErrInsufficientStorage):
 		status = http.StatusInsufficientStorage
+	case errors.Is(cause, vfs.ErrNotExist):
+		status = http.StatusNotFound
+	case errors.Is(cause, vfs.ErrExist):
+		status = http.StatusMethodNotAllowed
+	case errors.Is(cause, vfs.ErrNotSupported):
+		status = http.StatusNotImplemented
 	}
 	w.ResponseWriter.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.ResponseWriter.WriteHeader(status)
@@ -506,7 +572,13 @@ func guidance(cause error, maxUploadText string) string {
   1) 清理 --staging-dir 指向的目录;
   2) 或将 --staging-dir 指向空间更大的磁盘后重启。
 `
+	case errors.Is(cause, vfs.ErrNotExist):
+		return "资源不存在\n"
+	case errors.Is(cause, vfs.ErrExist):
+		return "目标已存在\n"
+	case errors.Is(cause, vfs.ErrNotSupported):
+		return "该操作在此路径上不受支持\n"
 	default:
-		return "上传失败\n"
+		return "操作失败\n"
 	}
 }

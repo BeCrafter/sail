@@ -17,7 +17,7 @@ func (f *FS) Usage(ctx context.Context) (int64, error) {
 	var total int64
 	paginator := s3.NewListObjectsV2Paginator(f.client, &s3.ListObjectsV2Input{
 		Bucket: aws.String(f.bucket),
-		Prefix: aws.String(f.prefix),
+		Prefix: aws.String(f.rootPrefix()),
 	})
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)

@@ -149,3 +149,53 @@ func TestQuotaHotUpdateOnLiveGateway(t *testing.T) {
 		t.Errorf("热更新不得影响既有对象,实际: %v %v", ok, obj.Data)
 	}
 }
+
+// RFC 4331:目录的 PROPFIND 应播报配额(quota-used-bytes / quota-available-bytes),
+// 挂载端(Finder / 资源管理器)据此显示「剩余空间」。
+func TestPropfindReportsQuotaProperties(t *testing.T) {
+	g := newQuotaGateway(t, 1000)
+
+	// 先写 300 字节:首个写请求触发一次统计,提交后再累加增量。
+	if resp := g.do(t, "PUT", "/a.bin", strings.Repeat("x", 300), nil); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT 期望 201,实际 %d", resp.StatusCode)
+	}
+
+	resp := g.do(t, "PROPFIND", "/", propfindAll, map[string]string{"Depth": "0"})
+	body := bodyOf(t, resp)
+	if !strings.Contains(body, "quota-available-bytes") || !strings.Contains(body, "quota-used-bytes") {
+		t.Fatalf("PROPFIND 应含 RFC 4331 配额属性,实际:\n%s", body)
+	}
+	if !strings.Contains(body, ">700<") {
+		t.Errorf("可用字节应为 1000-300=700,实际响应:\n%s", body)
+	}
+	if !strings.Contains(body, ">300<") {
+		t.Errorf("已用字节应为 300,实际响应:\n%s", body)
+	}
+}
+
+// 未配配额(limit<=0)时不播报配额属性:不给客户端一个假的「剩余空间」。
+func TestPropfindOmitsQuotaWhenUnlimited(t *testing.T) {
+	g := newQuotaGateway(t, 0)
+	resp := g.do(t, "PROPFIND", "/", propfindAll, map[string]string{"Depth": "0"})
+	if body := bodyOf(t, resp); strings.Contains(body, "quota-") {
+		t.Errorf("未配配额时不应播报配额属性:\n%s", body)
+	}
+}
+
+// 播报配额不得改变 PROPPATCH 语义:带外属性仍被拒(207 Multi-Status +
+// 属性级 403),与未实现 DeadPropsHolder 时一致。
+func TestProppatchStillForbiddenWithQuota(t *testing.T) {
+	g := newQuotaGateway(t, 1000)
+	if r := g.do(t, "PUT", "/a.bin", "hello", nil); r.StatusCode != http.StatusCreated {
+		t.Fatalf("前置 PUT 失败: %d", r.StatusCode)
+	}
+	body := `<?xml version="1.0"?><D:propertyupdate xmlns:D="DAV:"><D:set><D:prop>` +
+		`<Z:foo xmlns:Z="z"/></D:prop></D:set></D:propertyupdate>`
+	resp := g.do(t, "PROPPATCH", "/a.bin", body, nil)
+	if resp.StatusCode != http.StatusMultiStatus {
+		t.Fatalf("PROPPATCH 期望 207(属性级 403),实际 %d: %s", resp.StatusCode, bodyOf(t, resp))
+	}
+	if b := bodyOf(t, resp); !strings.Contains(b, "403") {
+		t.Errorf("带外属性应被拒(403),实际:\n%s", b)
+	}
+}

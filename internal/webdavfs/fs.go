@@ -7,13 +7,18 @@ package webdavfs
 
 import (
 	"context"
+	"encoding/xml"
 	"errors"
 	"io"
+	"log"
 	"mime"
+	"net/http"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/BeCrafter/sail/internal/vfs"
@@ -32,19 +37,43 @@ type FileSystem struct {
 	// 跨区域可达 ~0.9s;超大目录可达数十秒);缓存吸收这层重复读,
 	// 配合 stale-while-revalidate 与并发合并,不与后端分页次数相乘。
 	dirs *listingCache
+	// logger 用于异步路径的告警(后台刷新失败、预热失败);nil = 不打日志。
+	logger *log.Logger
+	// quota 是内核(quotafs)可选的配额只读出口,用于在 PROPFIND 里播报
+	// RFC 4331 的配额属性;nil = 不播报。
+	quota quotaReporter
+}
+
+// quotaReporter 由内核可选实现:提供配额口径的只读快照(见 quotafs.QuotaUsage)。
+// 与 writeAdmitter 一样是可选能力断言 —— 不加进 vfs.FileSystem 的必需方法集。
+type quotaReporter interface {
+	QuotaUsage() (used, avail int64, ok bool)
+}
+
+// SetLogger 注入异步路径的日志器。须在开始服务前调用一次(只在构造期写入,
+// 不做并发保护)。
+func (fs *FileSystem) SetLogger(l *log.Logger) {
+	fs.logger = l
+	if fs.dirs != nil {
+		fs.dirs.logger = l
+	}
 }
 
 // New 包装内核。内核与壳共享同一 bucket,壳不持有任何 S3 客户端。
 // 不开目录列表缓存(单次请求内的重复 Stat 仍走请求级 readCache)。
 func New(core vfs.FileSystem) *FileSystem {
-	return &FileSystem{core: core}
+	fs := &FileSystem{core: core}
+	if r, ok := core.(quotaReporter); ok {
+		fs.quota = r
+	}
+	return fs
 }
 
 // NewWithListingCache 同 New,但开启服务级目录列表缓存。
 // ttl <= 0 等同 New(不缓存)。
 // 预热通过 Server 的 Config.PrewarmDirs 驱动(见 Server.prewarmDirs)。
 func NewWithListingCache(core vfs.FileSystem, ttl time.Duration) *FileSystem {
-	fs := &FileSystem{core: core}
+	fs := New(core)
 	if ttl > 0 {
 		fs.dirs = newListingCache(ttl)
 	}
@@ -112,6 +141,9 @@ func (fs *FileSystem) OpenFile(ctx context.Context, name string, flag int, perm 
 	if flag&(os.O_WRONLY|os.O_RDWR|os.O_CREATE|os.O_TRUNC) != 0 {
 		w, err := fs.core.OpenWrite(ctx, logical)
 		if err != nil {
+			// 登记契约错误类(如根路径的 ErrNotSupported),让壳输出 501
+			// 而不是 webdav 对 OpenFile 失败的默认映射。
+			registerFatal(ctx, err)
 			return nil, err
 		}
 		if opt, ok := w.(vfs.WriteOptioner); ok {
@@ -175,6 +207,9 @@ func (fs *FileSystem) Rename(ctx context.Context, oldName, newName string) error
 		return os.ErrInvalid
 	}
 	if err := fs.core.Rename(ctx, oldLogical, newLogical); err != nil {
+		// 源不存在等契约错误在这里登记,否则 x/net 的全局错误处理会把它
+		// 映射成 502(实测),而契约要求 404。
+		registerFatal(ctx, err)
 		return err
 	}
 	invalidateCache(ctx, oldLogical)
@@ -192,6 +227,9 @@ func (fs *FileSystem) stat(ctx context.Context, logical string) (vfs.FileInfo, e
 		if fi, ok := c.get(logical); ok {
 			return fi, nil
 		}
+		if c.getNeg(logical) {
+			return vfs.FileInfo{}, &os.PathError{Op: "stat", Path: logical, Err: vfs.ErrNotExist}
+		}
 	}
 	if fs.dirs != nil && fs.dirs.isDir(logical) {
 		fi := vfs.FileInfo{Name: davBaseName(logical), Path: logical, IsDir: true}
@@ -202,6 +240,9 @@ func (fs *FileSystem) stat(ctx context.Context, logical string) (vfs.FileInfo, e
 	}
 	fi, err := fs.core.Stat(ctx, logical)
 	if err != nil {
+		if c := cacheOf(ctx); c != nil && errors.Is(err, vfs.ErrNotExist) {
+			c.putNotExist(logical)
+		}
 		return vfs.FileInfo{}, err
 	}
 	if c := cacheOf(ctx); c != nil {
@@ -282,12 +323,23 @@ func (fs *FileSystem) prewarm(ctx context.Context, dirs []string) {
 
 func (fs *FileSystem) prewarmLoop(ctx context.Context, logical string) {
 	for {
-		fis, err := fs.fetchListing(ctx, logical)
-		if err == nil {
-			fs.dirs.put(logical, fis)
+		// 走缓存的 singleflight 路径:与用户请求触发的刷新互斥,同一目录
+		// 不会同时跑两份全量列举;顺带拿到本轮耗时用于安排下一轮。
+		start := time.Now()
+		_, err := fs.dirs.fetch(logical, func() ([]vfs.FileInfo, error) {
+			return fs.fetchListing(ctx, logical)
+		})
+		last := time.Since(start)
+		if err != nil && fs.logger != nil {
+			fs.logger.Printf("webdavfs: prewarm of %s failed (will retry): %v", logical, err)
 		}
-		// 按 TTL 的一半刷新,保证过期前就有新值,读路径几乎总能命中新鲜值。
+
+		// 刷新间隔:默认 TTL 的一半(过期前就有新值),但绝不快于上一轮耗时的
+		// 两倍 —— 列举本身要数十秒的大目录,不参考耗时就会背靠背打后端。
 		interval := fs.dirs.ttl / 2
+		if min := 2 * last; min > interval {
+			interval = min
+		}
 		if interval < time.Second {
 			interval = time.Second
 		}
@@ -308,6 +360,12 @@ func (fs *FileSystem) prewarmLoop(ctx context.Context, logical string) {
 type listingCache struct {
 	ttl     time.Duration
 	maxDirs int
+	// maxBytes 是本实例缓存的内存预算(估算值);多用户下每个用户一份缓存,
+	// 条目数上限(512)在大目录上仍可能吃掉几百 MB,故再按字节兜一层。
+	maxBytes int64
+	bytes    int64 // 当前估算占用
+	// logger 用于后台刷新失败的告警;nil = 静默(由 SetLogger 注入)。
+	logger *log.Logger
 
 	mu       sync.Mutex
 	items    map[string]listingEntry
@@ -319,6 +377,8 @@ type listingCache struct {
 type listingEntry struct {
 	fis     []vfs.FileInfo
 	expires time.Time
+	// bytes 是该条目占用的估算值(含切片头与各字段字符串)。
+	bytes int64
 	// used 是该条目最近一次被读取的序号,用于淘汰最久未用者。
 	used int64
 }
@@ -332,10 +392,18 @@ type inflightCall struct {
 
 const defaultMaxCachedDirs = 512
 
+// defaultMaxCachedBytes 是单个缓存实例的默认内存预算。每条 FileInfo 按
+// fileInfoCost 估算(切片头 + 几个字符串字段的开销),64MiB 约合 30 万条。
+const (
+	defaultMaxCachedBytes = 64 << 20
+	fileInfoCost          = 96
+)
+
 func newListingCache(ttl time.Duration) *listingCache {
 	return &listingCache{
 		ttl:      ttl,
 		maxDirs:  defaultMaxCachedDirs,
+		maxBytes: defaultMaxCachedBytes,
 		items:    map[string]listingEntry{},
 		inflight: map[string]*inflightCall{},
 		now:      time.Now,
@@ -389,13 +457,18 @@ func (c *listingCache) put(logical string, fis []vfs.FileInfo) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	k := norm(logical)
-	c.items[k] = listingEntry{fis: copyFis, expires: c.now().Add(c.ttl), used: c.now().UnixNano()}
+	if old, ok := c.items[k]; ok {
+		c.bytes -= old.bytes
+	}
+	size := int64(len(copyFis))*fileInfoCost + 64
+	c.items[k] = listingEntry{fis: copyFis, expires: c.now().Add(c.ttl), used: c.now().UnixNano(), bytes: size}
+	c.bytes += size
 	c.evictLocked()
 }
 
 // evictLocked 在超出 maxDirs 时淘汰最久未使用的条目。调用方需持有锁。
 func (c *listingCache) evictLocked() {
-	for len(c.items) > c.maxDirs {
+	for len(c.items) > c.maxDirs || c.bytes > c.maxBytes {
 		oldestKey, oldestUsed := "", int64(0)
 		first := true
 		for k, e := range c.items {
@@ -406,6 +479,7 @@ func (c *listingCache) evictLocked() {
 		if oldestKey == "" {
 			return
 		}
+		c.bytes -= c.items[oldestKey].bytes
 		delete(c.items, oldestKey)
 	}
 }
@@ -435,6 +509,9 @@ func (c *listingCache) fetch(logical string, fetchFn func() ([]vfs.FileInfo, err
 }
 
 // refreshAsync 在后台刷新一条已过期的缓存;同一路径已有在途刷新时不重复触发。
+//
+// 登记必须在起 goroutine **之前**完成(同一临界区内),否则并发请求各自
+// 起一份全量列举 —— 大目录下就是几百次分页请求,N 份。
 func (c *listingCache) refreshAsync(logical string, fetchFn func() ([]vfs.FileInfo, error)) {
 	k := norm(logical)
 	c.mu.Lock()
@@ -442,41 +519,90 @@ func (c *listingCache) refreshAsync(logical string, fetchFn func() ([]vfs.FileIn
 		c.mu.Unlock()
 		return
 	}
+	call := &inflightCall{done: make(chan struct{})}
+	c.inflight[k] = call
 	c.mu.Unlock()
-	go c.fetch(k, fetchFn)
+
+	go func() {
+		defer close(call.done)
+		fis, err := fetchFn()
+		if err == nil {
+			c.put(k, fis)
+		} else if c.logger != nil {
+			// 失败不更新缓存(条目仍为过期态),但别静默:否则下一请求又起一份。
+			c.logger.Printf("webdavfs: background refresh of %s failed, keeping previous listing: %v", k, err)
+		}
+		call.fis, call.err = fis, err
+		c.mu.Lock()
+		delete(c.inflight, k)
+		c.mu.Unlock()
+	}()
 }
 
-// isDir 判定某逻辑路径是否已在缓存中登记为一个「已列举过的目录」(即确认存在)。
-// 用于让 Stat 直接命中,省掉内核的存在性探测请求。
+// isDir 判定某逻辑路径是否已登记为一个「列举过的目录」。用于让 Stat 直接
+// 命中,省掉内核的存在性探测请求。刻意用 has(不看过期):条目过期只说明
+// 「列表可能要刷新」,不改变「这是个目录」的事实 —— 用 get 会让 Stat 在
+// SWR 窗口内回落一次后端 HEAD,与 readDir 的 stale 行为不一致。
 func (c *listingCache) isDir(logical string) bool {
-	_, ok := c.get(logical)
+	return c.has(logical)
+}
+
+// has 判定路径是否在缓存中(不论是否过期)。
+func (c *listingCache) has(logical string) bool {
+	k := norm(logical)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.items[k]
 	return ok
 }
 
-// invalidatePath 失效 path 自身、其父目录,以及其子树的列表缓存。
-// 语义与请求级 readCache.invalidate 一致,但额外删除「父目录」条目:
-// 在 /a/b 下新建文件会改变 /a 的列表,只失效 /a/b 不够。
-// 键已归一化(无尾随斜杠),这里按同一规范比较。
+// invalidatePath 失效 path 自身与子树的列表缓存,并沿父链上溯到第一个
+// **已登记**的祖先为止。
+//
+// 为什么不无脑清所有祖先:一次深层写入(PUT /a/b/c.txt)会让根缓存一起失效,
+// 而根目录在真实桶里可能有几十万条 —— 下次 PROPFIND / 要重新分页几十秒。
+// 事实上根列表里只有第一级目录名,只要那层目录存在于写入前,根就不会变。
+// 反向地:若某个中间目录此前从未被列举过(可能是这次写入刚建出来的),
+// 它的父目录列表就可能变化,必须继续上溯。
+// 键已归一化(无尾随斜杠,根为 "/"),这里按同一规范比较。
 func (c *listingCache) invalidatePath(logical string) {
 	trimmed := norm(logical)
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// 自身与子树。
 	for k := range c.items {
-		// 自身、子树,或祖先(k 是 trimmed 的祖先:根,或 trimmed 以 k+"/" 开头)。
-		// 归一化后键无尾随斜杠、根为 "/",故祖先判定必须特判根。
-		if k == trimmed || strings.HasPrefix(k, trimmed+"/") || isAncestorKey(k, trimmed) {
+		if k == trimmed || strings.HasPrefix(k, trimmed+"/") {
+			c.bytes -= c.items[k].bytes
 			delete(c.items, k)
 		}
 	}
+	// 沿父链上溯:删掉父目录条目;若它此前未登记(存在性未被确认),
+	// 继续上溯一级;遇到已登记的祖先即停 —— 更上层列表里只有目录名。
+	parent := parentKey(trimmed)
+	for {
+		e, known := c.items[parent]
+		if known {
+			c.bytes -= e.bytes
+			delete(c.items, parent)
+			return
+		}
+		if parent == "/" {
+			return
+		}
+		parent = parentKey(parent)
+	}
 }
 
-// isAncestorKey 判定 k 是否为 trimmed 的祖先目录(含根)。
-// 两者均为归一化键(无尾随斜杠,根为 "/")。
-func isAncestorKey(k, trimmed string) bool {
+// parentKey 返回归一化键的父目录键(根或一级路径的父为 "/")。
+func parentKey(k string) string {
 	if k == "/" {
-		return trimmed != "/"
+		return "/"
 	}
-	return strings.HasPrefix(trimmed, k+"/")
+	i := strings.LastIndex(k, "/")
+	if i <= 0 {
+		return "/"
+	}
+	return k[:i]
 }
 
 // davBaseName 取逻辑路径最后一段(忽略尾随 "/");根返回 ""。
@@ -592,6 +718,37 @@ func (f *davFile) Stat() (os.FileInfo, error) {
 	return f.info, nil
 }
 
+// DeadProps 实现 webdav.DeadPropsHolder:在目录上播报 RFC 4331 的配额属性,
+// 让 Finder / 资源管理器能显示「剩余空间」。只对目录播报(文件不参与 allprop,
+// 也避免每项都带配额数值)。读的是 quotafs 的缓存快照,零额外后端调用。
+func (f *davFile) DeadProps() (map[xml.Name]webdav.Property, error) {
+	if !f.info.IsDir() || f.fs.quota == nil {
+		return nil, nil
+	}
+	used, avail, ok := f.fs.quota.QuotaUsage()
+	if !ok {
+		return nil, nil
+	}
+	availName := xml.Name{Space: "DAV:", Local: "quota-available-bytes"}
+	usedName := xml.Name{Space: "DAV:", Local: "quota-used-bytes"}
+	return map[xml.Name]webdav.Property{
+		availName: {XMLName: availName, InnerXML: []byte(strconv.FormatInt(avail, 10))},
+		usedName:  {XMLName: usedName, InnerXML: []byte(strconv.FormatInt(used, 10))},
+	}, nil
+}
+
+// Patch 让带外属性保持不可改:与「未实现本接口」时完全一致 —— 全部 403。
+// 契约要求返回 Propstat 而非 error(返回 error 会被映射成 500)。
+func (f *davFile) Patch(patches []webdav.Proppatch) ([]webdav.Propstat, error) {
+	pstat := webdav.Propstat{Status: http.StatusForbidden}
+	for _, p := range patches {
+		for _, prop := range p.Props {
+			pstat.Props = append(pstat.Props, webdav.Property{XMLName: prop.XMLName})
+		}
+	}
+	return []webdav.Propstat{pstat}, nil
+}
+
 func (f *davFile) Read(p []byte) (int, error) {
 	if err := f.ensureReader(); err != nil {
 		return 0, err
@@ -673,6 +830,9 @@ func (f *davFile) Close() error {
 				return err
 			}
 			invalidateCache(f.ctx, f.name)
+			// 与 Stat() 提交分支同样要做服务级目录缓存失效:漏掉它,
+			// COPY/MOVE 落地的对象在缓存 TTL 内不会出现在 PROPFIND 里。
+			f.fs.invalidateDir(f.name)
 		}
 		return w.Close()
 	}
@@ -714,22 +874,64 @@ func (f *davFile) ensureReader() error {
 type readCache struct {
 	mu sync.RWMutex
 	m  map[string]vfs.FileInfo
+
+	hits   atomic.Int64
+	misses atomic.Int64
 }
 
 func newReadCache() *readCache {
 	return &readCache{m: map[string]vfs.FileInfo{}}
 }
 
+// get 返回正向命中(已确认存在的元信息);负缓存条目不在这里返回。
 func (c *readCache) get(logical string) (vfs.FileInfo, bool) {
+	c.mu.RLock()
+	fi, ok := c.m[logical]
+	c.mu.RUnlock()
+	if !ok || fi.Path == "" {
+		c.misses.Add(1)
+		return vfs.FileInfo{}, false
+	}
+	c.hits.Add(1)
+	return fi, true
+}
+
+// stats 返回命中/未命中数(供访问日志观测缓存效果)。
+func (c *readCache) stats() (hits, misses int) {
+	return int(c.hits.Load()), int(c.misses.Load())
+}
+
+// getNeg 判定路径是否已被本请求确认为「不存在」。
+func (c *readCache) getNeg(logical string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	fi, ok := c.m[logical]
-	return fi, ok
+	return ok && fi.Path == ""
 }
+
+// putNotExist 记录一条负缓存:同一请求内对同一路径的重复探测(壳为
+// MOVE/COPY 先探一次目标,webdav 随后还会再 Stat 一次)不再打后端。
+// 零值 FileInfo(Path=="")即负条目。
+func (c *readCache) putNotExist(logical string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.m) >= maxReadCacheEntries {
+		return
+	}
+	c.m[logical] = vfs.FileInfo{}
+}
+
+// maxReadCacheEntries 是请求级缓存的条目上限。十万级目录的一次 PROPFIND
+// 会给每个子项登记一条;上限之内足够覆盖「同一请求内重复探测」的收益,
+// 超出则不再登记 —— 它只是加速,不是正确性依赖,不能被大目录撑爆内存。
+const maxReadCacheEntries = 8192
 
 func (c *readCache) put(fi vfs.FileInfo) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if len(c.m) >= maxReadCacheEntries {
+		return
+	}
 	c.m[fi.Path] = fi
 }
 
@@ -737,6 +939,9 @@ func (c *readCache) putAll(fis []vfs.FileInfo) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, fi := range fis {
+		if len(c.m) >= maxReadCacheEntries {
+			return
+		}
 		c.m[fi.Path] = fi
 	}
 }

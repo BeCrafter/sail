@@ -475,10 +475,8 @@ func (f *FS) Rename(ctx context.Context, oldPath, newPath string) error {
 	}); err != nil {
 		return fmt.Errorf("s3fs: 复制 %s -> %s 失败: %w", oldLogical, newLogical, err)
 	}
-	if _, err := f.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(f.bucket),
-		Key:    aws.String(oldKey),
-	}); err != nil {
+	// 删除源对象统一走 s3del(单键会走它的直删快路径,代价与直接调用一致)。
+	if err := f.deleteObjects(ctx, []string{oldKey}); err != nil {
 		return fmt.Errorf("s3fs: 删除源对象 %s 失败: %w", oldLogical, err)
 	}
 	return nil
@@ -557,6 +555,17 @@ func (f *FS) key(logical string) string {
 	return s3path.JoinKey(f.prefix, strings.TrimPrefix(logical, "/"))
 }
 
+// rootPrefix 返回本核前缀的「目录边界」形态:非空时补尾 "/"。
+// S3 的 Prefix 是字面匹配,少了这个斜杠,`alice` 会把 `alice2/...` 的对象
+// 也算进来(前缀统计会串到相邻用户的空间);ReadDir 对每个目录都做了同样的
+// 边界处理,这里保持一致。空前缀(桶根)保持空 = 整桶。
+func (f *FS) rootPrefix() string {
+	if f.prefix != "" && !strings.HasSuffix(f.prefix, "/") {
+		return f.prefix + "/"
+	}
+	return f.prefix
+}
+
 // normalize 规范化逻辑路径:强制以 "/" 开头,拒绝任何 ".." 段(越界),
 // 保留尾随 "/"(目录标记对象),根固定为 "/"。
 func normalize(p string) (string, error) {
@@ -570,6 +579,12 @@ func normalize(p string) (string, error) {
 		if seg == ".." {
 			return "", notExist(p)
 		}
+	}
+	// 保留前缀(.sail/):列目录时本就过滤,这里再堵住「直接按路径访问」——
+	// 否则客户端不仅能读到自己的分片部件,还能删掉部件把文件变成损坏态
+	// (manifest 还在、内容没了)。一律按「不存在」处理,与列目录的隐藏语义一致。
+	if first := strings.SplitN(strings.TrimPrefix(p, "/"), "/", 2)[0]; first == sailDir {
+		return "", notExist(p)
 	}
 	trailing := len(p) > 1 && strings.HasSuffix(p, "/")
 	clean := path.Clean(p)

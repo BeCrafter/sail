@@ -274,11 +274,53 @@ func TestServeRuntimeEnsureFailureOnlyWarns(t *testing.T) {
 
 	f.rt.ensureDirAsync("team/alice-space/")
 	f.waitForLog(t, "WARN: creating directory for user space")
-	f.rt.reloadMu.Lock()
+	f.rt.ensuredMu.Lock()
 	ensured := f.rt.ensured["team/alice-space/"]
-	f.rt.reloadMu.Unlock()
+	f.rt.ensuredMu.Unlock()
 	if ensured {
 		t.Error("失败的 ensure 不得登记为已完成")
+	}
+}
+
+// 场景:经 reload() 的热加载不得死锁 —— reload 持 reloadMu 调用
+// applyUserTable,后者在启用多用户时会调 ensureDirAsync;若它再取
+// reloadMu 就会自锁(不可重入)。这条覆盖整条 reload 链路(既有测试
+// 都只直调 applyUserTable,漏掉了这条路径)。
+func TestReloadDoesNotDeadlock(t *testing.T) {
+	f := newRuntimeFixture(t, usersFrom("alice"))
+
+	serveBody := "      users:\n" +
+		"        - name: alice\n          password: pw-alice\n          prefix: alice-space/\n" +
+		"        - name: bob\n          password: pw-bob\n          prefix: bob-space/\n"
+	writeServeConfigWithServe(t, "b", serveBody)
+
+	runReload := func() {
+		t.Helper()
+		done := make(chan struct{})
+		go func() {
+			f.rt.reload()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Fatal("reload 死锁:3s 内未返回")
+		}
+	}
+
+	runReload()
+	// 新用户 bob 生效。
+	if resp := f.doAs(t, "bob", "pw-bob", "PUT", "/b.txt", "b"); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("reload 后 bob PUT 期望 201,实际 %d", resp.StatusCode)
+	}
+	// 再改一次(换 alice 密码,并保留 bob):reloadMu 未被上次 reload 卡住。
+	serveBody2 := "      users:\n" +
+		"        - name: alice\n          password: pw-alice-2\n          prefix: alice-space/\n" +
+		"        - name: bob\n          password: pw-bob\n          prefix: bob-space/\n"
+	writeServeConfigWithServe(t, "b", serveBody2)
+	runReload()
+	if resp := f.doAs(t, "alice", "pw-alice-2", "HEAD", "/", ""); resp.StatusCode == http.StatusUnauthorized {
+		t.Error("第二次 reload 未生效(reloadMu 可能仍被占用)")
 	}
 }
 
@@ -321,7 +363,9 @@ func TestWatchConfigDebounceRemoveAndSelfHeal(t *testing.T) {
 			close(once)
 		}
 	}
-	watchConfig(context.Background(), cfg, 80*time.Millisecond, onChange, log.New(os.Stderr, "", 0))
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	watchConfig(ctx, cfg, 80*time.Millisecond, watchRebuildBackoff, onChange, log.New(os.Stderr, "", 0))
 
 	// 写入 → 防抖后触发一次。
 	if err := os.WriteFile(cfg, []byte("v: 2\n"), 0o600); err != nil {
@@ -370,7 +414,7 @@ func mustBody(t *testing.T, resp *http.Response) string {
 // 既有对象与在途连接不受影响,后续准入立即按新口径计算。
 func TestServeRuntimeQuotaHotUpdate(t *testing.T) {
 	users := usersFrom("alice")
-	users[0].Quota = "1KiB"
+	users[0].Quota = "1024"
 	f := newRuntimeFixture(t, users)
 
 	if resp := f.doAs(t, "alice", "pw-alice", "PUT", "/a.txt", strings.Repeat("x", 800)); resp.StatusCode != http.StatusCreated {
@@ -382,7 +426,7 @@ func TestServeRuntimeQuotaHotUpdate(t *testing.T) {
 	}
 	// 热更新配额为 2KiB:同一用户栈,无需重建。
 	table2 := usersFrom("alice")
-	table2[0].Quota = "2KiB"
+	table2[0].Quota = "2048"
 	before := f.rt.stacks["team/alice-space"].fs
 	if err := f.rt.applyUserTable(table2); err != nil {
 		t.Fatalf("applyUserTable 失败: %v", err)
@@ -397,4 +441,148 @@ func TestServeRuntimeQuotaHotUpdate(t *testing.T) {
 	if obj, ok := f.s3.Get("b", "team/alice-space/a.txt"); !ok || string(obj.Data) != strings.Repeat("x", 800) {
 		t.Error("热更新不得影响既有对象")
 	}
+}
+
+// --- mergeServe:dir-cache-ttl / prewarm 的配置落点(与同名 flag 一一对应) ---
+
+func TestMergeServeDirCacheTTLAndPrewarm(t *testing.T) {
+	cases := []struct {
+		name        string
+		cfgTTL      string
+		cfgPrewarm  []string
+		flagTTL     string
+		flagPrewarm []string
+		chgTTL      bool
+		chgPrewarm  bool
+		wantTTL     time.Duration
+		wantPrewarm []string
+		wantErr     string
+	}{
+		{name: "配置为空落回 flag 默认", wantTTL: 60 * time.Second},
+		{name: "配置生效", cfgTTL: "5m", cfgPrewarm: []string{"/a", "/b"}, wantTTL: 5 * time.Minute, wantPrewarm: []string{"/a", "/b"}},
+		{name: "flag 显式覆盖配置", cfgTTL: "5m", cfgPrewarm: []string{"/a"}, chgTTL: true, flagTTL: "30s", chgPrewarm: true, flagPrewarm: []string{"/x"}, wantTTL: 30 * time.Second, wantPrewarm: []string{"/x"}},
+		{name: "0 表示关闭缓存", cfgTTL: "0", wantTTL: 0},
+		{name: "非法 TTL fail-loud", cfgTTL: "nope", wantErr: "invalid --dir-cache-ttl"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := &config.Resolved{ProfileName: "prod", Bucket: "b"}
+			r.Serve.User, r.Serve.Password = "alice", "pw"
+			r.Serve.DirCacheTTL = c.cfgTTL
+			r.Serve.Prewarm = c.cfgPrewarm
+			o := defaultFlags()
+			if c.chgTTL {
+				o.dirCacheTTL = c.flagTTL
+			}
+			if c.chgPrewarm {
+				o.prewarm = c.flagPrewarm
+			}
+			chg := func(f string) bool {
+				return (c.chgTTL && f == "dir-cache-ttl") || (c.chgPrewarm && f == "prewarm")
+			}
+			s, err := mergeServe(o, r, chg)
+			if c.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+					t.Fatalf("期望错误含 %q,实际 %v", c.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("期望通过,实际报错: %v", err)
+			}
+			if s.dirCacheTTL != c.wantTTL {
+				t.Errorf("dirCacheTTL = %v,期望 %v", s.dirCacheTTL, c.wantTTL)
+			}
+			if len(s.prewarm) != len(c.wantPrewarm) {
+				t.Errorf("prewarm = %v,期望 %v", s.prewarm, c.wantPrewarm)
+			}
+		})
+	}
+}
+
+// --- 批 2:冷区告警 / 退役清理 / watcher 重建 ---
+
+// dir-cache-ttl 与 prewarm 只在建栈时被读取(挂在栈上),改了不会生效;
+// 它们必须进冷区告警,否则运维改完配置毫无反应还以为生效了。
+func TestWarnColdZoneIncludesCacheAndPrewarm(t *testing.T) {
+	f := newRuntimeFixture(t, usersFrom("alice"))
+
+	r2 := &config.Resolved{ProfileName: "prod", Bucket: "b"}
+	s2 := f.rt.settings
+	s2.dirCacheTTL = f.rt.settings.dirCacheTTL + time.Minute
+	s2.prewarm = []string{"/hot"}
+
+	f.rt.warnColdZone(r2, s2)
+	out := f.logs.String()
+	if !strings.Contains(out, "dir-cache-ttl") || !strings.Contains(out, "prewarm") {
+		t.Errorf("冷区告警应包含 dir-cache-ttl 与 prewarm,实际日志:\n%s", out)
+	}
+}
+
+// 退役用户的 ensured 必须同步清理:同前缀用户被重建时要重新补建 marker(I10),
+// 否则会被误判为「已建」而永远跳过。
+func TestRetireClearsEnsuredForRecreatedPrefix(t *testing.T) {
+	f := newRuntimeFixture(t, usersFrom("alice"))
+	eff := "team/alice-space" // ensured 的键是生效前缀本身(无尾斜杠)
+
+	waitFor(t, 5*time.Second, func() bool {
+		f.rt.ensuredMu.Lock()
+		defer f.rt.ensuredMu.Unlock()
+		return f.rt.ensured[eff]
+	})
+
+	// 删除 alice(退役):ensured 应被清掉。
+	if err := f.rt.applyUserTable(usersFrom("bob")); err != nil {
+		t.Fatalf("applyUserTable 失败: %v", err)
+	}
+	f.rt.ensuredMu.Lock()
+	left := f.rt.ensured[eff]
+	f.rt.ensuredMu.Unlock()
+	if left {
+		t.Error("退役后 ensured 未清理,同前缀用户重建时 marker 会被跳过")
+	}
+
+	// 同前缀用户重建:marker 重新补建(再次发 PUT)。
+	before := f.s3.Counts.Put.Load()
+	if err := f.rt.applyUserTable(usersFrom("alice")); err != nil {
+		t.Fatalf("applyUserTable 失败: %v", err)
+	}
+	waitFor(t, 5*time.Second, func() bool { return f.s3.Counts.Put.Load() > before })
+}
+
+// watcher 失效(监听目录被整体替换/通道关闭)必须重建,而不是静默变哑。
+// 这里用「目录一开始不存在、稍后出现」来驱动重建路径(跨平台稳定,不依赖
+// kqueue 对目录自删除的事件语义)。
+func TestWatchConfigRearmsUntilDirExists(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "conf") // 先不存在:第一次 add 必失败
+	cfg := filepath.Join(dir, "config.yaml")
+
+	fired := make(chan struct{}, 1)
+	onChange := func() {
+		select {
+		case fired <- struct{}{}:
+		default:
+		}
+	}
+	logs := &bufLogger{}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	watchConfig(ctx, cfg, 50*time.Millisecond, 50*time.Millisecond, onChange, log.New(logs, "", 0))
+
+	time.Sleep(120 * time.Millisecond) // 让第一轮失败并进入退避
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		_ = os.WriteFile(cfg, []byte("v: 1\n"), 0o600)
+		select {
+		case <-fired:
+			return // 重建后的 watcher 收到了事件
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	t.Fatalf("目录出现后热加载未自愈,日志:\n%s", logs.String())
 }
