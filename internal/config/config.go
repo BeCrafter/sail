@@ -35,7 +35,7 @@ type UserConfig struct {
 	Password string `mapstructure:"password"`
 	// Prefix 是相对 serve.prefix 的空间段;省略 = base 前缀本身。
 	Prefix string `mapstructure:"prefix"`
-	// Quota 是空间配额(如 "10GiB");省略 = 不限额。语法校验见 users.go,
+	// Quota 是空间配额(如 "10GB",支持 MB/GB/TB);省略 = 不限额。语法校验见 users.go,
 	// 配额执行由 P2 的 quotafs 落地。
 	Quota string `mapstructure:"quota"`
 }
@@ -43,6 +43,9 @@ type UserConfig struct {
 // ServeConfig 是 serve webdav 的全部 flag 参数的配置落点。字段语义与
 // cmd/serve.go 里的同名 flag 一一对应;大小类字段保持 flag 的字符串格式
 // (如 "5TiB"),合并后在 cmd 层统一 parseSize。
+//
+// 注意:新增 serve flag 时必须同步加到这里——config.Load 按结构体反序列化,
+// 结构体之外的键会在 config setup 重写文件时被静默丢弃。
 type ServeConfig struct {
 	Listen         string       `mapstructure:"listen"`
 	Prefix         string       `mapstructure:"prefix"`
@@ -56,6 +59,12 @@ type ServeConfig struct {
 	MaxUploadSize  string       `mapstructure:"max-upload-size"`
 	ChunkedUpload  bool         `mapstructure:"chunked-upload"`
 	ChunkSize      string       `mapstructure:"chunk-size"`
+	// DirCacheTTL 是目录列表缓存时长(flag --dir-cache-ttl);空 = 用 flag
+	// 默认(60s),"0" = 关闭缓存。
+	DirCacheTTL string `mapstructure:"dir-cache-ttl"`
+	// Prewarm 是后台保热的目录清单(flag --prewarm);空 = 不预热。
+	// 多用户模式下同一清单会在每个用户自己的空间内生效。
+	Prewarm []string `mapstructure:"prewarm"`
 }
 
 // Config 是 ~/.sail/config.yaml 的整体结构
@@ -181,6 +190,8 @@ func (c *Config) Resolve(profile string) (*Resolved, error) {
 			MaxUploadSize:  expandEnv(p.Serve.MaxUploadSize),
 			ChunkedUpload:  p.Serve.ChunkedUpload,
 			ChunkSize:      expandEnv(p.Serve.ChunkSize),
+			DirCacheTTL:    expandEnv(p.Serve.DirCacheTTL),
+			Prewarm:        expandEnvList(p.Serve.Prewarm),
 		},
 	}
 
@@ -220,4 +231,16 @@ func expandEnv(s string) string {
 		name := strings.TrimSuffix(strings.TrimPrefix(m, "${"), "}")
 		return os.Getenv(name)
 	})
+}
+
+// expandEnvList 对 []string 逐项做 ${VAR} 展开,供 serve.prewarm 这类列表字段使用。
+func expandEnvList(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		out = append(out, expandEnv(s))
+	}
+	return out
 }

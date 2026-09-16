@@ -54,7 +54,7 @@ func TestValidateUsers(t *testing.T) {
 		{"嵌套(桶根在前者外)", "", []UserConfig{{Name: "alice", Password: "p"}, {Name: "bob", Password: "p", Prefix: "b"}}, "nests inside"},
 		{"quota 非法", "team", []UserConfig{{Name: "alice", Password: "p", Quota: "10XB"}}, "invalid quota"},
 		{"quota 零", "team", []UserConfig{{Name: "alice", Password: "p", Quota: "0"}}, "invalid quota"},
-		{"quota 负值不支持", "team", []UserConfig{{Name: "alice", Password: "p", Quota: "-5GiB"}}, "invalid quota"},
+		{"quota 负值不支持", "team", []UserConfig{{Name: "alice", Password: "p", Quota: "-5GB"}}, "invalid quota"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -75,13 +75,23 @@ func TestParseQuota(t *testing.T) {
 		want int64
 		ok   bool
 	}{
-		{"10GiB", 10 << 30, true},
-		{"10 GiB", 10 << 30, true},
-		{"500MiB", 500 << 20, true},
-		{"1.5GiB", int64(1.5 * (1 << 30)), true},
+		// 只收十进制 MB/GB/TB 三档;纯数字 = 字节数。
+		{"500MB", 500 * 1000 * 1000, true},
+		{"10GB", 10 * 1000 * 1000 * 1000, true},
+		{"1TB", 1000 * 1000 * 1000 * 1000, true},
+		{"1.5GB", int64(1.5 * 1e9), true},
+		{"10 gb", 10 * 1000 * 1000 * 1000, true},
 		{"1024", 1024, true},
-		{"1KB", 1000, true},
-		{"1KiB", 1 << 10, true},
+		// 刻意不支持的单位与量级:一律 fail-loud,避免十进制/二进制混用把上限算错。
+		{"10GiB", 0, false},
+		{"500MiB", 0, false},
+		{"1KiB", 0, false},
+		{"1KB", 0, false},
+		{"1TiB", 0, false},
+		{"1PB", 0, false},
+		{"1G", 0, false},
+		{"1M", 0, false},
+		{"1B", 0, false},
 		{"", 0, false},
 		{"GiB", 0, false},
 		{"10XB", 0, false},

@@ -102,31 +102,20 @@ func isNestedPrefix(a, b string) bool {
 	return strings.HasPrefix(b, a+"/")
 }
 
-// quotaUnits 是配额语法支持的单位,语义与 cmd.parseSize 一致
-// (二进制单位按 2 的幂,十进制单位按 10 的幂)。
+// quotaUnits 是配额语法支持的单位,只保留十进制 MB/GB/TB 三档
+// (空单位 = 纯数字,按字节计)。刻意不收二进制单位(GiB/MiB 等)与其他量级,
+// 避免十进制/二进制混用时把上限算错。
 var quotaUnits = map[string]int64{
-	"":    1,
-	"B":   1,
-	"K":   1000,
-	"KB":  1000,
-	"KIB": 1 << 10,
-	"M":   1000 * 1000,
-	"MB":  1000 * 1000,
-	"MIB": 1 << 20,
-	"G":   1000 * 1000 * 1000,
-	"GB":  1000 * 1000 * 1000,
-	"GIB": 1 << 30,
-	"T":   1000 * 1000 * 1000 * 1000,
-	"TB":  1000 * 1000 * 1000 * 1000,
-	"TIB": 1 << 40,
-	"P":   1000 * 1000 * 1000 * 1000 * 1000,
-	"PB":  1000 * 1000 * 1000 * 1000 * 1000,
-	"PIB": 1 << 50,
+	"":   1,
+	"MB": 1000 * 1000,
+	"GB": 1000 * 1000 * 1000,
+	"TB": 1000 * 1000 * 1000 * 1000,
 }
 
-// ParseQuota 解析配额字符串(如 "10GiB"、"500MiB"、"1024")为字节;
-// 语法与 cmd.parseSize 一致。空串不是合法配额——调用方以「非空才校验」
-// 表达「省略 = 不限额」。
+// ParseQuota 解析配额字符串(如 "10GB"、"500MB"、"1024")为字节。
+// 与 cmd.parseSize 不同,配额刻意只收 MB/GB/TB 三档单位(见 quotaUnits),
+// 不接受二进制单位。空串不是合法配额——调用方以「非空才校验」表达
+// 「省略 = 不限额」。
 func ParseQuota(raw string) (int64, error) {
 	t := strings.TrimSpace(raw)
 	if t == "" {
@@ -147,7 +136,7 @@ func ParseQuota(raw string) (int64, error) {
 	}
 	mult, ok := quotaUnits[unit]
 	if !ok {
-		return 0, errors.New(i18n.Tf("unrecognized quota unit in %q (supported: B/KB/KiB/MB/MiB/GB/GiB/TB/TiB/PB/PiB)", raw))
+		return 0, errors.New(i18n.Tf("unrecognized quota unit in %q (supported: MB/GB/TB; a plain number means bytes)", raw))
 	}
 	q := int64(v * float64(mult))
 	if q <= 0 {

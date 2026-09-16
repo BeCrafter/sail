@@ -156,6 +156,7 @@ profiles:
 // 以及未配置时为空/默认值。
 func TestResolveServeConfig(t *testing.T) {
 	t.Setenv("SAIL_PROD_SERVE_PASSWORD", "from-env-pw")
+	t.Setenv("SAIL_HOT_DIR", "/warm-dir")
 	r := resolveFrom(t, `default-profile: prod
 profiles:
   prod:
@@ -174,12 +175,17 @@ profiles:
       max-upload-size: 50GiB
       chunked-upload: true
       chunk-size: 10MiB
+      dir-cache-ttl: 5m
+      prewarm:
+        - /yiche
+        - ${SAIL_HOT_DIR}
 `)
 	want := ServeConfig{
 		Listen: ":8443", Prefix: "tenant-a", User: "alice",
 		Password: "from-env-pw", TLSCert: "/etc/cert.pem", TLSKey: "/etc/key.pem",
 		StagingDir: "/tmp/stage", BackendMaxSize: "100GiB", MaxUploadSize: "50GiB",
 		ChunkedUpload: true, ChunkSize: "10MiB",
+		DirCacheTTL: "5m", Prewarm: []string{"/yiche", "/warm-dir"},
 	}
 	if !reflect.DeepEqual(r.Serve, want) {
 		t.Errorf("serve 块透传错误:\n got %+v\nwant %+v", r.Serve, want)

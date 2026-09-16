@@ -28,6 +28,14 @@ setup wizard notes:
   - access-key / secret-key can be typed as plaintext; pressing Enter on empty references a per-profile
     derived env var (e.g. profile test → SAIL_TEST_ACCESS_KEY); after writing it prints the vars to export
   - when reconfiguring an existing profile, configured plaintext keys are not echoed; Enter keeps them
+  - the WebDAV gateway (serve block) is guided as well: listen / prefix / auth (single or multi-user) / TLS /
+    chunked-upload / staging-dir; multi-user tables are validated in place (duplicate names, nested prefixes,
+    quota syntax — quota accepts MB/GB/TB). An existing serve block defaults to "keep" —
+    choose append to add users to the existing table, reconfigure to edit it, or remove to drop it. Size limits,
+    dir-cache-ttl and prewarm are not asked here; edit the config file to change them
+  - inputs are normalized where possible: a bare port gets its colon (8443 -> :8443), a URL without a
+    scheme gets https://, single-letter quota units become MB/GB/TB, ~ is expanded in paths, and y/n
+    answers accept yes/true/1/on; invalid values are re-prompted with an explanation
   - it ends with a config summary; empty fields are clearly marked for review
 See the README "Configuration" section for details.`,
 }
@@ -95,6 +103,11 @@ var configSetupCmd = &cobra.Command{
 		if endpoint == "" {
 			return errors.New(i18n.T("endpoint left empty 3 times; exiting. Please re-run sail config setup"))
 		}
+		// 漏写 scheme 是常见笔误(会得到难懂的 "not a valid URI");能补就补。
+		if norm := normalizeURL(endpoint); norm != endpoint {
+			fmt.Printf(i18n.T("note: endpoint has no scheme; using %s\n"), norm)
+			endpoint = norm
+		}
 		akLabel := fmt.Sprintf(i18n.T("access-key (enter a key; press Enter on empty to reference env var %s)"), config.EnvVarName(prof, "ACCESS_KEY"))
 		if existing.AccessKey != "" {
 			akLabel = i18n.T("access-key (press Enter to keep the configured value; enter a new value or ${VAR} to replace)")
@@ -107,12 +120,22 @@ var configSetupCmd = &cobra.Command{
 		secretKey := promptSecretReader(reader, skLabel, existing.SecretKey)
 		bucket := promptReader(reader, i18n.T("default bucket (can be empty)"), existing.Bucket)
 		cdnDomain := promptReader(reader, i18n.T("CDN domain (used by the url command; can be empty)"), existing.CDNDomain)
+		if norm := normalizeURL(cdnDomain); norm != cdnDomain {
+			fmt.Printf(i18n.T("note: CDN domain has no scheme; using %s\n"), norm)
+			cdnDomain = norm
+		}
 		region := promptReader(reader, i18n.T("region (cloud providers fill e.g. us-east-1; self-hosted can leave empty)"), existing.Region)
 		pathStyle := promptBoolReader(reader, i18n.T("path-style (choose y for self-hosted/MinIO, n for AWS S3)"), existing.PathStyle || !exists)
 		// cdn-bucket-path 仅在配置了 cdn-domain 时才有意义;空则跳过,留自动检测
 		var cdnBucketPath *bool
 		if cdnDomain != "" {
 			cdnBucketPath = promptTristateReader(reader, i18n.T("does the CDN domain already include the bucket path?"), existing.CDNBucketPath)
+		}
+		// serve 块(WebDAV 网关):已有配置走「保留/重配/删除」三态(默认保留),
+		// 新配置走可选引导提问。
+		serve, err := collectServeConfig(reader, existing.Serve)
+		if err != nil {
+			return err
 		}
 		// 语言:默认取当前生效语言,回车即固化
 		langDef := "en"
@@ -130,8 +153,7 @@ var configSetupCmd = &cobra.Command{
 			Endpoint: endpoint, AccessKey: accessKey, SecretKey: secretKey,
 			Bucket: bucket, Region: region, PathStyle: pathStyle,
 			CDNDomain: cdnDomain, CDNBucketPath: cdnBucketPath,
-			// serve 块由手工编辑维护,setup 不提问但必须保留,避免静默丢弃。
-			Serve: existing.Serve,
+			Serve: serve,
 		}
 		// 始终允许把本次写入的 profile 设为默认:无默认或本就是默认时默认 yes,
 		// 否则默认 no(避免无意切换默认)。
@@ -203,37 +225,60 @@ func promptReaderDisplay(r *bufio.Reader, label, def, display string) string {
 	return line
 }
 
+// parseBoolInput 宽容地解析 y/n 类回答:接受 yes/true/1/on(中英文)等常见写法。
+// 返回 (值, 是否识别);未识别由调用方决定是重问还是取默认。
+func parseBoolInput(s string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "y", "yes", "true", "1", "on", "是", "对", "好":
+		return true, true
+	case "n", "no", "false", "0", "off", "否", "不", "不是":
+		return false, true
+	}
+	return false, false
+}
+
+// normalizeURL 给缺 scheme 的地址补 https://:endpoint / cdn-domain 常见漏写,
+// 补全后可避免 SDK 报「not a valid URI」或拼出打不开的 CDN 链接。
+func normalizeURL(v string) string {
+	if v == "" || strings.Contains(v, "://") {
+		return v
+	}
+	return "https://" + v
+}
+
 // promptBoolReader 从共享 reader 读取 y/n,返回布尔值。默认 yes(def=true)。
+// 宽容解析(yes/true/1/on…)并对无法识别的输入重问(至多 3 次后取默认),
+// 避免误输入被静默当成 no。
 func promptBoolReader(r *bufio.Reader, label string, def bool) bool {
 	hint := "y/N"
 	if def {
 		hint = "Y/n"
 	}
-	fmt.Printf("%s [%s]: ", label, hint)
-	line, _ := r.ReadString('\n')
-	line = strings.TrimSpace(strings.ToLower(line))
-	if line == "" {
-		return def
+	for i := 0; i < 3; i++ {
+		fmt.Printf("%s [%s]: ", label, hint)
+		line, _ := r.ReadString('\n')
+		line = strings.TrimSpace(line)
+		if line == "" {
+			return def
+		}
+		if v, ok := parseBoolInput(line); ok {
+			return v
+		}
+		fmt.Printf(i18n.T("unrecognized answer %q; please answer y or n\n"), line)
 	}
-	return line == "y" || line == "yes"
+	return def
 }
 
 // promptTristateReader 读取 y/n/回车,返回 *bool 表示三态:
-// 回车或无效输入返回 def(自动检测);y/yes 返回 true(已含);n/no 返回 false(未含)。
+// 回车或未识别输入返回 def(自动检测);y/yes/true… 返回 true(已含);
+// n/no/false… 返回 false(未含)。
 func promptTristateReader(r *bufio.Reader, label string, def *bool) *bool {
 	fmt.Printf("%s [%s]: ", label, i18n.T("y/n, Enter=auto-detect"))
 	line, _ := r.ReadString('\n')
-	line = strings.TrimSpace(strings.ToLower(line))
-	switch line {
-	case "y", "yes":
-		v := true
+	if v, ok := parseBoolInput(line); ok {
 		return &v
-	case "n", "no":
-		v := false
-		return &v
-	default:
-		return def
 	}
+	return def
 }
 
 // confirm 询问 y/n,默认 no。用于破坏性操作的确认(mv 递归等)。
@@ -313,13 +358,29 @@ func renderProfile(name string, p config.Profile) string {
 %s%s`, name, p.Endpoint, ak, sk, p.Bucket, p.Region, ps, p.CDNDomain, cdp, serveBlock(p.Serve))
 }
 
+// serveBlockEmpty 判定 serve 块是否为纯默认(全空)。ServeConfig 含切片,
+// 不能用 == 比较;新增字段必须同步加进这里,否则"仅配了该字段"的块会被
+// 误判为空而整块丢弃。
+func serveBlockEmpty(s config.ServeConfig) bool {
+	return s.Listen == "" && s.Prefix == "" && s.User == "" && s.Password == "" &&
+		len(s.Users) == 0 &&
+		s.TLSCert == "" && s.TLSKey == "" && s.StagingDir == "" &&
+		s.BackendMaxSize == "" && s.MaxUploadSize == "" &&
+		!s.ChunkedUpload && s.ChunkSize == "" &&
+		s.DirCacheTTL == "" && len(s.Prewarm) == 0
+}
+
+// yamlQuote 把用户自由输入的值渲染成 YAML 双引号标量:值里的 "#"、":"、
+// 首尾空白不再被解析器截断(否则密码会被静默改写)。${VAR} 原样保留,
+// Resolve 阶段照常展开。
+func yamlQuote(v string) string {
+	return fmt.Sprintf("%q", v)
+}
+
 // serveBlock 渲染 profile 下的 serve 块;全部字段为空(纯默认)时返回空串,
 // 不产生冗余块。空字段注释掉以便手工补齐;password 原样写入,${VAR} 得以保留。
 func serveBlock(s config.ServeConfig) string {
-	if s.Listen == "" && s.Prefix == "" && s.User == "" && s.Password == "" &&
-		s.TLSCert == "" && s.TLSKey == "" && s.StagingDir == "" &&
-		s.BackendMaxSize == "" && s.MaxUploadSize == "" &&
-		!s.ChunkedUpload && s.ChunkSize == "" {
+	if serveBlockEmpty(s) {
 		return ""
 	}
 	f := func(key, val string) string {
@@ -334,6 +395,7 @@ func serveBlock(s config.ServeConfig) string {
 	b.WriteString(f("prefix", s.Prefix))
 	b.WriteString(f("user", s.User))
 	b.WriteString(f("password", s.Password))
+	b.WriteString(serveUsersBlock(s.Users))
 	b.WriteString(f("tls-cert", s.TLSCert))
 	b.WriteString(f("tls-key", s.TLSKey))
 	b.WriteString(f("staging-dir", s.StagingDir))
@@ -341,6 +403,45 @@ func serveBlock(s config.ServeConfig) string {
 	b.WriteString(f("max-upload-size", s.MaxUploadSize))
 	b.WriteString(f("chunk-size", s.ChunkSize))
 	fmt.Fprintf(&b, "      chunked-upload: %t\n", s.ChunkedUpload)
+	b.WriteString(f("dir-cache-ttl", s.DirCacheTTL))
+	b.WriteString(servePrewarmBlock(s.Prewarm))
+	return b.String()
+}
+
+// serveUsersBlock 渲染 serve.users 用户表;无用户返回空串。
+// 项缩进 8 空格、字段 10 空格(与 README 示例一致)。空字段注释掉以便手工
+// 补齐;name/password/prefix/quota 是自由输入,统一经 yamlQuote 加引号。
+func serveUsersBlock(users []config.UserConfig) string {
+	if len(users) == 0 {
+		return ""
+	}
+	uf := func(key, val string) string {
+		if val == "" {
+			return fmt.Sprintf("          # %s:\n", key)
+		}
+		return fmt.Sprintf("          %s: %s\n", key, yamlQuote(val))
+	}
+	var b strings.Builder
+	b.WriteString("      users:\n")
+	for _, u := range users {
+		fmt.Fprintf(&b, "        - name: %s\n", yamlQuote(u.Name))
+		b.WriteString(uf("password", u.Password))
+		b.WriteString(uf("prefix", u.Prefix))
+		b.WriteString(uf("quota", u.Quota))
+	}
+	return b.String()
+}
+
+// servePrewarmBlock 渲染 prewarm 目录清单;空列表渲染成注释行以便手工补齐。
+func servePrewarmBlock(dirs []string) string {
+	if len(dirs) == 0 {
+		return "      # prewarm:\n"
+	}
+	var b strings.Builder
+	b.WriteString("      prewarm:\n")
+	for _, d := range dirs {
+		fmt.Fprintf(&b, "        - %s\n", yamlQuote(d))
+	}
 	return b.String()
 }
 
@@ -355,6 +456,33 @@ func firstProfileName(m map[string]config.Profile) string {
 		return ""
 	}
 	return names[0]
+}
+
+// serveDigest 生成 serve 块的一行摘要(绝不显示密码)。空块 = 未配置;
+// 非空列出 listen / 认证方式 / 前缀 / TLS;凭据缺失时提示 serve 会拒绝启动。
+func serveDigest(s config.ServeConfig) string {
+	if serveBlockEmpty(s) {
+		return i18n.T("(unset; sail serve webdav uses flag defaults)")
+	}
+	var parts []string
+	if s.Listen != "" {
+		parts = append(parts, "listen="+s.Listen)
+	}
+	switch {
+	case len(s.Users) > 0:
+		parts = append(parts, i18n.Tf("%d user(s)", len(s.Users)))
+	case s.User != "" && s.Password != "":
+		parts = append(parts, i18n.Tf("single user %s", s.User))
+	default:
+		parts = append(parts, i18n.T("(no credentials; serve webdav will refuse to start)"))
+	}
+	if s.Prefix != "" {
+		parts = append(parts, "prefix="+s.Prefix)
+	}
+	if s.TLSCert != "" {
+		parts = append(parts, "tls")
+	}
+	return strings.Join(parts, " ")
 }
 
 // setupSummary 生成写盘后的配置摘要,空字段明确标注;密钥留空时
@@ -393,6 +521,10 @@ func setupSummary(prof string, isDefault bool, p config.Profile) string {
 		cdn = i18n.T("(unset; the url command is unavailable)")
 	}
 	fmt.Fprintf(&b, "  cdn-domain: %s\n", cdn)
+	fmt.Fprintf(&b, "  serve:      %s\n", serveDigest(p.Serve))
+	if !serveBlockEmpty(p.Serve) {
+		b.WriteString(i18n.T("note: backend-max-object-size / max-upload-size / chunk-size / dir-cache-ttl / prewarm are kept as configured (not asked here); edit the config file to change them") + "\n")
+	}
 
 	var missing []string
 	if p.AccessKey == "" {
