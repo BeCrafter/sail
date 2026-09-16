@@ -67,7 +67,7 @@ type ServeConfig struct {
 	Prewarm []string `mapstructure:"prewarm"`
 }
 
-// Config 是 ~/.sail/config.yaml 的整体结构
+// Config 是 ~/.config/sail/config.yaml 的整体结构
 type Config struct {
 	DefaultProfile string             `mapstructure:"default-profile"`
 	Lang           string             `mapstructure:"lang"`
@@ -113,13 +113,33 @@ func EnvVarName(profile, field string) string {
 	return "SAIL_" + field
 }
 
-// ConfigPath 返回配置文件默认路径 ~/.sail/config.yaml
+// ConfigPath 返回配置文件默认路径 ~/.config/sail/config.yaml。
+// 刻意不读 $XDG_CONFIG_HOME:行为可预测优先(见 README「配置」)。
 func ConfigPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".sail", "config.yaml"), nil
+	return filepath.Join(home, ".config", "sail", "config.yaml"), nil
+}
+
+// legacyHint 在「用的是默认路径、且迁移前的旧文件仍在」时返回一句提示,否则空串。
+// 只提示、不读取旧文件:配置位置已迁移,不做静默回退(旧文件可能属于旧版本,
+// 悄悄生效反而更意外)。
+func legacyHint(usedPath string) string {
+	def, err := ConfigPath()
+	if err != nil || usedPath != def {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	old := filepath.Join(home, ".sail", "config.yaml")
+	if _, err := os.Stat(old); err != nil {
+		return ""
+	}
+	return i18n.Tf(" (note: an older config still exists at %s; the default location is now %s — move it over to keep your profiles)", old, def)
 }
 
 // Load 从给定路径加载配置;path 为空则用默认路径。
@@ -135,7 +155,11 @@ func Load(path string) (*Config, error) {
 	v := viper.New()
 	v.SetConfigFile(path)
 	if err := v.ReadInConfig(); err != nil {
-		return nil, fmt.Errorf(i18n.T("read config %s failed: %w"), path, err)
+		base := fmt.Errorf(i18n.T("read config %s failed: %w"), path, err)
+		if hint := legacyHint(path); hint != "" {
+			return nil, fmt.Errorf("%w%s", base, hint)
+		}
+		return nil, base
 	}
 	var c Config
 	if err := v.Unmarshal(&c); err != nil {

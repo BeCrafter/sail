@@ -41,7 +41,7 @@ After install, npm automatically downloads only the one platform binary matching
 ## Quick start
 
 ```bash
-sail config setup                               # interactively generate/update ~/.sail/config.yaml
+sail config setup                               # interactively generate/update ~/.config/sail/config.yaml
 sail cp local.txt s3://mybucket/path/local.txt  # upload
 sail ls s3://mybucket/                          # list
 sail cp s3://mybucket/key local.txt             # download

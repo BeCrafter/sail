@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -374,14 +375,53 @@ func TestLoadErrors(t *testing.T) {
 	}
 }
 
-// TestConfigPath 校验 ConfigPath 拼接 ~/.sail/config.yaml。
+// TestConfigPath 校验 ConfigPath 拼接 ~/.config/sail/config.yaml。
 func TestConfigPath(t *testing.T) {
 	t.Setenv("HOME", "/tmp/fake-home")
 	p, err := ConfigPath()
 	if err != nil {
 		t.Fatalf("ConfigPath: %v", err)
 	}
-	if p != "/tmp/fake-home/.sail/config.yaml" {
-		t.Errorf("ConfigPath = %q,期望 /tmp/fake-home/.sail/config.yaml", p)
+	if p != "/tmp/fake-home/.config/sail/config.yaml" {
+		t.Errorf("ConfigPath = %q,期望 /tmp/fake-home/.config/sail/config.yaml", p)
+	}
+}
+
+// 配置位置迁移:默认路径读不到、但迁移前的旧路径文件仍在时,错误里带迁移提示
+// (只提示不读取 —— 旧文件不会被静默启用)。
+func TestLoadHintsLegacyConfigLocation(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	if err := os.MkdirAll(filepath.Join(home, ".sail"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".sail", "config.yaml"),
+		[]byte("default-profile: old\nprofiles: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load("")
+	if err == nil {
+		t.Fatal("默认路径不存在时应报错")
+	}
+	if !strings.Contains(err.Error(), ".sail/config.yaml") || !strings.Contains(err.Error(), ".config/sail/config.yaml") {
+		t.Errorf("错误里应给出迁移提示(新旧路径都点到),实际: %v", err)
+	}
+
+	// 新路径存在:正常加载,无提示。
+	if err := os.MkdirAll(filepath.Join(home, ".config", "sail"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := "default-profile: prod\nprofiles:\n  prod:\n    endpoint: https://p.example.com\n"
+	if err := os.WriteFile(filepath.Join(home, ".config", "sail", "config.yaml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("新路径存在时应加载成功: %v", err)
+	}
+	if cfg.DefaultProfile != "prod" {
+		t.Errorf("default-profile = %q,期望 prod", cfg.DefaultProfile)
 	}
 }

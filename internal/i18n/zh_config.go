@@ -5,7 +5,7 @@ func init() {
 		// config.go — command help metadata
 		"Config management": "配置管理",
 		`Manage configuration. Subcommands:
-  setup   interactively generate/update the config file (default ~/.sail/config.yaml, override with -c;
+  setup   interactively generate/update the config file (default ~/.config/sail/config.yaml, override with -c;
           --reset starts from a fresh config; when the file already exists, adds or reconfigures one profile,
           keeping the others)
 setup wizard notes:
@@ -23,7 +23,7 @@ setup wizard notes:
     answers accept yes/true/1/on; invalid values are re-prompted with an explanation
   - it ends with a config summary; empty fields are clearly marked for review
 See the README "Configuration" section for details.`: `配置管理。子命令:
-  setup   交互式生成/更新配置文件(默认 ~/.sail/config.yaml,可用 -c 指定路径;
+  setup   交互式生成/更新配置文件(默认 ~/.config/sail/config.yaml,可用 -c 指定路径;
           --reset 重置为全新配置;已有文件时新增或重配一个 profile,保留其它)
 setup 向导要点:
   - endpoint 必填,留空原地重问

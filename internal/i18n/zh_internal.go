@@ -3,7 +3,8 @@ package i18n
 func init() {
 	register(map[string]string{
 		// config.go
-		"read config %s failed: %w":                "读取配置 %s 失败: %w",
+		"read config %s failed: %w": "读取配置 %s 失败: %w",
+		" (note: an older config still exists at %s; the default location is now %s — move it over to keep your profiles)": " (提示:迁移前的配置文件仍在 %s;默认位置现已改为 %s —— 把它挪过去即可保留原有 profile)",
 		"parse config failed: %w":                  "解析配置失败: %w",
 		"profile %q not found in config file":      "profile %q 不存在于配置文件中",
 		"profile %q missing endpoint":              "profile %q 缺少 endpoint",

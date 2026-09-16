@@ -20,7 +20,7 @@ var configCmd = &cobra.Command{
 	Use:     "config",
 	Short:   "Config management",
 	Long: `Manage configuration. Subcommands:
-  setup   interactively generate/update the config file (default ~/.sail/config.yaml, override with -c;
+  setup   interactively generate/update the config file (default ~/.config/sail/config.yaml, override with -c;
           --reset starts from a fresh config; when the file already exists, adds or reconfigures one profile,
           keeping the others)
 setup wizard notes:
@@ -336,7 +336,7 @@ func renderProfile(name string, p config.Profile) string {
 	// cdn-bucket-path 仅在配置了 cdn-domain 时才有意义:
 	// 未配置 CDN 域名则整行不输出(避免冗余);配置了则带说明注释,
 	// 注释行(自动检测)或显式 true/false 值由 p.CDNBucketPath 决定。
-	// 注释固定英文:这是持久化到用户 ~/.sail/config.yaml 的手工可编辑产物,
+	// 注释固定英文:这是持久化到用户 ~/.config/sail/config.yaml 的手工可编辑产物,
 	// 不随运行语言切换,保证文件确定性。
 	const cdnHint = "whether the CDN domain URL already includes the bucket path: true=yes (do not append), false=no (always append)"
 	cdp := ""

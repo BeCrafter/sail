@@ -11,7 +11,7 @@ sail 是一个 S3 对象存储 CLI(Go,单静态二进制,零运行时依赖),支
 ```bash
 make build              # 编译到 ./sail(带版本注入;直接 go build -o sail . 也行)
 make test               # go vet ./... + go test ./...(单测零外部依赖,无需凭证)
-make e2e                # 端到端验证(需真实凭证:复用 ~/.sail/config.yaml 或 SAIL_E2E_* 变量)
+make e2e                # 端到端验证(需真实凭证:复用 ~/.config/sail/config.yaml 或 SAIL_E2E_* 变量)
 make release VERSION=0.1.0   # 发布到 npm(本地需 npm login;CI 走 tag 触发)
 make release-dry VERSION=0.1.0  # 发布预演,不真发
 
@@ -35,7 +35,7 @@ go test ./internal/webdavfs -run 'TestX|TestY'  # 跑多个
 - **`cmd/serve.go`** 组装运行时:配置解析 → client → s3fs → quotafs → webdavfs,含多用户路由表、fsnotify 配置热加载(Load→Validate→Swap,失败保留旧状态)。
 - **`internal/client/client.go`** 构造 S3 SDK 客户端,内置若干 S3 兼容适配(见下)。
 - **`internal/i18n/`** 双语机制:英文原文即 key,中文在 `zh_*.go` 的 map 里;同一 key 的不一致翻译会在 init 时 panic。`Apply` 在 Execute 前重写命令 help。新增面向用户字符串时同步补中文。
-- **配置**:`~/.sail/config.yaml`,解析链为 flag > 环境变量 > profile;`serve` 块的字段与 `serve webdav` 同名 flag 一一对应。
+- **配置**:`~/.config/sail/config.yaml`,解析链为 flag > 环境变量 > profile;`serve` 块的字段与 `serve webdav` 同名 flag 一一对应。
 
 ### 必须遵守的实现约束
 

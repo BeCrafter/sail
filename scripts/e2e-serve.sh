@@ -7,7 +7,7 @@
 # 不测极限(大文件/海量对象)。
 #
 # 用法一(复用已有配置,推荐,不碰凭证;桶取自 profile 的 bucket,无需再指定):
-#   SAIL_E2E_CONFIG=~/.sail/config.yaml SAIL_E2E_PROFILE=test ./scripts/e2e-serve.sh
+#   SAIL_E2E_CONFIG=~/.config/sail/config.yaml SAIL_E2E_PROFILE=test ./scripts/e2e-serve.sh
 # 用法二(环境变量传凭证,自建临时配置,需指定桶):
 #   SAIL_E2E_ENDPOINT=... SAIL_E2E_ACCESS_KEY=... SAIL_E2E_SECRET_KEY=... \
 #     SAIL_E2E_BUCKET=... ./scripts/e2e-serve.sh
@@ -57,7 +57,7 @@ else
     [[ -z "$ENDPOINT" || -z "$ACCESS_KEY" || -z "$SECRET_KEY" || -z "$BUCKET" ]] && {
         echo -e "${RED}方式二需 SAIL_E2E_ENDPOINT/ACCESS_KEY/SECRET_KEY/BUCKET${NC}"; exit 1; }
     PROFILE="${SAIL_E2E_PROFILE:-e2e-serve}"
-    WORK_DIR_CFG="$(mktemp -d)"; CONFIG_FILE="$WORK_DIR_CFG/.sail/config.yaml"
+    WORK_DIR_CFG="$(mktemp -d)"; CONFIG_FILE="$WORK_DIR_CFG/.config/sail/config.yaml"
     mkdir -p "$(dirname "$CONFIG_FILE")"
     cat > "$CONFIG_FILE" <<EOF
 default-profile: $PROFILE

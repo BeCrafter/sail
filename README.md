@@ -68,7 +68,7 @@ cd sail && go build -o sail .
 sail config setup
 ```
 
-Interactively generates or updates `~/.sail/config.yaml` (`--reset` resets to a fresh config; if the file exists, adds or reconfigures a profile while keeping the others), and optionally installs shell auto-completion. Wizard highlights:
+Interactively generates or updates `~/.config/sail/config.yaml` (`--reset` resets to a fresh config; if the file exists, adds or reconfigures a profile while keeping the others), and optionally installs shell auto-completion. Wizard highlights:
 
 - `endpoint` is required — leaving it empty re-prompts in place
 - `access-key` / `secret-key` can be entered in plaintext; press Enter on empty to reference per-profile env vars (see "Key security" below). After writing, it prints the variable names you need to `export`

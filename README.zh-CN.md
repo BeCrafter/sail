@@ -68,7 +68,7 @@ cd sail && go build -o sail .
 sail config setup
 ```
 
-交互式生成或更新 `~/.sail/config.yaml`(`--reset` 重置为全新配置;文件已存在时新增或重配一个 profile,保留其它),并可选安装 shell 自动补全。向导要点:
+交互式生成或更新 `~/.config/sail/config.yaml`(`--reset` 重置为全新配置;文件已存在时新增或重配一个 profile,保留其它),并可选安装 shell 自动补全。向导要点:
 
 - `endpoint` 为必填项,留空会原地重问
 - `access-key` / `secret-key` 可直接输入明文;回车留空则引用按 profile 派生的环境变量(机制见下方"密钥安全"),写盘后会打印需要 `export` 的变量名
