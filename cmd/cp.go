@@ -21,9 +21,14 @@ import (
 )
 
 var (
-	cpRecursive bool
-	cpDryRun    bool
+	cpRecursive   bool
+	cpDryRun      bool
+	cpContentType string
 )
+
+// contentTypeFlagUsage 是 cp 与 sync 共用的 --content-type 帮助文本。
+// 共用常量而非两处字面量:文案一致才不会在 i18n 表里漂移成两个 key。
+const contentTypeFlagUsage = "set Content-Type for local→S3 uploads (default: detect from name, then content)"
 
 var cpCmd = &cobra.Command{
 	GroupID: "transfer",
@@ -45,6 +50,7 @@ Examples:
   sail cp -r ./dir s3://bucket/mirror/          # mirror a local directory recursively
   sail cp -r s3://bucket/prefix/ s3://bucket/dest/   # recursive server-side copy
   sail cp --dry-run ./local.txt s3://bucket/x   # preview, without actually copying
+  sail cp --content-type text/markdown ./NOTES.md s3://bucket/notes   # force the type instead of auto-detecting
   sail upload ./local.txt                       # 1 arg: upload to the default bucket, key is the file name
   sail download s3://bucket/a.txt               # 1 arg: download into the current directory
   cat file | sail upload - s3://bucket/key      # piped input
@@ -126,7 +132,7 @@ Examples:
 			}
 			u := uploader.New(s3c)
 			fmt.Printf(i18n.T("uploading <stdin> -> s3://%s/%s\n"), dst.Bucket, dst.Key)
-			return u.UploadStream(ctx, os.Stdin, dst.Bucket, dst.Key)
+			return u.UploadStream(ctx, os.Stdin, dst.Bucket, dst.Key, cpContentType)
 
 		case !srcIsS3 && dstIsS3:
 			// 本地 → s3
@@ -148,7 +154,7 @@ Examples:
 					return err
 				}
 			}
-			return cpLocalToS3(ctx, s3c, srcArg, dst, cpRecursive, false, cpDryRun)
+			return cpLocalToS3(ctx, s3c, srcArg, dst, cpRecursive, false, cpDryRun, cpContentType)
 
 		case srcIsS3 && !dstIsS3:
 			// s3 → 本地
@@ -188,7 +194,8 @@ func deriveDstKey(srcBase string, dst *s3path.S3Path) string {
 }
 
 // cpLocalToS3 本地 -> s3。deleteSource 为 true 时(由 mv 调用)成功后删除本地源。
-func cpLocalToS3(ctx context.Context, s3c *s3.Client, srcLocal string, dst *s3path.S3Path, recursive, deleteSource, dryRun bool) error {
+// contentType 非空时应用到本次上传的全部对象,为空则逐个自动判定。
+func cpLocalToS3(ctx context.Context, s3c *s3.Client, srcLocal string, dst *s3path.S3Path, recursive, deleteSource, dryRun bool, contentType string) error {
 	info, err := os.Stat(srcLocal)
 	if err != nil {
 		return fmt.Errorf(i18n.T("failed to read local path: %w"), err)
@@ -203,7 +210,7 @@ func cpLocalToS3(ctx context.Context, s3c *s3.Client, srcLocal string, dst *s3pa
 		}
 		u := uploader.New(s3c)
 		fmt.Printf(i18n.T("copying directory %s -> s3://%s/%s\n"), srcLocal, dst.Bucket, dst.Key)
-		if err := u.UploadDir(ctx, srcLocal, dst.Bucket, dst.Key); err != nil {
+		if err := u.UploadDir(ctx, srcLocal, dst.Bucket, dst.Key, contentType); err != nil {
 			return fmt.Errorf(i18n.T("upload failed: %w"), err)
 		}
 		if deleteSource {
@@ -221,7 +228,7 @@ func cpLocalToS3(ctx context.Context, s3c *s3.Client, srcLocal string, dst *s3pa
 	}
 	u := uploader.New(s3c)
 	fmt.Printf(i18n.T("copying %s -> s3://%s/%s\n"), srcLocal, dst.Bucket, key)
-	if err := u.UploadFile(ctx, srcLocal, dst.Bucket, key); err != nil {
+	if err := u.UploadFile(ctx, srcLocal, dst.Bucket, key, contentType); err != nil {
 		return fmt.Errorf(i18n.T("upload failed: %w"), err)
 	}
 	if deleteSource {
@@ -427,7 +434,9 @@ func copyOneS3(ctx context.Context, s3c *s3.Client, u *uploader.Uploader, srcBuc
 		return fmt.Errorf(i18n.T("copy s3://%s/%s -> s3://%s/%s failed (CopyObject unreliable and fallback source read failed): %w"), srcBucket, srcKey, dstBucket, dstKey, gErr)
 	}
 	defer resp.Body.Close()
-	if uErr := u.UploadStream(ctx, resp.Body, dstBucket, dstKey); uErr != nil {
+	// 回退重传带上源对象的类型;源对象本来就没有类型时(历史对象)交回自动判定,
+	// 按目标 key/内容补一个,而不是留空。--content-type 不参与拷贝。
+	if uErr := u.UploadStream(ctx, resp.Body, dstBucket, dstKey, aws.ToString(resp.ContentType)); uErr != nil {
 		return fmt.Errorf(i18n.T("copy s3://%s/%s -> s3://%s/%s failed (fallback re-upload): %w"), srcBucket, srcKey, dstBucket, dstKey, uErr)
 	}
 	fmt.Printf(i18n.T("copy s3://%s/%s -> s3://%s/%s (fallback download→upload)\n"), srcBucket, srcKey, dstBucket, dstKey)
@@ -490,4 +499,5 @@ func cpWildcards(ctx context.Context, s3c *s3.Client, r *config.Resolved, srcArg
 func init() {
 	cpCmd.Flags().BoolVarP(&cpRecursive, "recursive", "r", false, "recurse into subdirectories")
 	cpCmd.Flags().BoolVar(&cpDryRun, "dry-run", false, "show what would be done without actually copying")
+	cpCmd.Flags().StringVar(&cpContentType, "content-type", "", contentTypeFlagUsage)
 }

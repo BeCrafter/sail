@@ -297,6 +297,7 @@ sail cp s3://mybucket/a.txt ./out.txt
 sail cp -r ./dir s3://mybucket/mirror/           # 递归镜像本地目录
 sail cp -r s3://mybucket/prefix/ s3://mybucket/dest/   # 服务端递归复制
 sail cp --dry-run ./local.txt s3://mybucket/x   # 预演,不实际复制
+sail cp --content-type text/markdown ./NOTES.md s3://mybucket/notes   # 指定本次上传的类型(含 -r 递归;s3→s3 复制不受影响)
 
 # 移动对象/文件(复制后删除源)
 sail mv s3://mybucket/a.txt s3://mybucket/moved.txt     # 单对象,无确认
@@ -366,6 +367,8 @@ sail serve webdav --print-windows-setup
 启动横幅会按绑定给出挂载地址:通配地址(`:8080`/`0.0.0.0:8080`)时同时列出 `http://localhost:端口/`(本机挂载)和各网卡的局域网 IP(其它设备挂载);显式绑定具体主机时只列该地址。
 
 > **性能**:上传/下载走服务端 Range 流式读写,不整文件入内存;HTTP 连接池按 S3 高并发调优,并发打开多个文件时复用长连接;目录列表带短时缓存。单次打开文件只做 1 次 `HeadObject` + 1 次 `GetObject`。
+
+> **内容类型**:从挂载点上传的文件按名称(扩展名优先,未命中再按内容签名探测)推断 Content-Type——图片/PDF 通过链接打开会直接渲染而不是下载。客户端没发 Content-Type(macOS 自带客户端实测就不发)或只发通用的 `application/octet-stream` 时,一律视为「没指定类型」;客户端发来的其它类型原样保留。
 
 ### 多用户(`serve.users`)
 

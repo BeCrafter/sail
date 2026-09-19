@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/BeCrafter/sail/internal/i18n"
+	"github.com/BeCrafter/sail/internal/mimetype"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -40,8 +41,9 @@ func New(s3c *s3.Client) *Uploader {
 	return &Uploader{s3: s3c, uploader: u}
 }
 
-// UploadFile 上传单个本地文件到 bucket/key。
-func (u *Uploader) UploadFile(ctx context.Context, localPath, bucket, key string) error {
+// UploadFile 上传单个本地文件到 bucket/key。contentType 为空时自动判定
+// (目标 key → 本地文件名 → 内容嗅探 → application/octet-stream)。
+func (u *Uploader) UploadFile(ctx context.Context, localPath, bucket, key, contentType string) error {
 	f, err := os.Open(localPath)
 	if err != nil {
 		return fmt.Errorf(i18n.T("failed to open file: %w"), err)
@@ -53,14 +55,19 @@ func (u *Uploader) UploadFile(ctx context.Context, localPath, bucket, key string
 		return fmt.Errorf(i18n.T("failed to read file info: %w"), err)
 	}
 
+	if contentType == "" {
+		contentType = mimetype.Detect(key, filepath.Base(localPath), mimetype.ReadHead(f))
+	}
+
 	pr := newProgressReader(f, info.Size())
 	pr.start()
 	defer pr.stop()
 
 	_, err = u.uploader.Upload(ctx, &s3.PutObjectInput{
-		Bucket: &bucket,
-		Key:    &key,
-		Body:   pr,
+		Bucket:      &bucket,
+		Key:         &key,
+		Body:        pr,
+		ContentType: aws.String(contentType),
 	})
 	if err != nil {
 		return fmt.Errorf(i18n.T("upload failed: %w"), err)
@@ -70,16 +77,20 @@ func (u *Uploader) UploadFile(ctx context.Context, localPath, bucket, key string
 
 // UploadStream 从 reader 读取全部内容上传为单个 object。
 // s3manager 要求可 seek 的 reader,管道/网络流不可 seek,
-// 因此先读入内存 buffer 再上传。
-func (u *Uploader) UploadStream(ctx context.Context, r io.Reader, bucket, key string) error {
+// 因此先读入内存 buffer 再上传。contentType 语义同 UploadFile。
+func (u *Uploader) UploadStream(ctx context.Context, r io.Reader, bucket, key, contentType string) error {
 	buf, err := io.ReadAll(r)
 	if err != nil {
 		return fmt.Errorf(i18n.T("failed to read input: %w"), err)
 	}
+	if contentType == "" {
+		contentType = mimetype.Detect(key, "", mimetype.ReadHead(bytes.NewReader(buf)))
+	}
 	_, err = u.uploader.Upload(ctx, &s3.PutObjectInput{
-		Bucket: &bucket,
-		Key:    &key,
-		Body:   bytes.NewReader(buf),
+		Bucket:      &bucket,
+		Key:         &key,
+		Body:        bytes.NewReader(buf),
+		ContentType: aws.String(contentType),
 	})
 	if err != nil {
 		return fmt.Errorf(i18n.T("upload failed: %w"), err)
@@ -87,8 +98,9 @@ func (u *Uploader) UploadStream(ctx context.Context, r io.Reader, bucket, key st
 	return nil
 }
 
-// UploadDir 递归上传本地目录到 bucket 下的 prefix。
-func (u *Uploader) UploadDir(ctx context.Context, localDir, bucket, prefix string) error {
+// UploadDir 递归上传本地目录到 bucket 下的 prefix。contentType 非空时应用到
+// 目录内全部文件,为空则逐文件各自判定。
+func (u *Uploader) UploadDir(ctx context.Context, localDir, bucket, prefix, contentType string) error {
 	err := filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -102,7 +114,7 @@ func (u *Uploader) UploadDir(ctx context.Context, localDir, bucket, prefix strin
 		}
 		key := buildKey(prefix, filepath.ToSlash(rel))
 		fmt.Printf(i18n.T("uploading %s -> s3://%s/%s\n"), path, bucket, key)
-		return u.UploadFile(ctx, path, bucket, key)
+		return u.UploadFile(ctx, path, bucket, key, contentType)
 	})
 	return err
 }

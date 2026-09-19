@@ -27,12 +27,18 @@ err()  { echo -e "${RED}[FAIL]${NC} $1"; fail=$((fail+1)); }
 skip() { echo -e "${YELLOW}[SKIP]${NC} $1"; skipped=$((skipped+1)); }
 step() { echo -e "\n${CYAN}━━━ $1 ━━━${NC}"; }
 
+# has <grep 参数...>:从 stdin 读完全部输入后再判断是否命中。
+# 断言不要写成 `cmd | grep -q`:grep 命中即退出会给生产者 SIGPIPE,在
+# `set -o pipefail` 下管道状态变成 141,断言会被误判为失败——实测 tree / view /
+# ls 偶发挂一条,且输出越大越容易中(小输出时生产者已写完,碰不到)。
+has() { grep "$@" >/dev/null; }
+
 # wait_for_list <s3uri> <substr>:轮询列举直到出现 substr 或超时。
 # 兜底部分 S3 服务写入后 list 的最终一致性延迟,避免 cp 后立即 mv 漏列对象。
 wait_for_list() {
   local uri="$1" needle="$2" i
   for ((i=0; i<20; i++)); do
-    if $SAIL ls "$uri" 2>/dev/null | grep -q "$needle"; then return 0; fi
+    if $SAIL ls "$uri" 2>/dev/null | has "$needle"; then return 0; fi
     sleep 0.3
   done
   return 1
@@ -40,6 +46,7 @@ wait_for_list() {
 
 s3exists() { $SAIL stat "$1" >/dev/null 2>&1; }
 s3size()   { $SAIL stat "$1" 2>/dev/null | grep '^size:' | sed -E 's/.*\(([0-9]+) bytes\).*/\1/'; }
+s3ctype()  { $SAIL stat "$1" 2>/dev/null | sed -n 's/^content-type: //p'; }
 
 SAIL_BIN="${SAIL_BIN:-./sail}"
 [[ -x "$SAIL_BIN" ]] || { echo -e "${RED}找不到 $SAIL_BIN,请先 go build -o sail .${NC}"; exit 1; }
@@ -109,8 +116,8 @@ echo "mv local src" > "$TEST_DIR/mv-local.txt"
 # ════════════════════════════════════════════════════════
 step "1. ls — 列举(验证连接)"
 $SAIL cp "$TEST_DIR/small.txt" "s3://$BUCKET/$PREFIX/small.txt" >/dev/null 2>&1
-$SAIL ls "s3://$BUCKET/$PREFIX/" 2>&1 | grep -q "small.txt" && ok "ls 列举成功" || err "ls 未找到对象"
-$SAIL ls -l "s3://$BUCKET/$PREFIX/" 2>&1 | grep -q "small.txt" && ok "ls -l 长格式正确" || err "ls -l 失败"
+$SAIL ls "s3://$BUCKET/$PREFIX/" 2>&1 | has "small.txt" && ok "ls 列举成功" || err "ls 未找到对象"
+$SAIL ls -l "s3://$BUCKET/$PREFIX/" 2>&1 | has "small.txt" && ok "ls -l 长格式正确" || err "ls -l 失败"
 
 # ════════════════════════════════════════════════════════
 step "2. cp 本地→s3(显式桶 + upload 别名 + s3:/// 默认桶)"
@@ -123,30 +130,143 @@ s3exists "s3://$BUCKET/$PREFIX/default.txt" && ok "  s3:/// 落到默认桶正�
 # ════════════════════════════════════════════════════════
 step "3. cp -r 目录递归 + 管道输入"
 $SAIL cp -r "$TEST_DIR" "s3://$BUCKET/$PREFIX/dir/" >/dev/null 2>&1 && ok "cp -r 目录递归成功" || err "cp -r 目录递归失败"
-$SAIL ls "s3://$BUCKET/$PREFIX/dir/" 2>&1 | grep -q "subdir/nested.txt" && ok "  递归保留子目录结构" || err "  递归未保留子目录"
+$SAIL ls "s3://$BUCKET/$PREFIX/dir/" 2>&1 | has "subdir/nested.txt" && ok "  递归保留子目录结构" || err "  递归未保留子目录"
 echo "pipe content" | $SAIL cp - "s3://$BUCKET/$PREFIX/pipe.txt" >/dev/null 2>&1 && ok "  cp - 管道输入" || err "  cp - 管道失败"
 s3exists "s3://$BUCKET/$PREFIX/pipe.txt" && ok "  管道对象存在" || err "  管道对象未找到"
 
 # ════════════════════════════════════════════════════════
+step "Content-Type 自动判定(扩展名/内容探测/覆盖/边界)"
+printf '# 标题\n\n正文\n' > "$TEST_DIR/note.md"
+printf '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01' > "$TEST_DIR/raw.png"
+: > "$TEST_DIR/blank.zzz"
+CTD="s3://$BUCKET/$PREFIX/ct"
+
+# 后端能力预检:少数自建网关忽略请求里的 Content-Type 自行嗅探(实测:显式传
+# text/x-pinned 也回 application/octet-stream)。这类后端上
+# 本节断言无意义,整段跳过并说明原因,而不是报一堆假失败。
+$SAIL cp --content-type text/x-sail-probe "$TEST_DIR/small.txt" "$CTD/.probe" >/dev/null 2>&1
+if [[ "$(s3ctype "$CTD/.probe")" == "text/x-sail-probe" ]]; then
+    CT_SUPPORTED=1
+else
+    CT_SUPPORTED=0
+fi
+$SAIL rm "$CTD/.probe" >/dev/null 2>&1 || true
+
+if [[ "$CT_SUPPORTED" == "0" ]]; then
+    skip "整个 Content-Type 段:该后端不保留客户端 Content-Type(自行嗅探),本节无意义"
+else
+
+# 目标 key 扩展名命中
+$SAIL cp "$TEST_DIR/note.md" "$CTD/note.md" >/dev/null 2>&1
+[[ "$(s3ctype "$CTD/note.md")" == "text/markdown; charset=utf-8" ]] \
+    && ok "cp .md → text/markdown" || err "cp .md 类型错误: $(s3ctype "$CTD/note.md")"
+
+# 目标 key 扩展名优先于本地文件名(源 .json,key 写 .md)
+$SAIL cp "$TEST_DIR/test.json" "$CTD/renamed.md" >/dev/null 2>&1
+[[ "$(s3ctype "$CTD/renamed.md")" == "text/markdown; charset=utf-8" ]] \
+    && ok "  目标 key 扩展名优先(源 .json → key .md)" || err "  key 优先未生效: $(s3ctype "$CTD/renamed.md")"
+
+# key 无扩展名 → 回退本地文件名
+$SAIL cp "$TEST_DIR/note.md" "$CTD/renamed" >/dev/null 2>&1
+[[ "$(s3ctype "$CTD/renamed")" == "text/markdown; charset=utf-8" ]] \
+    && ok "  key 无扩展名回退本地文件名" || err "  本地名回退未生效: $(s3ctype "$CTD/renamed")"
+
+# 管道上传 + key 无扩展名 → 按内容探测
+cat "$TEST_DIR/test.json" | $SAIL cp - "$CTD/piped-json" >/dev/null 2>&1
+[[ "$(s3ctype "$CTD/piped-json")" == "application/json" ]] \
+    && ok "  管道:内容探测出 application/json" || err "  内容探测(JSON)错误: $(s3ctype "$CTD/piped-json")"
+cat "$TEST_DIR/raw.png" | $SAIL cp - "$CTD/piped-png" >/dev/null 2>&1
+[[ "$(s3ctype "$CTD/piped-png")" == "image/png" ]] \
+    && ok "  管道:内容探测出 image/png" || err "  内容探测(PNG)错误: $(s3ctype "$CTD/piped-png")"
+
+# --content-type 覆盖自动判定(含 -r 目录整批)
+$SAIL cp --content-type text/x-pinned "$TEST_DIR/note.md" "$CTD/pinned.md" >/dev/null 2>&1
+[[ "$(s3ctype "$CTD/pinned.md")" == "text/x-pinned" ]] \
+    && ok "  --content-type 覆盖扩展名判定" || err "  --content-type 未生效: $(s3ctype "$CTD/pinned.md")"
+$SAIL cp -r --content-type text/x-dir "$TEST_DIR/subdir" "$CTD/dir/" >/dev/null 2>&1
+[[ "$(s3ctype "$CTD/dir/nested.txt")" == "text/x-dir" ]] \
+    && ok "  --content-type 作用于 -r 目录内文件" || err "  -r 覆盖未生效: $(s3ctype "$CTD/dir/nested.txt")"
+
+# 边界:0 字节(未知扩展名兜底 / 已知扩展名仍按名字)
+$SAIL cp "$TEST_DIR/blank.zzz" "$CTD/blank.zzz" >/dev/null 2>&1
+[[ "$(s3ctype "$CTD/blank.zzz")" == "application/octet-stream" ]] \
+    && ok "  边界:空文件兜底 application/octet-stream(未误判为 text/plain)" || err "  空文件类型错误: $(s3ctype "$CTD/blank.zzz")"
+: > "$TEST_DIR/blank.md"
+$SAIL cp "$TEST_DIR/blank.md" "$CTD/blank.md" >/dev/null 2>&1
+[[ "$(s3ctype "$CTD/blank.md")" == "text/markdown; charset=utf-8" ]] \
+    && ok "  边界:空文件仍按扩展名判定" || err "  空 .md 类型错误: $(s3ctype "$CTD/blank.md")"
+
+# s3→s3 复制保源类型(不按目标 key 重新推断)
+$SAIL cp "$CTD/note.md" "$CTD/copied.bin" >/dev/null 2>&1
+[[ "$(s3ctype "$CTD/copied.bin")" == "text/markdown; charset=utf-8" ]] \
+    && ok "  s3→s3 复制保留源类型(key 改成 .bin 也不变)" || err "  复制类型被改写: $(s3ctype "$CTD/copied.bin")"
+
+# sync:逐文件各自判定
+mkdir -p "$TEST_DIR/ctsync"
+cp "$TEST_DIR/note.md" "$TEST_DIR/ctsync/doc.md"
+cp "$TEST_DIR/test.json" "$TEST_DIR/ctsync/data.json"
+$SAIL sync "$TEST_DIR/ctsync" "$CTD/sync/" >/dev/null 2>&1
+CT_SYNC_MD="$(s3ctype "$CTD/sync/doc.md")"; CT_SYNC_JSON="$(s3ctype "$CTD/sync/data.json")"
+[[ "$CT_SYNC_MD" == "text/markdown; charset=utf-8" && "$CT_SYNC_JSON" == "application/json" ]] \
+    && ok "  sync 逐文件判定类型" || err "  sync 类型错误: md=$CT_SYNC_MD json=$CT_SYNC_JSON"
+
+# 链接访问闭环:经 URL 打开时服务端回出的 Content-Type 应与落库一致 —— 这正是
+# 最初「通过链接访问无法按预期渲染」的验收点。CDN 需要桶公开读;拿不到就回落到
+# 预签名 URL(S3/BOS 都支持 query 签名);两条都不可用时跳过并说明原因。
+# 必须用 GET:预签名 URL 的方法参与签名,拿 HEAD 去取会 403(实测 BOS)。
+link_ct() { curl -sS -o /dev/null -D - --max-time 20 "$1" 2>/dev/null | tr -d '\r' \
+    | awk 'NR==1{code=$2}
+           tolower($1)=="content-type:"{ct=substr($0, index($0, ":")+1); sub(/^[ \t]+/, "", ct)}
+           END{print code, ct}'; }
+LINK_OK=""
+CDN_URL="$($SAIL url "$CTD/note.md" 2>/dev/null || true)"
+if [[ -n "$CDN_URL" ]]; then
+    read -r L_CODE L_CT <<<"$(link_ct "$CDN_URL")"
+    if [[ "$L_CODE" == "200" ]]; then
+        LINK_OK=1
+        [[ "$L_CT" == "text/markdown; charset=utf-8" ]] \
+            && ok "  链接访问闭环:CDN 回出的 Content-Type 与落库一致" \
+            || err "  CDN 回出的 Content-Type 不符: $L_CT"
+    fi
+fi
+if [[ -z "$LINK_OK" ]]; then
+    PRESIGN_URL="$($SAIL presign "$CTD/note.md" 2>/dev/null | tail -1 || true)"
+    if [[ -n "$PRESIGN_URL" ]]; then
+        read -r L_CODE L_CT <<<"$(link_ct "$PRESIGN_URL")"
+        if [[ "$L_CODE" == "200" ]]; then
+            LINK_OK=1
+            [[ "$L_CT" == "text/markdown; charset=utf-8" ]] \
+                && ok "  链接访问闭环:预签名 URL 回出的 Content-Type 与落库一致" \
+                || err "  预签名 URL 回出的 Content-Type 不符: $L_CT"
+        fi
+    fi
+fi
+if [[ -z "$LINK_OK" ]]; then
+    skip "链接访问闭环:CDN 与预签名 URL 都没拿到 200(需桶公开读,或后端支持 query 签名)"
+fi
+
+fi  # CT_SUPPORTED
+
+# ════════════════════════════════════════════════════════
 step "ls -d + tree(目录列举与树形)"
 # ls -d:只列 dir 下的子目录(testdata 有 subdir/)
-$SAIL ls -d "s3://$BUCKET/$PREFIX/dir/" 2>&1 | grep -q "^subdir/$" && ok "ls -d 只列子目录" || err "ls -d 未正确列子目录"
+$SAIL ls -d "s3://$BUCKET/$PREFIX/dir/" 2>&1 | has "^subdir/$" && ok "ls -d 只列子目录" || err "ls -d 未正确列子目录"
 # ls -d -l:-d 忽略 -l,仍只列目录
-$SAIL ls -d -l "s3://$BUCKET/$PREFIX/dir/" 2>&1 | grep -q "^subdir/$" && ok "ls -d -l 仍只列目录(-d 忽略 -l)" || err "ls -d -l 异常"
+$SAIL ls -d -l "s3://$BUCKET/$PREFIX/dir/" 2>&1 | has "^subdir/$" && ok "ls -d -l 仍只列目录(-d 忽略 -l)" || err "ls -d -l 异常"
 # ls -d 无尾斜杠:prefix 不强制以 / 结尾,仍只列子目录(回归:曾因缺尾斜杠输出空)
-$SAIL ls -d "s3://$BUCKET/$PREFIX/dir" 2>&1 | grep -q "^subdir/$" && ok "ls -d 无尾斜杠仍只列子目录" || err "ls -d 无尾斜杠未正确列子目录"
+$SAIL ls -d "s3://$BUCKET/$PREFIX/dir" 2>&1 | has "^subdir/$" && ok "ls -d 无尾斜杠仍只列子目录" || err "ls -d 无尾斜杠未正确列子目录"
 # tree:含子目录与文件
 TREE_OUT=$($SAIL tree "s3://$BUCKET/$PREFIX/dir/" 2>&1)
-echo "$TREE_OUT" | grep -q "subdir/" && ok "tree 含子目录" || err "tree 未含子目录"
-echo "$TREE_OUT" | grep -q "nested.txt" && ok "tree 含文件" || err "tree 未含文件"
+echo "$TREE_OUT" | has "subdir/" && ok "tree 含子目录" || err "tree 未含子目录"
+echo "$TREE_OUT" | has "nested.txt" && ok "tree 含文件" || err "tree 未含文件"
 # tree -d:只目录,不含文件
-$SAIL tree -d "s3://$BUCKET/$PREFIX/dir/" 2>&1 | grep -q "small.txt" && err "tree -d 不应含文件" || ok "tree -d 不含文件"
+$SAIL tree -d "s3://$BUCKET/$PREFIX/dir/" 2>&1 | has "small.txt" && err "tree -d 不应含文件" || ok "tree -d 不含文件"
 # tree -L 1:深度 1,截断深层(nested.txt 在 subdir/ 下,深度 2)
-$SAIL tree -L 1 "s3://$BUCKET/$PREFIX/dir/" 2>&1 | grep -q "nested.txt" && err "tree -L 1 不应含深层文件" || ok "tree -L 1 截断深层"
+$SAIL tree -L 1 "s3://$BUCKET/$PREFIX/dir/" 2>&1 | has "nested.txt" && err "tree -L 1 不应含深层文件" || ok "tree -L 1 截断深层"
 # tree -s --human:文件附人类可读大小
-$SAIL tree -s --human "s3://$BUCKET/$PREFIX/dir/" 2>&1 | grep -qE "small.txt +[0-9]" && ok "tree -s --human 带大小" || err "tree -s --human 异常"
+$SAIL tree -s --human "s3://$BUCKET/$PREFIX/dir/" 2>&1 | has -E "small.txt +[0-9]" && ok "tree -s --human 带大小" || err "tree -s --human 异常"
 # 本地 tree
-$SAIL tree "$TEST_DIR" 2>&1 | grep -q "subdir/" && ok "tree 本地目录" || err "tree 本地目录异常"
+$SAIL tree "$TEST_DIR" 2>&1 | has "subdir/" && ok "tree 本地目录" || err "tree 本地目录异常"
 
 # ════════════════════════════════════════════════════════
 step "4. cp s3→本地 + 内容一致性"
@@ -161,7 +281,7 @@ if [[ -n "$SRC_SZ" && "$SRC_SZ" == "$DST_SZ" ]]; then ok "  复制大小一致($
 
 # ════════════════════════════════════════════════════════
 step "6. cp --dry-run(预演不写入)"
-$SAIL cp --dry-run "$TEST_DIR/small.txt" "s3://$BUCKET/$PREFIX/dryrun.txt" 2>&1 | grep -q "将复制" && ok "dry-run 打印预演" || err "dry-run 未打印预演"
+$SAIL cp --dry-run "$TEST_DIR/small.txt" "s3://$BUCKET/$PREFIX/dryrun.txt" 2>&1 | has "将复制" && ok "dry-run 打印预演" || err "dry-run 未打印预演"
 s3exists "s3://$BUCKET/$PREFIX/dryrun.txt" && err "dry-run 不应写入对象" || ok "dry-run 未写入对象"
 
 # ════════════════════════════════════════════════════════
@@ -181,26 +301,26 @@ $SAIL cp -r "s3://$BUCKET/$PREFIX/dir/" "s3://$BUCKET/$PREFIX/dir3/" >/dev/null 
 # 兜底:部分 S3 服务写入后 list 有最终一致性延迟,等 dir3/ 可见再 mv
 wait_for_list "s3://$BUCKET/$PREFIX/dir3/" "nested.txt"
 $SAIL mv -r --yes "s3://$BUCKET/$PREFIX/dir3/" "s3://$BUCKET/$PREFIX/dir4/" >/dev/null 2>&1 && ok "mv -r --yes" || err "mv -r --yes 失败"
-$SAIL ls "s3://$BUCKET/$PREFIX/dir4/" 2>&1 | grep -q "nested.txt" && ok "  目标含文件" || err "  目标为空"
+$SAIL ls "s3://$BUCKET/$PREFIX/dir4/" 2>&1 | has "nested.txt" && ok "  目标含文件" || err "  目标为空"
 [[ -z "$($SAIL ls "s3://$BUCKET/$PREFIX/dir3/" 2>/dev/null)" ]] && ok "  源已清空" || err "  源未清空"
 
 # ════════════════════════════════════════════════════════
 step "9. stat(s3 + 本地 + s3:/// 默认桶)"
 STAT_OUT=$($SAIL stat "s3://$BUCKET/$PREFIX/small.txt" 2>&1)
-echo "$STAT_OUT" | grep -q "^key: s3://$BUCKET/$PREFIX/small.txt" && ok "stat s3 key 正确" || err "stat s3 key 错误"
-echo "$STAT_OUT" | grep -q "^etag:" && ok "  含 etag" || err "  缺 etag"
+echo "$STAT_OUT" | has "^key: s3://$BUCKET/$PREFIX/small.txt" && ok "stat s3 key 正确" || err "stat s3 key 错误"
+echo "$STAT_OUT" | has "^etag:" && ok "  含 etag" || err "  缺 etag"
 STATS3=$($SAIL stat "s3:///$PREFIX/small.txt" 2>&1)
-echo "$STATS3" | grep -q "^key: s3://$BUCKET/$PREFIX/small.txt" && ok "stat s3:/// 默认桶填充正确" || err "stat s3:/// 默认桶错误: $(echo "$STATS3" | head -2)"
+echo "$STATS3" | has "^key: s3://$BUCKET/$PREFIX/small.txt" && ok "stat s3:/// 默认桶填充正确" || err "stat s3:/// 默认桶错误: $(echo "$STATS3" | head -2)"
 STAT_LOC=$($SAIL stat "$TEST_DIR/small.txt" 2>&1) || true
-if echo "$STAT_LOC" | grep -q "^name: small.txt"; then ok "stat 本地文件正确"; else err "stat 本地文件错误 (exists=$([[ -f "$TEST_DIR/small.txt" ]] && echo y || echo n)): $STAT_LOC"; fi
-$SAIL stat "$TEST_DIR" 2>&1 | grep -q "^is-dir: true" && ok "stat 本地目录 is-dir 正确" || err "stat 本地目录错误"
+if echo "$STAT_LOC" | has "^name: small.txt"; then ok "stat 本地文件正确"; else err "stat 本地文件错误 (exists=$([[ -f "$TEST_DIR/small.txt" ]] && echo y || echo n)): $STAT_LOC"; fi
+$SAIL stat "$TEST_DIR" 2>&1 | has "^is-dir: true" && ok "stat 本地目录 is-dir 正确" || err "stat 本地目录错误"
 
 # ════════════════════════════════════════════════════════
 step "10. view(文本/json/csv)+ cat 别名"
-$SAIL view "s3://$BUCKET/$PREFIX/small.txt" 2>&1 | grep -q "hello sail e2e test" && ok "view 文本正确" || err "view 文本错误"
+$SAIL view "s3://$BUCKET/$PREFIX/small.txt" 2>&1 | has "hello sail e2e test" && ok "view 文本正确" || err "view 文本错误"
 $SAIL view "s3://$BUCKET/$PREFIX/test.json" > "$WORK_DIR/v.json" 2>&1
 [[ $(wc -l < "$WORK_DIR/v.json") -gt 1 ]] && ok "view json 美化(多行)" || err "view json 未美化"
-$SAIL view "s3://$BUCKET/$PREFIX/test.csv" 2>&1 | grep -q "alice" && ok "view csv 输出" || err "view csv 异常"
+$SAIL view "s3://$BUCKET/$PREFIX/test.csv" 2>&1 | has "alice" && ok "view csv 输出" || err "view csv 异常"
 $SAIL cat "s3://$BUCKET/$PREFIX/test.json" > "$WORK_DIR/c.json" 2>&1
 grep -q '^{"b":2,"a":1,.*}$' "$WORK_DIR/c.json" && ok "cat 原样输出(单行)" || err "cat 非原样"
 diff "$WORK_DIR/c.json" <($SAIL view --raw "s3://$BUCKET/$PREFIX/test.json" 2>&1) >/dev/null 2>&1 && ok "cat == view --raw" || err "cat != view --raw"
@@ -208,10 +328,10 @@ diff "$WORK_DIR/c.json" <($SAIL view --raw "s3://$BUCKET/$PREFIX/test.json" 2>&1
 # ════════════════════════════════════════════════════════
 step "11. url(校验含 bucket)+ presign"
 URL_OUT=$($SAIL url "s3://$BUCKET/$PREFIX/small.txt" 2>&1) || true
-if echo "$URL_OUT" | grep -q "^https\?://"; then
-    echo "$URL_OUT" | grep -q "/$BUCKET/" && ok "url 含 bucket" || err "url 缺 bucket"
-    $SAIL url "s3:///$PREFIX/small.txt" 2>&1 | grep -q "/$BUCKET/" && ok "url s3:/// 默认桶含 bucket" || err "url s3:/// 缺 bucket"
-    $SAIL url "s3://$BUCKET/$PREFIX/small.txt" --cdn "https://ov.example.com" 2>&1 | grep -q "ov.example.com" && ok "url --cdn 覆盖" || err "url --cdn 失败"
+if echo "$URL_OUT" | has "^https\?://"; then
+    echo "$URL_OUT" | has "/$BUCKET/" && ok "url 含 bucket" || err "url 缺 bucket"
+    $SAIL url "s3:///$PREFIX/small.txt" 2>&1 | has "/$BUCKET/" && ok "url s3:/// 默认桶含 bucket" || err "url s3:/// 缺 bucket"
+    $SAIL url "s3://$BUCKET/$PREFIX/small.txt" --cdn "https://ov.example.com" 2>&1 | has "ov.example.com" && ok "url --cdn 覆盖" || err "url --cdn 失败"
 else
     skip "url 未配置 cdn-domain(跳过)"
 fi
@@ -219,14 +339,14 @@ fi
 # ── url bucket 去重(不依赖 config cdn-domain):自动检测 / --no-bucket / cdn-bucket-path ──
 # 自动检测:--cdn 域名已含 bucket 则不重复拼接
 AUTO_URL=$($SAIL url "s3://$BUCKET/$PREFIX/small.txt" --cdn "https://ov.example.com/$BUCKET" 2>&1) || true
-if echo "$AUTO_URL" | grep -qF "https://ov.example.com/$BUCKET/$PREFIX/small.txt" && ! echo "$AUTO_URL" | grep -qF "/$BUCKET/$BUCKET/"; then
+if echo "$AUTO_URL" | has -F "https://ov.example.com/$BUCKET/$PREFIX/small.txt" && ! echo "$AUTO_URL" | has -F "/$BUCKET/$BUCKET/"; then
     ok "url 域名含 bucket 自动去重"
 else
     err "url 自动去重失败: $AUTO_URL"
 fi
 # --no-bucket:显式不追加 bucket(覆盖自动检测,域名不含 bucket 也不追加)
 NOB_URL=$($SAIL url "s3://$BUCKET/$PREFIX/small.txt" --cdn "https://ov.example.com" --no-bucket 2>&1) || true
-if echo "$NOB_URL" | grep -qF "https://ov.example.com/$PREFIX/small.txt" && ! echo "$NOB_URL" | grep -qF "/$BUCKET/"; then
+if echo "$NOB_URL" | has -F "https://ov.example.com/$PREFIX/small.txt" && ! echo "$NOB_URL" | has -F "/$BUCKET/"; then
     ok "url --no-bucket 不追加 bucket"
 else
     err "url --no-bucket 失败: $NOB_URL"
@@ -248,23 +368,23 @@ EOF
 }
 gen_cdn_cfg "true"
 CFG_TRUE=$("$SAIL_BIN" -c "$WORK_DIR/cdn-config.yaml" url "s3://$BUCKET/$PREFIX/small.txt" 2>&1)
-if echo "$CFG_TRUE" | grep -qF "https://ov.example.com/$BUCKET/$PREFIX/small.txt" && ! echo "$CFG_TRUE" | grep -qF "/$BUCKET/$BUCKET/"; then
+if echo "$CFG_TRUE" | has -F "https://ov.example.com/$BUCKET/$PREFIX/small.txt" && ! echo "$CFG_TRUE" | has -F "/$BUCKET/$BUCKET/"; then
     ok "url cdn-bucket-path:true 去重(覆盖自动检测)"
 else
     err "url cdn-bucket-path:true 失败: $CFG_TRUE"
 fi
 gen_cdn_cfg "false"
 CFG_FALSE=$("$SAIL_BIN" -c "$WORK_DIR/cdn-config.yaml" url "s3://$BUCKET/$PREFIX/small.txt" 2>&1)
-if echo "$CFG_FALSE" | grep -qF "/$BUCKET/$BUCKET/"; then
+if echo "$CFG_FALSE" | has -F "/$BUCKET/$BUCKET/"; then
     ok "url cdn-bucket-path:false 强制追加(覆盖自动检测)"
 else
     err "url cdn-bucket-path:false 失败: $CFG_FALSE"
 fi
 
 PS_OUT=$($SAIL presign "s3://$BUCKET/$PREFIX/small.txt" 2>&1) || true
-if echo "$PS_OUT" | grep -q "X-Amz-Signature"; then
-    echo "$PS_OUT" | grep -q "/$BUCKET/" && ok "presign 含 bucket" || err "presign 缺 bucket"
-elif echo "$PS_OUT" | grep -qi "error"; then
+if echo "$PS_OUT" | has "X-Amz-Signature"; then
+    echo "$PS_OUT" | has "/$BUCKET/" && ok "presign 含 bucket" || err "presign 缺 bucket"
+elif echo "$PS_OUT" | has -i "error"; then
     skip "presign 服务端不支持(部分 S3 兼容服务不支持 query string 认证)"
 else
     err "presign 输出异常: $PS_OUT"
@@ -285,24 +405,24 @@ s3exists "s3://$BUCKET/$N/sub/" && ok "  mkdir 后占位对象存在" || err "  
 $SAIL cp "$TEST_DIR/small.txt" "s3://$BUCKET/$N/a.txt" >/dev/null 2>&1
 $SAIL rmdir "s3://$BUCKET/$N/" >/dev/null 2>&1 && err "rmdir 非空目录应拒绝" || ok "rmdir 非空目录正确拒绝"
 $SAIL rmdir "s3://$BUCKET/$N/sub/" >/dev/null 2>&1 && ok "rmdir 空目录删除" || err "rmdir 空目录失败"
-$SAIL find "s3://$BUCKET/$N" --name 'a.txt' 2>/dev/null | grep -q "a.txt" && ok "find --name 命中" || err "find --name 未命中"
-$SAIL find "s3://$BUCKET/$N" --size '+0' 2>/dev/null | grep -q "a.txt" && ok "find --size +0 命中" || err "find --size 未命中"
+$SAIL find "s3://$BUCKET/$N" --name 'a.txt' 2>/dev/null | has "a.txt" && ok "find --name 命中" || err "find --name 未命中"
+$SAIL find "s3://$BUCKET/$N" --size '+0' 2>/dev/null | has "a.txt" && ok "find --size +0 命中" || err "find --size 未命中"
 sz=$(s3size "s3://$BUCKET/$N/a.txt")
-$SAIL du --human "s3://$BUCKET/$N" 2>/dev/null | grep -q "$sz" && ok "du 统计命中" || err "du 统计异常"
-$SAIL ls -l -t "s3://$BUCKET/$N/" 2>/dev/null | head -1 | grep -q "a.txt" && ok "ls -t 排序输出" || err "ls -t 无输出"
-$SAIL ls --buckets 2>/dev/null | grep -q "$BUCKET" && ok "ls --buckets 列出桶" || err "ls --buckets 未列出桶"
+$SAIL du --human "s3://$BUCKET/$N" 2>/dev/null | has "$sz" && ok "du 统计命中" || err "du 统计异常"
+$SAIL ls -l -t "s3://$BUCKET/$N/" 2>/dev/null | sed -n '1p' | has "a.txt" && ok "ls -t 排序输出" || err "ls -t 无输出"
+$SAIL ls --buckets 2>/dev/null | has "$BUCKET" && ok "ls --buckets 列出桶" || err "ls --buckets 未列出桶"
 
 # ════════════════════════════════════════════════════════
 step "14. head / tail / wc / grep / checksum"
 T="s3://$BUCKET/$N/t.txt"
 $SAIL cp "$TEST_DIR/small.txt" "$T" >/dev/null 2>&1
-$SAIL head -n 1 "$T" 2>/dev/null | grep -q "hello sail" && ok "head 输出命中" || err "head 无输出"
-$SAIL tail -n 1 "$T" 2>/dev/null | grep -q "hello sail" && ok "tail 输出命中" || err "tail 无输出"
-$SAIL wc -l "$T" 2>/dev/null | grep -q "1 " && ok "wc -l 计数" || err "wc -l 异常"
-$SAIL grep -n "e2e" "$T" 2>/dev/null | grep -q "1:" && ok "grep 行号命中" || err "grep 未命中"
+$SAIL head -n 1 "$T" 2>/dev/null | has "hello sail" && ok "head 输出命中" || err "head 无输出"
+$SAIL tail -n 1 "$T" 2>/dev/null | has "hello sail" && ok "tail 输出命中" || err "tail 无输出"
+$SAIL wc -l "$T" 2>/dev/null | has "1 " && ok "wc -l 计数" || err "wc -l 异常"
+$SAIL grep -n "e2e" "$T" 2>/dev/null | has "1:" && ok "grep 行号命中" || err "grep 未命中"
 CHK=$($SAIL checksum "$T" 2>/dev/null | awk '{print $1}')
 [[ ${#CHK} -eq 32 ]] && ok "checksum 输出 md5(32 位)" || err "checksum 输出异常"
-$SAIL checksum --compare "$TEST_DIR/small.txt" "$T" 2>/dev/null | grep -q ": OK" && ok "checksum --compare 相同" || err "checksum --compare 异常"
+$SAIL checksum --compare "$TEST_DIR/small.txt" "$T" 2>/dev/null | has ": OK" && ok "checksum --compare 相同" || err "checksum --compare 异常"
 
 # ════════════════════════════════════════════════════════
 step "15. 通配符(cp/rm 's3://b/a*.txt')"
@@ -321,15 +441,15 @@ step "16. sync(本地→s3 幂等 + --delete + --checksum/--include)"
 local_dir="$WORK_DIR/sync-src"; mkdir -p "$local_dir"
 echo "sync data" > "$local_dir/sync.txt"
 $SAIL sync "$local_dir" "s3://$BUCKET/$N/sync/" >/dev/null 2>&1 && ok "sync 首次全量" || err "sync 首次失败"
-$SAIL sync "$local_dir" "s3://$BUCKET/$N/sync/" 2>/dev/null | grep -q "跳过 1" && ok "sync 二次幂等跳过" || err "sync 未幂等"
+$SAIL sync "$local_dir" "s3://$BUCKET/$N/sync/" 2>/dev/null | has "跳过 1" && ok "sync 二次幂等跳过" || err "sync 未幂等"
 echo "sync data2" > "$local_dir/sync2.txt"
-$SAIL sync "$local_dir" "s3://$BUCKET/$N/sync/" 2>/dev/null | grep -q "传输 1" && ok "sync 增量只传新文件" || err "sync 增量异常"
+$SAIL sync "$local_dir" "s3://$BUCKET/$N/sync/" 2>/dev/null | has "传输 1" && ok "sync 增量只传新文件" || err "sync 增量异常"
 rm "$local_dir/sync2.txt"
-$SAIL sync --delete "$local_dir" "s3://$BUCKET/$N/sync/" 2>/dev/null | grep -q "删除 1" && ok "sync --delete 删除多余" || err "sync --delete 未删除"
+$SAIL sync --delete "$local_dir" "s3://$BUCKET/$N/sync/" 2>/dev/null | has "删除 1" && ok "sync --delete 删除多余" || err "sync --delete 未删除"
 # --checksum:内容变化后触发传输,二次幂等
 echo "sync data changed" > "$local_dir/sync.txt"
-$SAIL sync --checksum "$local_dir" "s3://$BUCKET/$N/sync/" 2>/dev/null | grep -q "传输 1" && ok "sync --checksum 内容变化触发" || err "sync --checksum 未触发"
-$SAIL sync --checksum "$local_dir" "s3://$BUCKET/$N/sync/" 2>/dev/null | grep -q "跳过 1" && ok "sync --checksum 幂等跳过" || err "sync --checksum 未幂等"
+$SAIL sync --checksum "$local_dir" "s3://$BUCKET/$N/sync/" 2>/dev/null | has "传输 1" && ok "sync --checksum 内容变化触发" || err "sync --checksum 未触发"
+$SAIL sync --checksum "$local_dir" "s3://$BUCKET/$N/sync/" 2>/dev/null | has "跳过 1" && ok "sync --checksum 幂等跳过" || err "sync --checksum 未幂等"
 # --include:白名单外不传输
 echo "ignore me" > "$local_dir/skip.json"
 $SAIL sync --include '*.txt' "$local_dir" "s3://$BUCKET/$N/sync/" >/dev/null 2>&1
@@ -337,7 +457,7 @@ $SAIL stat "s3://$BUCKET/$N/sync/skip.json" >/dev/null 2>&1 && err "sync --inclu
 rm "$local_dir/skip.json"
 # --update:目标较新时跳过(本地 mtime 改旧)
 touch -t 202001010000 "$local_dir/sync.txt"
-$SAIL sync --update "$local_dir" "s3://$BUCKET/$N/sync/" 2>/dev/null | grep -q "跳过 1" && ok "sync --update 目标较新跳过" || err "sync --update 未跳过"
+$SAIL sync --update "$local_dir" "s3://$BUCKET/$N/sync/" 2>/dev/null | has "跳过 1" && ok "sync --update 目标较新跳过" || err "sync --update 未跳过"
 $SAIL rm -r "s3://$BUCKET/$N/sync/" >/dev/null 2>&1
 
 # ════════════════════════════════════════════════════════
@@ -391,11 +511,11 @@ profiles:
     cdn-domain: "https://cdn-test.example.com"
 EOF
 DEF_URL=$("$SAIL_BIN" -c "$WORK_DIR/multi-cfg.yaml" url "s3://x/key" 2>&1)
-echo "$DEF_URL" | grep -qF "cdn-prod.example.com" && ok "无 -p 用 default-profile(prod)" || err "无 -p 未用默认 profile: $DEF_URL"
+echo "$DEF_URL" | has -F "cdn-prod.example.com" && ok "无 -p 用 default-profile(prod)" || err "无 -p 未用默认 profile: $DEF_URL"
 TST_URL=$("$SAIL_BIN" -c "$WORK_DIR/multi-cfg.yaml" -p test url "s3://x/key" 2>&1)
-echo "$TST_URL" | grep -qF "cdn-test.example.com" && ok "-p test 指定 test profile" || err "-p test 未生效: $TST_URL"
+echo "$TST_URL" | has -F "cdn-test.example.com" && ok "-p test 指定 test profile" || err "-p test 未生效: $TST_URL"
 PRD_URL=$("$SAIL_BIN" -c "$WORK_DIR/multi-cfg.yaml" -p prod url "s3://x/key" 2>&1)
-echo "$PRD_URL" | grep -qF "cdn-prod.example.com" && ok "-p prod 指定 prod profile" || err "-p prod 未生效: $PRD_URL"
+echo "$PRD_URL" | has -F "cdn-prod.example.com" && ok "-p prod 指定 prod profile" || err "-p prod 未生效: $PRD_URL"
 if "$SAIL_BIN" -c "$WORK_DIR/multi-cfg.yaml" -p nosuch url "s3://x/key" >/dev/null 2>&1; then
     err "-p 不存在的 profile 不应成功"
 else
@@ -403,7 +523,7 @@ else
 fi
 
 # ── config setup 交互式新建(单 profile,自动设为默认) ──
-printf 'prod\nhttps://s3.example.com\nak\nsk\nbucket-a\n\nus-east-1\ny\n\n' | \
+printf 'prod\nhttps://s3.example.com\nak\nsk\nbucket-a\n\nus-east-1\ny\nn\n\ny\n' | \
     SHELL= "$SAIL_BIN" -c "$WORK_DIR/setup-new.yaml" config setup >/dev/null 2>&1
 grep -q 'default-profile: prod' "$WORK_DIR/setup-new.yaml" && ok "setup 新建默认=prod" || err "setup 新建未设默认"
 grep -q '  prod:' "$WORK_DIR/setup-new.yaml" && ok "setup 新建含 prod" || err "setup 新建缺 prod"
@@ -421,7 +541,7 @@ profiles:
     path-style: true
     cdn-domain: ""
 EOF
-printf 'test\nhttps://s3-test.example.com\nak\nsk\nbucket-b\n\nus-east-1\ny\n\n' | \
+printf 'test\nhttps://s3-test.example.com\nak\nsk\nbucket-b\n\nus-east-1\ny\nn\n\n\n' | \
     SHELL= "$SAIL_BIN" -c "$WORK_DIR/add-cfg.yaml" config setup >/dev/null 2>&1
 grep -q '  prod:' "$WORK_DIR/add-cfg.yaml" && ok "setup 增 profile 保留 prod" || err "setup 增 profile 丢 prod"
 grep -q '  test:' "$WORK_DIR/add-cfg.yaml" && ok "setup 增 profile 加 test" || err "setup 增 profile 未加 test"
@@ -429,7 +549,7 @@ grep -q 'bucket: "bucket-a"' "$WORK_DIR/add-cfg.yaml" && ok "setup 增 profile �
 grep -q 'default-profile: prod' "$WORK_DIR/add-cfg.yaml" && ok "setup 增 profile 默认不变" || err "setup 增 profile 默认被改"
 
 # ── 把新增 profile 设为默认(promote) ──
-printf 'test\nhttps://s3-test.example.com\nak\nsk\nbucket-b\n\nus-east-1\ny\ny\n' | \
+printf 'test\nhttps://s3-test.example.com\nak\nsk\nbucket-b\n\nus-east-1\ny\nn\n\ny\n' | \
     SHELL= "$SAIL_BIN" -c "$WORK_DIR/add-cfg.yaml" config setup >/dev/null 2>&1
 grep -q 'default-profile: test' "$WORK_DIR/add-cfg.yaml" && ok "setup 可把新 profile 设为默认" || err "setup 未能把新 profile 设为默认"
 grep -q '  prod:' "$WORK_DIR/add-cfg.yaml" && grep -q '  test:' "$WORK_DIR/add-cfg.yaml" && ok "promote 后两 profile 均在" || err "promote 后 profile 缺失"
@@ -455,7 +575,7 @@ profiles:
     path-style: true
     cdn-domain: ""
 EOF
-printf 'prod\nhttps://s3.example.com\nak\nsk\nbucket-a\n\nus-east-1\ny\n\n' | \
+printf 'prod\nhttps://s3.example.com\nak\nsk\nbucket-a\n\nus-east-1\ny\nn\n\ny\n' | \
     SHELL= "$SAIL_BIN" -c "$WORK_DIR/reset-cfg.yaml" config setup --reset >/dev/null 2>&1
 if grep -q '  prod:' "$WORK_DIR/reset-cfg.yaml" && ! grep -q '  test:' "$WORK_DIR/reset-cfg.yaml"; then
     ok "setup --reset 只剩单 profile"
@@ -465,7 +585,7 @@ fi
 grep -q 'default-profile: prod' "$WORK_DIR/reset-cfg.yaml" && ok "setup --reset 默认=prod" || err "setup --reset 默认错误"
 
 # ── setup 留空 ak/sk:写入按 profile 派生的占位符,结尾输出摘要与 export 指引 ──
-SETUP_OUT=$(printf 'prod\nhttps://s3.example.com\n\n\nbucket-a\n\nus-east-1\ny\n\n' | \
+SETUP_OUT=$(printf 'prod\nhttps://s3.example.com\n\n\nbucket-a\n\nus-east-1\ny\nn\n\ny\n' | \
     SHELL= "$SAIL_BIN" -c "$WORK_DIR/placeholder-cfg.yaml" config setup 2>&1)
 if grep -qF 'access-key: ${SAIL_PROD_ACCESS_KEY}' "$WORK_DIR/placeholder-cfg.yaml" \
     && grep -qF 'secret-key: ${SAIL_PROD_SECRET_KEY}' "$WORK_DIR/placeholder-cfg.yaml"; then
@@ -473,16 +593,16 @@ if grep -qF 'access-key: ${SAIL_PROD_ACCESS_KEY}' "$WORK_DIR/placeholder-cfg.yam
 else
     err "setup 留空 ak/sk 未写派生占位符"
 fi
-if echo "$SETUP_OUT" | grep -q '配置摘要' \
-    && echo "$SETUP_OUT" | grep -q 'export SAIL_PROD_ACCESS_KEY=' \
-    && echo "$SETUP_OUT" | grep -q '缺少 access-key/secret-key'; then
+if echo "$SETUP_OUT" | has 'config summary\|配置摘要' \
+    && echo "$SETUP_OUT" | has 'export SAIL_PROD_ACCESS_KEY=' \
+    && echo "$SETUP_OUT" | has 'access-key/secret-key'; then
     ok "setup 结尾输出配置摘要与 export 指引"
 else
     err "setup 结尾缺配置摘要/export 指引"
 fi
 
 # ── setup endpoint 留空原地重问(1 次空后给有效值) ──
-printf 'prod\n\nhttps://s3.example.com\nak\nsk\nbucket-a\n\nus-east-1\ny\n\n' | \
+printf 'prod\n\nhttps://s3.example.com\nak\nsk\nbucket-a\n\nus-east-1\ny\nn\n\ny\n' | \
     SHELL= "$SAIL_BIN" -c "$WORK_DIR/retry-cfg.yaml" config setup >/dev/null 2>&1
 grep -qF 'endpoint: https://s3.example.com' "$WORK_DIR/retry-cfg.yaml" \
     && ok "setup endpoint 留空重问后写入" || err "setup endpoint 重问未生效"

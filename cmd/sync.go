@@ -24,12 +24,13 @@ import (
 )
 
 var (
-	syncDelete   bool
-	syncDryRun   bool
-	syncExclude  []string
-	syncInclude  []string
-	syncChecksum bool
-	syncUpdate   bool
+	syncDelete      bool
+	syncDryRun      bool
+	syncExclude     []string
+	syncInclude     []string
+	syncChecksum    bool
+	syncUpdate      bool
+	syncContentType string
 )
 
 // syncEntry 同步索引条目:大小 + 修改时间 + ETag(仅 s3 侧,已去引号)。
@@ -100,7 +101,8 @@ Examples:
   sail sync ./dir s3://bucket/mirror/
   sail sync --exclude '*.tmp' --delete ./dir s3://bucket/mirror/
   sail sync --checksum ./dir s3://bucket/mirror/
-  sail sync --include '*.json' s3://bucket/mirror/ ./dir2 --dry-run`,
+  sail sync --include '*.json' s3://bucket/mirror/ ./dir2 --dry-run
+  sail sync --content-type text/markdown ./docs s3://bucket/docs/   # pin the type for every uploaded file`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		srcArg, dstArg := args[0], args[1]
@@ -171,7 +173,7 @@ func runSync(ctx context.Context, s3c *s3.Client, r *config.Resolved, srcArg, ds
 			fmt.Printf(i18n.T("would sync %s -> %s\n"), src.display(relKey), dst.display(relKey))
 			continue
 		}
-		if err := syncTransfer(ctx, s3c, src, dst, relKey, se); err != nil {
+		if err := syncTransfer(ctx, s3c, src, dst, relKey, se, syncContentType); err != nil {
 			return err
 		}
 	}
@@ -299,14 +301,15 @@ func isPlainETag(etag string) bool {
 	return err == nil
 }
 
-// syncTransfer 执行单个条目的传输。
-func syncTransfer(ctx context.Context, s3c *s3.Client, src, dst *syncPath, relKey string, se syncEntry) error {
+// syncTransfer 执行单个条目的传输。contentType 只作用于本地→s3 上传,
+// 为空则逐个自动判定;s3↔s3 复制按源对象类型保真。
+func syncTransfer(ctx context.Context, s3c *s3.Client, src, dst *syncPath, relKey string, se syncEntry, contentType string) error {
 	switch {
 	case !src.isS3 && dst.isS3: // 本地 → s3
 		localPath := filepath.Join(src.localDir, filepath.FromSlash(relKey))
 		u := uploader.New(s3c)
 		key := s3path.JoinKey(dst.keyBase, relKey)
-		if err := u.UploadFile(ctx, localPath, dst.bucket, key); err != nil {
+		if err := u.UploadFile(ctx, localPath, dst.bucket, key, contentType); err != nil {
 			return err
 		}
 		fmt.Printf(i18n.T("syncing %s -> s3://%s/%s\n"), localPath, dst.bucket, key)
@@ -462,4 +465,5 @@ func init() {
 	syncCmd.Flags().StringSliceVar(&syncInclude, "include", nil, "include allowlist wildcard (repeatable, only matching entries are synced once provided)")
 	syncCmd.Flags().BoolVar(&syncChecksum, "checksum", false, "verify content by md5 when sizes match")
 	syncCmd.Flags().BoolVar(&syncUpdate, "update", false, "transfer only entries newer than the destination")
+	syncCmd.Flags().StringVar(&syncContentType, "content-type", "", contentTypeFlagUsage)
 }

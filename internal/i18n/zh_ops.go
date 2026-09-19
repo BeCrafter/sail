@@ -18,6 +18,7 @@ Examples:
   sail cp -r ./dir s3://bucket/mirror/          # mirror a local directory recursively
   sail cp -r s3://bucket/prefix/ s3://bucket/dest/   # recursive server-side copy
   sail cp --dry-run ./local.txt s3://bucket/x   # preview, without actually copying
+  sail cp --content-type text/markdown ./NOTES.md s3://bucket/notes   # force the type instead of auto-detecting
   sail upload ./local.txt                       # 1 arg: upload to the default bucket, key is the file name
   sail download s3://bucket/a.txt               # 1 arg: download into the current directory
   cat file | sail upload - s3://bucket/key      # piped input
@@ -36,13 +37,15 @@ s3 源路径支持通配符(* 匹配任意字符含 /,? 匹配单字符),自动�
   sail cp -r ./dir s3://bucket/mirror/          # 递归镜像本地目录
   sail cp -r s3://bucket/prefix/ s3://bucket/dest/   # 服务端递归复制
   sail cp --dry-run ./local.txt s3://bucket/x   # 预演,不实际复制
+  sail cp --content-type text/markdown ./NOTES.md s3://bucket/notes   # 强制指定类型,不走自动判定
   sail upload ./local.txt                       # 1 参:上传到默认 bucket,key 用文件名
   sail download s3://bucket/a.txt               # 1 参:下载到当前目录
   cat file | sail upload - s3://bucket/key      # 管道输入
   sail cp ./a.txt ./b.txt                        # 拒绝:本地→本地用系统 cp`,
-		"recurse into subdirectories":                      "递归复制",
-		"show what would be done without actually copying": "只显示将执行的操作,不实际复制",
-		"Delete objects":                                   "删除对象",
+		"recurse into subdirectories":                                                     "递归复制",
+		"show what would be done without actually copying":                                "只显示将执行的操作,不实际复制",
+		"set Content-Type for local→S3 uploads (default: detect from name, then content)": "为本地→S3 上传指定 Content-Type(默认按名称与内容自动判定)",
+		"Delete objects": "删除对象",
 		`Delete objects; accepts multiple arguments. -r recursively deletes every object under the prefix (batch deletes of up to 1000 at a time).
 Arguments with wildcards (*, ?) are matched against patterns (listing + client-side matching), e.g. s3://bucket/logs/*.log.
 
@@ -117,7 +120,8 @@ Examples:
   sail sync ./dir s3://bucket/mirror/
   sail sync --exclude '*.tmp' --delete ./dir s3://bucket/mirror/
   sail sync --checksum ./dir s3://bucket/mirror/
-  sail sync --include '*.json' s3://bucket/mirror/ ./dir2 --dry-run`: `rsync 式增量同步:默认以大小 + 修改时间比对,只传输有差异的条目。
+  sail sync --include '*.json' s3://bucket/mirror/ ./dir2 --dry-run
+  sail sync --content-type text/markdown ./docs s3://bucket/docs/   # pin the type for every uploaded file`: `rsync 式增量同步:默认以大小 + 修改时间比对,只传输有差异的条目。
 支持本地→s3、s3→本地、s3→s3(服务端复制);本地↔本地请用系统 rsync。
 
 比对模式(S3 LastModified 秒级精度,比对容差 1s):
@@ -134,7 +138,8 @@ Examples:
   sail sync ./dir s3://bucket/mirror/
   sail sync --exclude '*.tmp' --delete ./dir s3://bucket/mirror/
   sail sync --checksum ./dir s3://bucket/mirror/
-  sail sync --include '*.json' s3://bucket/mirror/ ./dir2 --dry-run`,
+  sail sync --include '*.json' s3://bucket/mirror/ ./dir2 --dry-run
+  sail sync --content-type text/markdown ./docs s3://bucket/docs/   # 为本次上传的每个文件指定类型`,
 		"delete extraneous entries on the destination side":                                       "删除目标端多余的条目",
 		"show what would be done without actually syncing":                                        "只显示将执行的操作,不实际同步",
 		"exclude wildcard (repeatable, matches relative path or file name)":                       "排除通配符(可重复,匹配相对路径或文件名)",
