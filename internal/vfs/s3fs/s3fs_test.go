@@ -419,3 +419,74 @@ func TestCommitRefusesTruncatedBody(t *testing.T) {
 		t.Fatalf("桶里原有对象不应被截断数据覆盖,实际 %+v", obj)
 	}
 }
+
+// 提交点的 Content-Type 判定:显式值优先;否则按扩展名推断,无扩展名再嗅探
+// 内容;空对象不做嗅探(否则 DetectContentType 会把空内容判成 text/plain)。
+func TestCommitInfersContentType(t *testing.T) {
+	png := append([]byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}, make([]byte, 32)...)
+	cases := []struct {
+		desc, path string
+		data       []byte
+		explicit   string
+		want       string
+	}{
+		{"显式值原样保留", "a.bin", []byte("x"), "application/x-test", "application/x-test"},
+		{"显式 octet-stream 原样保留", "note.md", []byte("x"), "application/octet-stream", "application/octet-stream"},
+		{"按扩展名推断", "note.md", []byte("x"), "", "text/markdown; charset=utf-8"},
+		{"无扩展名按内容嗅探", "blob", png, "", "image/png"},
+		{"空对象兜底为 octet-stream", "empty", nil, "", "application/octet-stream"},
+	}
+	for _, c := range cases {
+		fs, srv := newFS(t, "", 0)
+		ctx := context.Background()
+		w, err := fs.OpenWrite(ctx, "/"+c.path)
+		if err != nil {
+			t.Fatalf("%s: OpenWrite 失败: %v", c.desc, err)
+		}
+		if opt, ok := w.(vfs.WriteOptioner); ok {
+			opt.SetWriteOptions(vfs.WriteOptions{ContentType: c.explicit, ContentLength: int64(len(c.data))})
+		}
+		if _, err := w.Write(c.data); err != nil {
+			t.Fatalf("%s: Write 失败: %v", c.desc, err)
+		}
+		if _, err := w.Commit(ctx); err != nil {
+			t.Fatalf("%s: Commit 失败: %v", c.desc, err)
+		}
+		w.Close()
+		obj, ok := srv.Get(testBucket, c.path)
+		if !ok {
+			t.Fatalf("%s: 对象未落库", c.desc)
+		}
+		if obj.ContentType != c.want {
+			t.Errorf("%s: Content-Type = %q,期望 %q", c.desc, obj.ContentType, c.want)
+		}
+	}
+}
+
+// 分片存储表示(manifest 落在逻辑 key 上)也要带上推断出的类型。
+func TestChunkedCommitInfersContentType(t *testing.T) {
+	fs, srv := newChunkedFS(t, testChunkSize)
+	ctx := context.Background()
+	payload := bytes.Repeat([]byte("c"), int(3*testChunkSize))
+	w, err := fs.OpenWrite(ctx, "/big.md")
+	if err != nil {
+		t.Fatalf("OpenWrite 失败: %v", err)
+	}
+	defer w.Close()
+	if opt, ok := w.(vfs.WriteOptioner); ok {
+		opt.SetWriteOptions(vfs.WriteOptions{ContentLength: int64(len(payload))})
+	}
+	if _, err := w.Write(payload); err != nil {
+		t.Fatalf("Write 失败: %v", err)
+	}
+	if _, err := w.Commit(ctx); err != nil {
+		t.Fatalf("Commit 失败: %v", err)
+	}
+	obj, ok := srv.Get(testBucket, "big.md")
+	if !ok {
+		t.Fatal("manifest 对象未落库")
+	}
+	if obj.ContentType != "text/markdown; charset=utf-8" {
+		t.Errorf("manifest 的 Content-Type = %q,期望 text/markdown; charset=utf-8", obj.ContentType)
+	}
+}

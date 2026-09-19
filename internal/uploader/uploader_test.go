@@ -3,12 +3,14 @@ package uploader
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"testing"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
@@ -73,16 +75,18 @@ func TestProgressReaderRead(t *testing.T) {
 }
 
 // uploadClientRecorder 实现 manager.UploadAPIClient,把每次 PutObject 的
-// key 与 body 记下来,使 manager.Uploader 的上传路径可在无网络下走通。
+// key、body 与 Content-Type 记下来,使 manager.Uploader 的上传路径可在无网络下走通。
 type uploadClientRecorder struct {
-	keys []string
-	body string
+	keys         []string
+	contentTypes []string
+	body         string
 }
 
 func (r *uploadClientRecorder) PutObject(ctx context.Context, in *s3.PutObjectInput, opts ...func(*s3.Options)) (*s3.PutObjectOutput, error) {
 	if in.Key != nil {
 		r.keys = append(r.keys, *in.Key)
 	}
+	r.contentTypes = append(r.contentTypes, aws.ToString(in.ContentType))
 	if in.Body != nil {
 		b, err := io.ReadAll(in.Body)
 		if err != nil {
@@ -124,7 +128,7 @@ func TestUploadFileCapturesKeyAndBody(t *testing.T) {
 	rec := &uploadClientRecorder{}
 	u := newTestUploader(rec)
 
-	if err := u.UploadFile(context.Background(), path, "mybucket", "dir/file.txt"); err != nil {
+	if err := u.UploadFile(context.Background(), path, "mybucket", "dir/file.txt", ""); err != nil {
 		t.Fatalf("UploadFile 报错: %v", err)
 	}
 	if len(rec.keys) != 1 || rec.keys[0] != "dir/file.txt" {
@@ -137,7 +141,7 @@ func TestUploadFileCapturesKeyAndBody(t *testing.T) {
 
 func TestUploadFileMissingPath(t *testing.T) {
 	u := newTestUploader(&uploadClientRecorder{})
-	if err := u.UploadFile(context.Background(), filepath.Join(t.TempDir(), "nope"), "b", "k"); err == nil {
+	if err := u.UploadFile(context.Background(), filepath.Join(t.TempDir(), "nope"), "b", "k", ""); err == nil {
 		t.Errorf("缺失本地文件应报错")
 	}
 }
@@ -145,7 +149,7 @@ func TestUploadFileMissingPath(t *testing.T) {
 func TestUploadStream(t *testing.T) {
 	rec := &uploadClientRecorder{}
 	u := newTestUploader(rec)
-	if err := u.UploadStream(context.Background(), bytes.NewReader([]byte("stream-data")), "b", "k"); err != nil {
+	if err := u.UploadStream(context.Background(), bytes.NewReader([]byte("stream-data")), "b", "k", ""); err != nil {
 		t.Fatalf("UploadStream 报错: %v", err)
 	}
 	if rec.body != "stream-data" {
@@ -170,7 +174,7 @@ func TestUploadDir(t *testing.T) {
 
 	rec := &uploadClientRecorder{}
 	u := newTestUploader(rec)
-	if err := u.UploadDir(context.Background(), dir, "bucket", "/mirror/"); err != nil {
+	if err := u.UploadDir(context.Background(), dir, "bucket", "/mirror/", ""); err != nil {
 		t.Fatalf("UploadDir 报错: %v", err)
 	}
 	got := append([]string(nil), rec.keys...)
@@ -182,6 +186,85 @@ func TestUploadDir(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("key[%d] = %q,期望 %q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestUploadFileContentType 覆盖自动判定链:目标 key → 本地文件名 → 内容嗅探,
+// 以及显式值优先。
+func TestUploadFileContentType(t *testing.T) {
+	png := append([]byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}, make([]byte, 32)...)
+	cases := []struct {
+		desc, localName, key, explicit, want string
+	}{
+		{"key 扩展名优先于本地文件名", "source.bin", "page.md", "", "text/markdown; charset=utf-8"},
+		{"key 无扩展名时回退本地文件名", "note.md", "renamed", "", "text/markdown; charset=utf-8"},
+		{"都无扩展名时按内容嗅探", "blob", "blob", "", "image/png"},
+		{"显式值覆盖自动判定", "note.md", "note.md", "text/x-pinned", "text/x-pinned"},
+	}
+	for i, c := range cases {
+		data := []byte("hello")
+		if c.want == "image/png" {
+			data = png
+		}
+		sub := filepath.Join(t.TempDir(), fmt.Sprintf("case%d", i))
+		if err := os.MkdirAll(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		local := filepath.Join(sub, c.localName)
+		if err := os.WriteFile(local, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		rec := &uploadClientRecorder{}
+		u := newTestUploader(rec)
+		if err := u.UploadFile(context.Background(), local, "b", c.key, c.explicit); err != nil {
+			t.Fatalf("%s: UploadFile 报错: %v", c.desc, err)
+		}
+		if len(rec.contentTypes) != 1 || rec.contentTypes[0] != c.want {
+			t.Errorf("%s: Content-Type = %v,期望 [%s]", c.desc, rec.contentTypes, c.want)
+		}
+	}
+}
+
+// TestUploadStreamContentType 覆盖管道上传:key 扩展名命中与内容嗅探两条路径。
+func TestUploadStreamContentType(t *testing.T) {
+	cases := []struct {
+		desc, key, body, want string
+	}{
+		{"key 扩展名命中", "k.md", "hello", "text/markdown; charset=utf-8"},
+		{"无扩展名按内容嗅探", "k", "hello", "text/plain; charset=utf-8"},
+	}
+	for _, c := range cases {
+		rec := &uploadClientRecorder{}
+		u := newTestUploader(rec)
+		if err := u.UploadStream(context.Background(), bytes.NewReader([]byte(c.body)), "b", c.key, ""); err != nil {
+			t.Fatalf("%s: UploadStream 报错: %v", c.desc, err)
+		}
+		if len(rec.contentTypes) != 1 || rec.contentTypes[0] != c.want {
+			t.Errorf("%s: Content-Type = %v,期望 [%s]", c.desc, rec.contentTypes, c.want)
+		}
+	}
+}
+
+// TestUploadDirExplicitContentType 验证显式值应用到目录内全部文件。
+func TestUploadDirExplicitContentType(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a.md", "b.png"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := &uploadClientRecorder{}
+	u := newTestUploader(rec)
+	if err := u.UploadDir(context.Background(), dir, "bucket", "", "text/x-pinned"); err != nil {
+		t.Fatalf("UploadDir 报错: %v", err)
+	}
+	if len(rec.contentTypes) != 2 {
+		t.Fatalf("上传对象数 = %d,期望 2", len(rec.contentTypes))
+	}
+	for i, ct := range rec.contentTypes {
+		if ct != "text/x-pinned" {
+			t.Errorf("contentTypes[%d] = %q,期望 text/x-pinned", i, ct)
 		}
 	}
 }

@@ -9,13 +9,12 @@ import (
 	"fmt"
 	"hash"
 	"io"
-	"mime"
 	"os"
-	"path"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/BeCrafter/sail/internal/mimetype"
 	"github.com/BeCrafter/sail/internal/vfs"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
@@ -172,10 +171,9 @@ func (w *writeFile) Commit(ctx context.Context) (vfs.FileInfo, error) {
 
 	contentType := w.opts.ContentType
 	if contentType == "" {
-		contentType = mime.TypeByExtension(path.Ext(w.logical))
-	}
-	if contentType == "" {
-		contentType = "application/octet-stream"
+		// 壳只转发客户端给的 header,嗅探只能发生在提交点(暂存文件在这里)。
+		// 读不到不阻断提交,退化为按扩展名/octet-stream 判定。
+		contentType = mimetype.Detect(w.logical, "", readHead(w.tmpPath))
 	}
 
 	var (
@@ -394,4 +392,15 @@ func (w *writeFile) Close() error {
 		fmt.Fprintf(os.Stderr, "警告: 清理暂存文件 %s 失败: %v\n", w.tmpPath, err)
 	}
 	return nil
+}
+
+// readHead 读暂存文件头部供类型探测;读不到或文件为空时返回 nil,
+// 调用方退化为纯扩展名判定。
+func readHead(path string) []byte {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	return mimetype.ReadHead(f)
 }

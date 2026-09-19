@@ -405,6 +405,49 @@ func TestContentTypePassthrough(t *testing.T) {
 	}
 }
 
+// 客户端发通用二进制类型只表示"没意见"(实测 macOS 自带客户端干脆一个都不发):
+// 落库时按扩展名/内容推断,不能把流类型写进元数据。
+func TestGenericBinaryContentTypeIsInferred(t *testing.T) {
+	for _, hdr := range []string{
+		"application/octet-stream",
+		"binary/octet-stream",
+		"Application/Octet-Stream; charset=binary",
+	} {
+		g := newGateway(t, "", 0)
+		put := g.do(t, "PUT", "/note.md", "body", true, map[string]string{"Content-Type": hdr})
+		if put.StatusCode != http.StatusCreated {
+			t.Fatalf("%s: PUT 期望 201,实际 %d", hdr, put.StatusCode)
+		}
+		obj, ok := g.s3.Get(bucket, "note.md")
+		if !ok {
+			t.Fatalf("%s: 对象未落库", hdr)
+		}
+		if want := "text/markdown; charset=utf-8"; obj.ContentType != want {
+			t.Errorf("%s: 落库 Content-Type = %q,期望按扩展名推断为 %q", hdr, obj.ContentType, want)
+		}
+	}
+}
+
+// 归一化后交给内核推断:无扩展名按内容嗅探,空对象兜底 octet-stream
+// (不能因为嗅探把空内容判成 text/plain)。
+func TestGenericBinaryContentTypeFallsBackToSniffing(t *testing.T) {
+	g := newGateway(t, "", 0)
+	png := append([]byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}, make([]byte, 32)...)
+	if put := g.do(t, "PUT", "/blob", string(png), true, map[string]string{"Content-Type": "application/octet-stream"}); put.StatusCode != http.StatusCreated {
+		t.Fatalf("PUT 期望 201,实际 %d", put.StatusCode)
+	}
+	if obj, ok := g.s3.Get(bucket, "blob"); !ok || obj.ContentType != "image/png" {
+		t.Errorf("无扩展名的 PNG 应按内容嗅探为 image/png,实际 %+v", obj)
+	}
+
+	if put := g.do(t, "PUT", "/empty", "", true, map[string]string{"Content-Type": "application/octet-stream"}); put.StatusCode != http.StatusCreated {
+		t.Fatalf("空对象 PUT 期望 201,实际 %d", put.StatusCode)
+	}
+	if obj, ok := g.s3.Get(bucket, "empty"); !ok || obj.ContentType != "application/octet-stream" {
+		t.Errorf("空对象应兜底为 application/octet-stream,实际 %+v", obj)
+	}
+}
+
 func TestMissingObjectReturns404(t *testing.T) {
 	g := newGateway(t, "", 0)
 	resp := g.do(t, "GET", "/nope.bin", "", true, nil)

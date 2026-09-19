@@ -45,6 +45,7 @@ sail config setup                               # interactively generate/update 
 sail cp local.txt s3://mybucket/path/local.txt  # upload
 sail ls s3://mybucket/                          # list
 sail cp s3://mybucket/key local.txt             # download
+sail cp --content-type text/markdown NOTES.md s3://mybucket/notes   # pin the type for this upload (s3→s3 copies unaffected)
 ```
 
 Example config:
@@ -151,6 +152,11 @@ the startup banner prints `bucket=`, `profile=`, `prefix=`, and the mountable ad
 
 Mount with **macOS Finder** (⌘K, `https://host:8443`) or **Windows Explorer** (run
 `--print-windows-setup` first to lift the ~50MB WebClient registry gate, then `net use Z: \\host@SSL@8443\DavWWWRoot`).
+
+Uploaded files are stored with a Content-Type inferred from the extension, then the content
+signature — so images/PDFs opened through a public link render instead of downloading. A client
+that sends no Content-Type (macOS's built-in WebDAV client doesn't) or only the generic
+`application/octet-stream` counts as "no preference"; any other type the client sends is kept as-is.
 
 ### Multi-user (`serve.users`)
 

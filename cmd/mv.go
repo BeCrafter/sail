@@ -78,7 +78,8 @@ Examples:
 			if err != nil {
 				return err
 			}
-			return cpLocalToS3(ctx, s3c, args[0], dst, mvRecursive, true, mvDryRun)
+			// mv 不提供 --content-type:上传类型自动判定。
+			return cpLocalToS3(ctx, s3c, args[0], dst, mvRecursive, true, mvDryRun, "")
 		case srcIsS3 && !dstIsS3:
 			src, err := parseS3(args[0], r)
 			if err != nil {

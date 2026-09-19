@@ -286,9 +286,9 @@ func TestLoadResolvedBucketPriorityChain(t *testing.T) {
 		wantBucket  string
 		wantProfile string
 	}{
-		{"仅 profile 提供桶", "tizzy", "", "", "tizzy", "prod"},
-		{"SAIL_BUCKET 覆盖 profile", "tizzy", "env-bucket", "", "env-bucket", "prod"},
-		{"--bucket 覆盖 env 与 profile", "tizzy", "env-bucket", "other", "other", "prod"},
+		{"仅 profile 提供桶", "mybucket", "", "", "mybucket", "prod"},
+		{"SAIL_BUCKET 覆盖 profile", "mybucket", "env-bucket", "", "env-bucket", "prod"},
+		{"--bucket 覆盖 env 与 profile", "mybucket", "env-bucket", "other", "other", "prod"},
 		{"profile 无桶且无 flag/env", "", "", "", "", "prod"},
 	}
 	for _, c := range cases {
@@ -315,8 +315,8 @@ func TestLoadResolvedBucketPriorityChain(t *testing.T) {
 func TestServeBannerExposesBucketProfilePrefix(t *testing.T) {
 	line := i18n.Tf(
 		"sail webdav started: %s://%s  bucket=%s profile=%s%s user=%s max-object-size=%s staging=%s chunked=%s\n",
-		"https", ":8443", "tizzy", "prod", exposePrefix("tenant-a"), "alice", humanSize(5<<40), stagingDirOf(""), chunkedText(false, 0))
-	for _, want := range []string{"bucket=tizzy", "profile=prod", "prefix=tenant-a"} {
+		"https", ":8443", "mybucket", "prod", exposePrefix("tenant-a"), "alice", humanSize(5<<40), stagingDirOf(""), chunkedText(false, 0))
+	for _, want := range []string{"bucket=mybucket", "profile=prod", "prefix=tenant-a"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("启动横幅缺少 %q:%s", want, line)
 		}

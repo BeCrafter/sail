@@ -300,6 +300,7 @@ sail cp s3://mybucket/a.txt ./out.txt
 sail cp -r ./dir s3://mybucket/mirror/           # recursively mirror a local directory
 sail cp -r s3://mybucket/prefix/ s3://mybucket/dest/   # server-side recursive copy
 sail cp --dry-run ./local.txt s3://mybucket/x   # dry run, no actual copy
+sail cp --content-type text/markdown ./NOTES.md s3://mybucket/notes   # pin the type for this upload (-r included; s3→s3 copies unaffected)
 
 # Move objects/files (copy then delete source)
 sail mv s3://mybucket/a.txt s3://mybucket/moved.txt     # single object, no confirmation
@@ -364,6 +365,8 @@ it explicitly to override the config value.
 The startup banner derives mount URLs from the bind address: for a wildcard bind (`:8080`/`0.0.0.0:8080`) it lists both `http://localhost:PORT/` (this machine) and each interface's LAN IP (other devices); for an explicit host it lists only that address.
 
 > **Performance**: uploads/downloads stream via server-side Range reads without staging whole files in memory; the HTTP connection pool is tuned for high-concurrency S3, reusing long-lived connections when opening many files at once; directory listings are short-TTL cached. Opening a single file is 1 `HeadObject` + 1 `GetObject`.
+
+> **Content-Type**: files uploaded through the mount are stored with a type inferred from the name (extension first, then the content signature) — so images/PDFs opened through a link render instead of downloading. A client that sends no Content-Type (macOS's built-in WebDAV client doesn't) or only the generic `application/octet-stream` counts as "no preference"; any other type the client sends is kept as-is.
 
 ### Multi-user (`serve.users`)
 

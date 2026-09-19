@@ -63,7 +63,7 @@ type Server struct {
 	// ——模拟「端点可用、部分对象删不掉」的真实形态。
 	FailBatchDeleteKeys atomic.Bool
 	// FailBatchDelete 置真时,批量删除端点(?delete)返回 500——模拟不支持
-	// DeleteObjects 的 S3 兼容服务(如 xueersi 测试网关),用于验证回退路径。
+	// DeleteObjects 的 S3 兼容服务(如某些自建网关),用于验证回退路径。
 	FailBatchDelete atomic.Bool
 	// DeleteDelay 是单对象删除的注入延迟,用于把并发回退与串行回退区分开:
 	// 并发执行时总耗时应接近单个延迟而非 N 倍。

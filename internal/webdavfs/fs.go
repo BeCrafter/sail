@@ -11,7 +11,6 @@ import (
 	"errors"
 	"io"
 	"log"
-	"mime"
 	"net/http"
 	"os"
 	"path"
@@ -21,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/BeCrafter/sail/internal/mimetype"
 	"github.com/BeCrafter/sail/internal/vfs"
 	"golang.org/x/net/webdav"
 )
@@ -147,8 +147,15 @@ func (fs *FileSystem) OpenFile(ctx context.Context, name string, flag int, perm 
 			return nil, err
 		}
 		if opt, ok := w.(vfs.WriteOptioner); ok {
+			// 客户端"没意见"时归一化为空 —— 没发 Content-Type(实测 macOS 自带
+			// 客户端就不发)或只发通用的 application/octet-stream,都交回内核按
+			// 扩展名/内容判定;其余类型原样透传,显式指定仍以客户端为准。
+			ct := requestContentType(ctx)
+			if mimetype.IsGenericBinary(ct) {
+				ct = ""
+			}
 			opt.SetWriteOptions(vfs.WriteOptions{
-				ContentType:   requestContentType(ctx),
+				ContentType:   ct,
 				ContentLength: requestContentLength(ctx),
 			})
 		}
@@ -677,10 +684,10 @@ func (f davFileInfo) ContentType(context.Context) (string, error) {
 	if f.FileInfo.IsDir {
 		return "", webdav.ErrNotImplemented
 	}
-	if ct := mime.TypeByExtension(path.Ext(f.FileInfo.Name)); ct != "" {
+	if ct := mimetype.Lookup(f.FileInfo.Name, ""); ct != "" {
 		return ct, nil
 	}
-	return "application/octet-stream", nil
+	return mimetype.OctetStream, nil
 }
 
 // davFile 是 webdav.File 的实现。同一类型承担读、写、目录三种角色:
