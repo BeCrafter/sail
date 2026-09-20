@@ -38,12 +38,13 @@ for f in "$MAIN_README" "$ZH_README" "$NPM_README"; do
   [[ -f "$f" ]] || { echo -e "${RED}缺少 $f${NC}"; exit 1; }
 done
 
-# ── 1. 真实命令清单(name<TAB>group)────────────────────────
+# ── 1. 真实命令清单(name<TAB>group<TAB>aliases)─────────────
 DUMP="$("$SAIL_BIN" __commands)"
 [[ -n "$DUMP" ]] || { echo -e "${RED}无法从 $SAIL_BIN 取得命令清单${NC}"; exit 1; }
 COMMANDS="$(printf '%s\n' "$DUMP" | cut -f1)"
 echo "真实命令清单($(printf '%s\n' "$COMMANDS" | wc -l | tr -d ' ') 个):"
 printf '%s\n' "$COMMANDS" | tr '\n' ' '; echo; echo
+
 
 # help_subs <cmd> <sub?>:该命令 --help 里 Available Commands 列出的子命令。
 # 三级命令固定为 `sail <cmd> <sub>` 形态(空格分隔,不引号)。
@@ -102,6 +103,12 @@ tree_cmds() {
   printf '%s\n' "$out"
 }
 
+# 预热命令树缓存。tree_cmds 的调用点几乎都在子 shell 里(< <(...) 或 $(...)),
+# 子 shell 里设的变量回不到父 shell,缓存会一次次失效、命令树被反复重建
+# (每建一次要起 O(命令数) 个 sail --help,是脚本耗时的大头)。这里在主 shell
+# 先算一次,后续调用就都命中缓存了。
+tree_cmds > /dev/null
+
 # tree_aliases:命令别名(upload/download/cat 等),README 用它们举例属正常
 tree_aliases() {
   printf '%s\n' "$DUMP" | awk -F'\t' 'NF>=3 && $3!=""{n=split($3,a,",");for(i=1;i<=n;i++)print a[i]}'
@@ -110,27 +117,49 @@ tree_aliases() {
 # doc_sail_tokens <readme>:代码块里每处 `sail` 调用起的空白切词(去掉行尾注释)。
 # doc_cmds / doc_flags 都由它派生,避免两处各写一遍同一段 awk 而漂移。
 doc_sail_tokens() {
-  awk '/^[[:space:]]*```/{inf=!inf; next}
-       !inf{next}
-       {
-         sub(/#.*/, "")                 # 剥掉行尾注释:sail --version  # or sail -v 的第二个 sail 不是调用
-         n=split($0, w)
+  awk '
+       function emit(line, n, w, i, k, out, at_command_start) {
+         n=split(line, w)
          for(i=1;i<=n;i++) if(w[i]=="sail"){
+           # 只把命令位置的 sail 当作调用。否则 `cd sail && go build -o sail .`
+           # 会把路径/参数里的 sail 误识别成命令；管道和 shell 链接后的 sail
+           # 仍会被识别,例如 `sail ls | sail rm -r -`。
+           at_command_start = (i == 1 || w[i-1] ~ /^(\||\|\||&&|;|&|\|&)$/)
+           if (!at_command_start) continue
            out=""
            for(k=i; k<=n; k++) out = out (out==""?"":" ") w[k]
            print out
-           break
          }
-       }' "$1"
+       }
+       /^[[:space:]]*```/{inf=!inf; next}
+       !inf{next}
+       {
+         line=$0
+         sub(/#.*/, "", line)           # 剥掉行尾注释,避免把注释里的 sail 当调用
+         if (line ~ /\\[[:space:]]*$/) { # 反斜杠续行:续上下一行再切词
+           sub(/[[:space:]]*$/, "", line)
+           sub(/\\$/, "", line)
+           buf = buf line " "
+           next
+         }
+         emit(buf line)
+         buf = ""
+       }
+       END { if (buf != "") emit(buf) }' "$1"
 }
 
-# is_tree_cmd <cmd…>:该串是否正好是命令树里的一个命令(支持两段式子命令)。
-is_tree_cmd() {
-  local want="$*" c
-  while IFS= read -r c; do
-    [[ "$c" == "$want" ]] && return 0
-  done < <(tree_cmds)
-  return 1
+# pipe_head <词…>:截到第一个管道/链接操作符为止,结果放 PIPE_HEAD 数组。
+# 管道右侧是另一条命令:`sail ls … | sail rm -r -` 里 rm 的旗标不该记在 ls
+# 名下(ls 恰好也有 -r,不看这一步就永远发现不了)。doc_cmd_of 与 doc_flags
+# 都要用,故共用同一个截断口径。
+PIPE_HEAD=()           # set -u 下必须先定义,空数组展开才不报 unbound
+pipe_head() {
+  PIPE_HEAD=()
+  local t
+  for t in "$@"; do
+    case "$t" in '|'|'||'|'&&'|';'|'&'|'|&') break;; esac
+    PIPE_HEAD+=("$t")
+  done
 }
 
 # doc_cmd_of <前导旗标…> <词…>:从一次 sail 调用的词元里取出「最长匹配的已注册命令」。
@@ -141,8 +170,15 @@ is_tree_cmd() {
 #     不会被 && / | 之类的 shell 操作符带偏。
 doc_cmd_of() {
   while [[ $# -gt 0 && "$1" == -* ]]; do
-    [[ "$1" == *=* ]] || shift          # 带 = 的旗标自带取值
-    shift
+    case "$1" in
+      --help|--version|-h|-v) shift;;    # 无值的全局旗标
+      *=*) shift;;                       # 带 = 的旗标自带取值
+      *)
+        shift
+        [[ $# -gt 0 ]] || break          # 末尾是需要值的旗标:没有命令可取
+        shift                            # 跳过旗标值
+        ;;
+    esac
   done
   [[ $# -gt 0 ]] || return 0
   case "$1" in
@@ -150,13 +186,20 @@ doc_cmd_of() {
     # 这类把 sail 当路径/名字用的行。跳过,别按「未知命令」误报。
     '&'|'&&'|'|'|'||'|';'|'>'|'>>'|'<'|'2>'|'2>&1') return 0;;
   esac
-  if [[ $# -gt 1 ]] && is_tree_cmd "$1" "$2"; then
+  pipe_head "$@"
+  [[ ${#PIPE_HEAD[@]} -gt 0 ]] || return 0
+  set -- "${PIPE_HEAD[@]}"
+  # 两段式子命令只在「第一个词本身是子命令宿主」时才成立。
+  # 用缓存树里的两词条目判定:既认对(serve webdav),也不会把
+  # `du --bogus-flag` 误拼成两词命令(du 有全局旗标但没有子命令)。
+  local tree="$TREE_CMDS"
+  if [[ $# -gt 1 ]] && printf '%s\n' "$tree" | grep -qxF "$1 $2"; then
     printf '%s' "$1 $2"; return 0
   fi
-  # 第一个词是带子命令的命令、第二个词却不是它的子命令(如 `sail serve webdav2`):
-  # 报两词出去,让「文档命令有效性」直接点名 webdav2,而不是把它当参数忽略、
-  # 再在后续检查里报成一个莫名其妙的旗标错误。
-  if [[ $# -gt 1 && -n "$(help_subs "$1")" ]]; then
+  if [[ $# -gt 1 ]] && printf '%s\n' "$tree" | grep -qF "$1 "; then
+    # 第一个词确实是子命令宿主、第二个词却不是它的子命令(如 `sail serve webdav2`):
+    # 报两词出去,让「文档命令有效性」直接点名 webdav2,而不是把它当参数忽略、
+    # 再在后续检查里报成一个莫名其妙的旗标错误。
     printf '%s' "$1 $2"; return 0
   fi
   printf '%s' "$1"
@@ -164,11 +207,13 @@ doc_cmd_of() {
 
 # doc_cmds <readme>:示例里用到的命令名(含子命令),每行一个。
 doc_cmds() {
+  local line
+  local -a words
   while read -r line; do
     [[ -n "$line" ]] || continue
-    set -- $line
-    shift                                  # 丢掉 "sail"
-    doc_cmd_of "$@"
+    read -r -a words <<< "$line"
+    [[ ${#words[@]} -gt 1 ]] || continue   # `sail --version` 等旗标-only 示例
+    doc_cmd_of "${words[@]:1}"
     printf '\n'
   done < <(doc_sail_tokens "$1") | sort -u
 }
@@ -177,36 +222,63 @@ doc_cmds() {
 # 旗标记在「最长匹配的已注册命令」名下:这样 doc_cmds 与 doc_flags 对
 # `sail serve webdav --tls-cert x` 得到同一个归属,不会一件一议。
 doc_flags() {
+  local line cmd n flag
+  local -a words args
   while read -r line; do
     [[ -n "$line" ]] || continue
-    set -- $line
-    shift
-    cmd="$(doc_cmd_of "$@")" || true
-    [[ -n "$cmd" ]] || continue
-    n=$(printf '%s' "$cmd" | wc -w | tr -d ' ')
-    shift "$n"
-    while [[ $# -gt 0 ]]; do
-      case "$1" in
-        --*=*)   printf '%s\t%s\n' "$cmd" "${1%%=*}";;
-        -)       :;;      # 单独一个 - 是 stdin/stdout 占位符,不是旗标
-        -*)      printf '%s\t%s\n' "$cmd" "$1";;
+    read -r -a words <<< "$line"
+    [[ ${#words[@]} -gt 1 ]] || continue
+    args=("${words[@]:1}")
+
+    # 先跳过命令前的全局旗标及其取值,使后面的 shift 与 doc_cmd_of
+    # 使用同一套「命令从哪里开始」的口径。
+    while [[ ${#args[@]} -gt 0 && "${args[0]}" == -* ]]; do
+      case "${args[0]}" in
+        --help|--version|-h|-v|*=*) args=("${args[@]:1}");;
+        *)
+          args=("${args[@]:1}")
+          [[ ${#args[@]} -gt 0 ]] && args=("${args[@]:1}")
+          ;;
       esac
-      shift
+    done
+    [[ ${#args[@]} -gt 0 ]] || continue
+    pipe_head "${args[@]}"
+    [[ ${#PIPE_HEAD[@]} -gt 0 ]] || continue
+    args=("${PIPE_HEAD[@]}")
+    cmd="$(doc_cmd_of "${args[@]}")" || true
+    [[ -n "$cmd" ]] || continue
+    # 别名没有自己的旗标行(upload→cp、cat→view):按规范名查表,
+    # 否则合法的 `sail upload -r …` 会被当成漂移。
+    case "$cmd" in
+      upload|download) cmd=cp;;
+      cat)             cmd=view;;
+    esac
+    n=$(wc -w <<< "$cmd" | tr -d ' ')
+    args=("${args[@]:n}")
+    while [[ ${#args[@]} -gt 0 ]]; do
+      flag="${args[0]}"
+      case "$flag" in
+        --*=*)   printf '%s\t%s\n' "$cmd" "${flag%%=*}";;
+        -)       :;;      # 单独一个 - 是 stdin/stdout 占位符,不是旗标
+        -*)      printf '%s\t%s\n' "$cmd" "$flag";;
+      esac
+      args=("${args[@]:1}")
     done
   done < <(doc_sail_tokens "$1")
 }
 
-# doc_command_lines <readme>:代码块里所有以 sail 开头的示例命令行(去注释、去空白)。
+# doc_command_lines <readme>:代码块里所有 sail 调用的命令段(去注释、去空白)。
 # 命令行本身与语言无关——中英 README 的同一条示例应当逐字一致,只注释不同。
 doc_command_lines() {
-  awk '/^[[:space:]]*```/{inf=!inf; next}
-       !inf{next}
-       {
-         line=$0
-         sub(/#.*/, "", line)
-         gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
-         if (line ~ /^sail([[:space:]]|$)/) print line
-       }' "$1" | sort
+  local line
+  local -a words
+  while read -r line; do
+    [[ -n "$line" ]] || continue
+    read -r -a words <<< "$line"
+    pipe_head "${words[@]}"
+    [[ ${#PIPE_HEAD[@]} -gt 0 ]] || continue
+    printf '%s\n' "${PIPE_HEAD[*]}"
+  done < <(doc_sail_tokens "$1") | sort
 }
 
 # cmd_covered <readme> <cmd>:readme 是否提及该命令。
