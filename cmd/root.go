@@ -91,11 +91,7 @@ var commandsDumpCmd = &cobra.Command{
 			if !c.IsAvailableCommand() {
 				continue
 			}
-			alias := ""
-			if len(c.Aliases) > 0 {
-				alias = strings.Join(c.Aliases, ",")
-			}
-			lines = append(lines, c.Name()+"\t"+c.GroupID+"\t"+alias)
+			lines = append(lines, c.Name()+"\t"+c.GroupID+"\t"+strings.Join(c.Aliases, ","))
 		}
 		sort.Strings(lines)
 		for _, l := range lines {
