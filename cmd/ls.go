@@ -34,10 +34,10 @@ var lsCmd = &cobra.Command{
 (s3://bucket is accepted but pointless);
 -l long format (size + last-modified time), combinable with -t to sort by time,
 -S by size, -r to reverse, and --human for human-readable sizes;
--d lists sub-directories only (comma-separated prefixes, no files), mirroring ls -d;
+-d lists sub-directories only (the prefix's direct child prefixes, no files), mirroring ls -d;
 --buckets lists all buckets.
-Without sorting flags, output is streamed (low memory on large buckets);
-with sorting flags, all objects are collected first and then printed.
+Without sorting or --reverse flags, output is streamed (low memory on large buckets);
+with them, all objects are collected first and then printed.
 
 Examples:
   sail ls s3://bucket/prefix/

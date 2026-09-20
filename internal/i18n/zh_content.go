@@ -74,11 +74,13 @@ Range 不可用时(服务不支持/对象过小)自动退化为全量流式读�
 		"Count lines, words, and bytes": "统计行数/单词数/字节数",
 		`Stream-count lines, words, and bytes of an object/file.
 With no options, print three columns (lines words bytes, GNU wc order); with options, print only the selected columns.
+With more than one source, print a final "total" line summing all sources.
 
 Examples:
   sail wc -l s3://bucket/logs/app.log
   sail wc s3://bucket/a.json ./b.txt`: `流式统计对象/文件的行、词、字节数。
 未给选项时输出三列(行 词 字节,GNU wc 顺序);给选项则只输出所选列。
+源多于一个时,末尾额外输出合计行 total。
 
 示例:
   sail wc -l s3://bucket/logs/app.log
@@ -90,18 +92,18 @@ Examples:
 		// grep
 		"Search object/file contents": "在对象/文件内容中搜索",
 		`Stream-search object/file contents line by line with a regex, without downloading to disk.
--i ignore case; -v invert (print non-matching lines); -l list only sources with matches; -c print match count; -n show line numbers.
+-i ignore case; -v invert (print non-matching lines); -l list only sources with matches; --count print match count; -n show line numbers.
 A single source prints bare matching lines; multiple sources prefix each line with "source:line". Exit code 1 when no source matches (GNU grep convention).
 
 Examples:
   sail grep -n "ERROR" s3://bucket/logs/app.log
-  sail grep -ic "timeout" s3://bucket/a.json ./b.txt`: `流式按行正则搜索对象/文件内容,不落盘。
--i 忽略大小写;-v 反向(输出不匹配的行);-l 只列出有匹配的源;-c 输出匹配行数;-n 显示行号。
+  sail grep -i --count "timeout" s3://bucket/a.json ./b.txt`: `流式按行正则搜索对象/文件内容,不落盘。
+-i 忽略大小写;-v 反向(输出不匹配的行);-l 只列出有匹配的源;--count 输出匹配行数;-n 显示行号。
 单源输出裸匹配行;多源带 "源:行" 前缀。全部源无匹配时退出码为 1(GNU grep 惯例)。
 
 示例:
   sail grep -n "ERROR" s3://bucket/logs/app.log
-  sail grep -ic "timeout" s3://bucket/a.json ./b.txt`,
+  sail grep -i --count "timeout" s3://bucket/a.json ./b.txt`,
 		"ignore case": "忽略大小写",
 		"invert match (print non-matching lines)": "反向匹配(输出不匹配的行)",
 		"list only sources with matches":          "只列出有匹配的源",

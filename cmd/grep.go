@@ -26,12 +26,12 @@ var grepCmd = &cobra.Command{
 	Use:     "grep [options] <pattern> <src>...",
 	Short:   "Search object/file contents",
 	Long: `Stream-search object/file contents line by line with a regex, without downloading to disk.
--i ignore case; -v invert (print non-matching lines); -l list only sources with matches; -c print match count; -n show line numbers.
+-i ignore case; -v invert (print non-matching lines); -l list only sources with matches; --count print match count; -n show line numbers.
 A single source prints bare matching lines; multiple sources prefix each line with "source:line". Exit code 1 when no source matches (GNU grep convention).
 
 Examples:
   sail grep -n "ERROR" s3://bucket/logs/app.log
-  sail grep -ic "timeout" s3://bucket/a.json ./b.txt`,
+  sail grep -i --count "timeout" s3://bucket/a.json ./b.txt`,
 	Args: cobra.MinimumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		pattern := args[0]

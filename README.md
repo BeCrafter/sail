@@ -236,8 +236,8 @@ sail ls -d s3://mybucket/prefix/                 # list only sub-directories at 
 # Find and statistics
 sail find s3://mybucket/logs --name '*.log' -l   # glob by filename (repeatable)
 sail find s3://mybucket --size +1M --newer 2026-01-01   # size/time filters
-sail du -h s3://mybucket/prefix/                 # prefix-level usage
-sail du -h --max-depth 1 s3://mybucket           # show only 1 level + total
+sail du --human s3://mybucket/prefix/             # prefix-level usage
+sail du --human --max-depth 1 s3://mybucket       # show only 1 level + total
 sail du -s s3://mybucket/prefix/                 # print only the total
 
 # Tree view (S3 prefix or local directory)
@@ -325,14 +325,11 @@ all behave like an ordinary network drive.
 
 ```bash
 # Start (HTTPS recommended; supplying both --tls-cert/--tls-key enables it)
-sail serve webdav --bucket mybucket --listen :8443 \
+sail serve webdav --profile prod --listen :8443 \
   --user alice --password '***' --tls-cert cert.pem --tls-key key.pem
 
 # Share only a prefix inside the bucket (mapped to /, out-of-prefix paths are always rejected)
 sail serve webdav --bucket mybucket --prefix tenant-a --user alice --password '***'
-
-# Omit --bucket: resolved like every other command (--bucket > SAIL_BUCKET > profile.bucket)
-sail serve webdav --profile prod --user alice --password '***'
 
 # Print the one-time Windows client registry setup and mount command, then exit
 sail serve webdav --print-windows-setup
@@ -462,7 +459,7 @@ JSON **manifest** at the logical key.
 
 ```bash
 # Split anything over 100MiB; the pieces live under .sail/, the key holds a manifest
-sail serve webdav --bucket mybucket --user alice --password '***' \
+sail serve webdav --profile prod --user alice --password '***' \
   --chunked-upload --chunk-size 100MiB
 ```
 

@@ -15,7 +15,7 @@ setup wizard notes:
   - when reconfiguring an existing profile, configured plaintext keys are not echoed; Enter keeps them
   - the WebDAV gateway (serve block) is guided as well: listen / prefix / auth (single or multi-user) / TLS /
     chunked-upload / staging-dir; multi-user tables are validated in place (duplicate names, nested prefixes,
-    quota syntax — quota accepts decimal GB/MB or binary GiB/MiB). An existing serve block defaults to "keep" —
+    quota syntax — quota accepts MB/GB/TB). An existing serve block defaults to "keep" —
     choose append to add users to the existing table, reconfigure to edit it, or remove to drop it. Size limits,
     dir-cache-ttl and prewarm are not asked here; edit the config file to change them
   - inputs are normalized where possible: a bare port gets its colon (8443 -> :8443), a URL without a
@@ -31,8 +31,8 @@ setup 向导要点:
     (如 profile test → SAIL_TEST_ACCESS_KEY),写盘后打印需要 export 的变量名
   - 重配已有 profile 时,已配置的明文密钥不回显,回车即保留
   - WebDAV 网关(serve 块)同样引导配置: listen / prefix / 认证方式(单用户或多用户) / TLS /
-    chunked-upload / staging-dir;多用户表就地校验(重名、前缀嵌套、quota 语法——quota 支持十进制
-    GB/MB 或二进制 GiB/MiB)。已有 serve 块默认保留,可选追加用户、重新配置或删除;
+    chunked-upload / staging-dir;多用户表就地校验(重名、前缀嵌套、quota 语法——quota 支持
+    MB/GB/TB)。已有 serve 块默认保留,可选追加用户、重新配置或删除;
     尺寸上限、dir-cache-ttl 与 prewarm 不在向导内提问,如需修改请编辑配置文件
   - 输入会尽量归一化: 裸端口补冒号(8443 -> :8443)、URL 缺协议头补 https://、quota 单字母单位
     补全为 MB/GB/TB、路径里的 ~ 自动展开、y/n 回答接受 yes/true/1/on;非法值会说明原因后重问

@@ -54,7 +54,7 @@ func init() {
 
 		// mv.go (help metadata)
 		"Move objects/files (copy then delete source)": "移动对象/文件(复制后删除源)",
-		`Move objects/files: copy then delete the source. s3-to-s3 uses server-side CopyObject + Delete with zero bandwidth.
+		`Move objects/files: copy then delete the source. s3-to-s3 prefers a server-side CopyObject + Delete, so no file content crosses the wire; it falls back to download + re-upload when the service's CopyObject is unreliable.
 
 Examples:
   sail mv s3://bucket/a.txt s3://bucket/moved.txt     # single object, no confirm
@@ -62,7 +62,7 @@ Examples:
   sail mv s3://bucket/file.txt ./retrieved.txt
   sail mv -r s3://bucket/src/ s3://bucket/dst/         # recursive, interactive confirm
   sail mv -r --yes s3://bucket/src/ s3://bucket/dst/   # skip confirm
-  sail mv -r --yes ./dir s3://bucket/mirror/`: `移动对象/文件,等于复制后删除源。s3↔s3 走服务端 CopyObject+Delete,零带宽。
+  sail mv -r --yes ./dir s3://bucket/mirror/`: `移动对象/文件,等于复制后删除源。s3↔s3 优先走服务端 CopyObject + Delete,内容不过网络;服务端 CopyObject 不可靠时回退 download → re-upload。
 
 示例:
   sail mv s3://bucket/a.txt s3://bucket/moved.txt     # 单对象,无确认

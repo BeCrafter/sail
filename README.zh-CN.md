@@ -233,8 +233,8 @@ sail ls -d s3://mybucket/prefix/                 # 只列该层子目录(不含�
 # 查找与统计
 sail find s3://mybucket/logs --name '*.log' -l   # 按文件名通配(可重复多个)
 sail find s3://mybucket --size +1M --newer 2026-01-01   # 大小/时间过滤
-sail du -h s3://mybucket/prefix/                 # 按前缀层级统计占用
-sail du -h --max-depth 1 s3://mybucket           # 只显示 1 层 + 总计
+sail du --human s3://mybucket/prefix/             # 按前缀层级统计占用
+sail du --human --max-depth 1 s3://mybucket       # 只显示 1 层 + 总计
 sail du -s s3://mybucket/prefix/                 # 只打印总计
 
 # 树形查看(S3 前缀或本地目录)
@@ -328,14 +328,11 @@ aws s3 ls --endpoint-url <your-s3-endpoint> s3://mybucket/
 
 ```bash
 # 启动(HTTPS 推荐;同时给 --tls-cert/--tls-key 即启用)
-sail serve webdav --bucket mybucket --listen :8443 \
+sail serve webdav --profile prod --listen :8443 \
   --user alice --password '***' --tls-cert cert.pem --tls-key key.pem
 
 # 只共享桶内某个前缀(映射为 /,越界路径一律拒绝)
 sail serve webdav --bucket mybucket --prefix tenant-a --user alice --password '***'
-
-# 省略 --bucket:与其它命令走同一条解析链(--bucket > SAIL_BUCKET > profile.bucket)
-sail serve webdav --profile prod --user alice --password '***'
 
 # 生成 Windows 客户端的一次性注册表配置与挂载命令后退出
 sail serve webdav --print-windows-setup
@@ -444,7 +441,7 @@ Windows 默认把单次上传卡在约 50MB,这道闸门在**客户端注册表*
 
 ```bash
 # 超过 100MiB 的文件拆片;片在 .sail/ 下,key 上是 manifest
-sail serve webdav --bucket mybucket --user alice --password '***' \
+sail serve webdav --profile prod --user alice --password '***' \
   --chunked-upload --chunk-size 100MiB
 ```
 

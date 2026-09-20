@@ -53,7 +53,9 @@ var serveCmd = &cobra.Command{
 	GroupID: "server",
 	Use:     "serve",
 	Short:   "Start a server that shares a bucket over a standard protocol",
-	Long: `Share a bucket with the file manager built into the OS; clients install nothing.
+	Long: `Share one bucket with the file manager built into the OS; clients install nothing.
+Which bucket is shared comes from the profile, so name it with --profile (the global
+--bucket flag and SAIL_BUCKET still override it when needed).
 
   serve webdav  -- share over the WebDAV protocol (HTTPS optional)`,
 }
@@ -61,8 +63,10 @@ var serveCmd = &cobra.Command{
 var serveWebdavCmd = &cobra.Command{
 	Use:   "webdav",
 	Short: "Share a bucket over WebDAV (mountable directly by macOS Finder / Windows Explorer)",
-	Long: `Share the whole bucket over the WebDAV protocol (or the prefix given by --prefix); clients
-mount it with capabilities built into the OS, no software to install.
+	Long: `Share the whole bucket over the WebDAV protocol (or the prefix given by --prefix); which
+bucket that is comes from the profile, so name it with --profile (the global --bucket flag and
+SAIL_BUCKET still override it when needed). Clients mount it with capabilities built into the OS,
+no software to install.
 
 Design boundaries:
   - Uploads land in full on the --staging-dir staging disk and are only chunked and uploaded to
@@ -79,7 +83,7 @@ Design boundaries:
     URL would hand out the manifest instead of the file.
 
 Examples:
-  sail serve webdav --bucket mybucket --listen :8443 \
+  sail serve webdav --profile prod --listen :8443 \
     --user alice --password '***' --tls-cert c.pem --tls-key k.pem
   sail serve webdav --print-windows-setup`,
 	Args: cobra.NoArgs,

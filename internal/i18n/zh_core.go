@@ -23,6 +23,9 @@ Use --help on any command for detailed usage and examples.`: `sail 是 S3 协议
 		"override default bucket":                "覆盖默认 bucket",
 		"language (en|zh; default: auto-detect)": "语言 (en|zh;默认自动检测)",
 		"no bucket specified, use s3://bucket/key or s3:///key (uses the configured default bucket)": "未指定 bucket,请用 s3://bucket/key 或 s3:///key(用配置默认 bucket)",
+		"help for %s":            "%s 命令的帮助",
+		"version for %s":         "%s 的版本",
+		"Help about any command": "查看任意命令的帮助",
 
 		// root.go — command group titles
 		"Object / bucket transfer": "对象与桶操作",

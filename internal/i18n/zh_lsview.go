@@ -8,10 +8,10 @@ func init() {
 (s3://bucket is accepted but pointless);
 -l long format (size + last-modified time), combinable with -t to sort by time,
 -S by size, -r to reverse, and --human for human-readable sizes;
--d lists sub-directories only (comma-separated prefixes, no files), mirroring ls -d;
+-d lists sub-directories only (the prefix's direct child prefixes, no files), mirroring ls -d;
 --buckets lists all buckets.
-Without sorting flags, output is streamed (low memory on large buckets);
-with sorting flags, all objects are collected first and then printed.
+Without sorting or --reverse flags, output is streamed (low memory on large buckets);
+with them, all objects are collected first and then printed.
 
 Examples:
   sail ls s3://bucket/prefix/
@@ -19,8 +19,8 @@ Examples:
   sail ls -d s3://bucket/prefix/
   sail ls --buckets`: `列举对象或桶。0 个参数时列举默认桶(s3://bucket 合法但无谓);
 -l 长格式(大小+修改时间),可叠加 -t 按时间、-S 按大小、-r 逆序、--human 人类可读;
--d 只列子目录(逗号分隔前缀,不含文件),对齐 ls -d;--buckets 列出所有桶。
-不带排序 flag 时流式输出(大桶低内存),带排序 flag 时全量收集后打印。
+-d 只列子目录(该前缀的直接子前缀,不含文件),对齐 ls -d;--buckets 列出所有桶。
+不带排序或 --reverse flag 时流式输出(大桶低内存),带这些 flag 时全量收集后打印。
 
 示例:
   sail ls s3://bucket/prefix/
@@ -103,13 +103,13 @@ With no arguments, sums the default bucket; --max-depth limits the printed level
 -s prints only the total.
 
 Examples:
-  sail du -h s3://bucket/logs
-  sail du -h --max-depth 1 s3://bucket`: `按目录层级统计前缀下对象的大小总和(各层级为累计值,根为总计行)。
+  sail du --human s3://bucket/logs
+  sail du --human --max-depth 1 s3://bucket`: `按目录层级统计前缀下对象的大小总和(各层级为累计值,根为总计行)。
 0 个参数时统计默认桶;--max-depth 限制打印层级;-s 只打印总计。
 
 示例:
-  sail du -h s3://bucket/logs
-  sail du -h --max-depth 1 s3://bucket`,
+  sail du --human s3://bucket/logs
+  sail du --human --max-depth 1 s3://bucket`,
 		"print only the total":                   "只打印总计",
 		"human-readable sizes":                   "人类可读大小",
 		"maximum print depth, 0 means unlimited": "最大打印层级,0 表示不限",

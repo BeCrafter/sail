@@ -22,6 +22,7 @@ var wcCmd = &cobra.Command{
 	Short:   "Count lines, words, and bytes",
 	Long: `Stream-count lines, words, and bytes of an object/file.
 With no options, print three columns (lines words bytes, GNU wc order); with options, print only the selected columns.
+With more than one source, print a final "total" line summing all sources.
 
 Examples:
   sail wc -l s3://bucket/logs/app.log

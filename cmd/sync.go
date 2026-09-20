@@ -90,7 +90,7 @@ Supports local→s3, s3→local, and s3→s3 (server-side copy); for local↔loc
 Comparison modes (S3 LastModified has second precision, with a 1s tolerance):
   (default)    destination missing / different size / source mtime newer than destination by more than 1s → transfer
   --update transfer only entries newer than the destination (skip when the destination is newer even if the size differs)
-  --checksum verify content by md5 when sizes match (ETag single-part fast path, otherwise streaming)
+  --checksum verify content by md5 when sizes match but the mtimes differ by more than 1s (ETag single-part fast path, otherwise streaming)
 
 Filtering (--exclude and --include combine; filtered entries are invisible in both directions — neither transferred nor removed by --delete):
   --exclude wildcard (repeatable), matches both the relative path and the file name; a trailing-/ directory pattern excludes the whole directory
@@ -463,7 +463,7 @@ func init() {
 	syncCmd.Flags().BoolVar(&syncDryRun, "dry-run", false, "show what would be done without actually syncing")
 	syncCmd.Flags().StringSliceVar(&syncExclude, "exclude", nil, "exclude wildcard (repeatable, matches relative path or file name)")
 	syncCmd.Flags().StringSliceVar(&syncInclude, "include", nil, "include allowlist wildcard (repeatable, only matching entries are synced once provided)")
-	syncCmd.Flags().BoolVar(&syncChecksum, "checksum", false, "verify content by md5 when sizes match")
+	syncCmd.Flags().BoolVar(&syncChecksum, "checksum", false, "verify content by md5 when sizes match but the mtimes differ by more than 1s")
 	syncCmd.Flags().BoolVar(&syncUpdate, "update", false, "transfer only entries newer than the destination")
 	syncCmd.Flags().StringVar(&syncContentType, "content-type", "", contentTypeFlagUsage)
 }

@@ -28,8 +28,8 @@ With no arguments, sums the default bucket; --max-depth limits the printed level
 -s prints only the total.
 
 Examples:
-  sail du -h s3://bucket/logs
-  sail du -h --max-depth 1 s3://bucket`,
+  sail du --human s3://bucket/logs
+  sail du --human --max-depth 1 s3://bucket`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		r, _, err := loadResolved()

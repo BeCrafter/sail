@@ -121,14 +121,11 @@ all behave like an ordinary network drive.
 
 ```bash
 # Start (HTTPS recommended; supplying both --tls-cert/--tls-key enables it)
-sail serve webdav --bucket mybucket --listen :8443 \
+sail serve webdav --profile prod --listen :8443 \
   --user alice --password '***' --tls-cert cert.pem --tls-key key.pem
 
 # Share only a prefix inside the bucket (mapped to /, out-of-prefix paths are always rejected)
 sail serve webdav --bucket mybucket --prefix tenant-a --user alice --password '***'
-
-# Omit --bucket: resolved like every other command (--bucket > SAIL_BUCKET > profile.bucket)
-sail serve webdav --profile prod --user alice --password '***'
 
 # Print the one-time Windows client registry setup and mount command, then exit
 sail serve webdav --print-windows-setup

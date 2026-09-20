@@ -25,7 +25,7 @@ var mvCmd = &cobra.Command{
 	GroupID: "transfer",
 	Use:     "mv <src> <dst>",
 	Short:   "Move objects/files (copy then delete source)",
-	Long: `Move objects/files: copy then delete the source. s3-to-s3 uses server-side CopyObject + Delete with zero bandwidth.
+	Long: `Move objects/files: copy then delete the source. s3-to-s3 prefers a server-side CopyObject + Delete, so no file content crosses the wire; it falls back to download + re-upload when the service's CopyObject is unreliable.
 
 Examples:
   sail mv s3://bucket/a.txt s3://bucket/moved.txt     # single object, no confirm

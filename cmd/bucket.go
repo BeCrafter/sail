@@ -18,7 +18,7 @@ var mbCmd = &cobra.Command{
 	Use:     "mb <s3://bucket>...",
 	Short:   "Create buckets",
 	Long: `Create buckets (CreateBucket). Bucket names must follow the naming rules of the S3 service you connect to.
-Recreating the same bucket may be rejected by the service (implementation-dependent); on failure you are prompted to use the existing bucket instead.
+Recreating the same bucket may be rejected by the service (implementation-dependent), returning the service's own error.
 
 Examples:
   sail mb s3://my-new-bucket`,

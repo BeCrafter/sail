@@ -4,14 +4,19 @@ func init() {
 	register(map[string]string{
 		// serve.go — command help metadata
 		"Start a server that shares a bucket over a standard protocol": "启动服务(把 bucket 通过标准协议共享)",
-		`Share a bucket with the file manager built into the OS; clients install nothing.
+		`Share one bucket with the file manager built into the OS; clients install nothing.
+Which bucket is shared comes from the profile, so name it with --profile (the global
+--bucket flag and SAIL_BUCKET still override it when needed).
 
-  serve webdav  -- share over the WebDAV protocol (HTTPS optional)`: `把 bucket 共享给系统自带的文件管理器,客户端零安装。
+  serve webdav  -- share over the WebDAV protocol (HTTPS optional)`: `把某个 bucket 共享给系统自带的文件管理器,客户端零安装。
+共享哪个 bucket 由 profile 决定,用 --profile 指定(全局 --bucket 与 SAIL_BUCKET 需要时仍可覆盖)。
 
   serve webdav  —— 以 WebDAV 协议共享(HTTPS 可选)`,
 		"Share a bucket over WebDAV (mountable directly by macOS Finder / Windows Explorer)": "以 WebDAV 协议共享 bucket(macOS Finder / Windows 资源管理器可直接挂载)",
-		`Share the whole bucket over the WebDAV protocol (or the prefix given by --prefix); clients
-mount it with capabilities built into the OS, no software to install.
+		`Share the whole bucket over the WebDAV protocol (or the prefix given by --prefix); which
+bucket that is comes from the profile, so name it with --profile (the global --bucket flag and
+SAIL_BUCKET still override it when needed). Clients mount it with capabilities built into the OS,
+no software to install.
 
 Design boundaries:
   - Uploads land in full on the --staging-dir staging disk and are only chunked and uploaded to
@@ -28,10 +33,10 @@ Design boundaries:
     URL would hand out the manifest instead of the file.
 
 Examples:
-  sail serve webdav --bucket mybucket --listen :8443 \
+  sail serve webdav --profile prod --listen :8443 \
     --user alice --password '***' --tls-cert c.pem --tls-key k.pem
-  sail serve webdav --print-windows-setup`: `以 WebDAV 协议共享整个 bucket(或 --prefix 指定的前缀),客户端用系统自带能力挂载,
-无需安装任何软件。
+  sail serve webdav --print-windows-setup`: `以 WebDAV 协议共享整个 bucket(或 --prefix 指定的前缀);共享哪个 bucket 由
+--profile 决定(全局 --bucket 与 SAIL_BUCKET 需要时仍可覆盖),客户端用系统自带能力挂载,无需安装任何软件。
 
 设计边界:
   - 上传先落 --staging-dir 暂存盘,提交时才切块上传到 S3;暂存盘峰值
@@ -45,7 +50,7 @@ Examples:
     "sail presign" 会报错拒绝(预签名 URL 只会给到 manifest,不是文件本身)。
 
 示例:
-  sail serve webdav --bucket mybucket --listen :8443 \
+  sail serve webdav --profile prod --listen :8443 \
     --user alice --password '***' --tls-cert c.pem --tls-key k.pem
   sail serve webdav --print-windows-setup`,
 
@@ -66,7 +71,6 @@ Examples:
 		"print the Windows client registry setup and mount command, then exit": "打印 Windows 客户端注册表配置与挂载命令后退出",
 
 		// serve.go — runtime messages
-		"--user and --password are required: this gateway does not allow anonymous sharing":                                             "--user 与 --password 必填:本网关不允许匿名共享",
 		"--user and --password are required (from flags or profile %q \"serve\" config): this gateway does not allow anonymous sharing": "--user 与 --password 必填(来自 flag 或 profile %q 的 \"serve\" 配置):本网关不允许匿名共享",
 		"--tls-cert and --tls-key must be supplied together":                                                                            "--tls-cert 与 --tls-key 必须同时提供",
 		"invalid --backend-max-object-size: %w":                                                                                         "--backend-max-object-size 非法: %w",

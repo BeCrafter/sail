@@ -85,11 +85,11 @@ Examples:
 		"Create buckets":       "创建桶",
 		"Delete empty buckets": "删除空桶",
 		`Create buckets (CreateBucket). Bucket names must follow the naming rules of the S3 service you connect to.
-Recreating the same bucket may be rejected by the service (implementation-dependent); on failure you are prompted to use the existing bucket instead.
+Recreating the same bucket may be rejected by the service (implementation-dependent), returning the service's own error.
 
 Examples:
   sail mb s3://my-new-bucket`: `创建桶(CreateBucket)。桶名需符合所接入 S3 服务的命名规则。
-重复创建同一桶可能被服务拒绝(取决于服务实现),失败时提示改用已存在的桶。
+重复创建同一桶可能被服务拒绝(取决于服务实现),此时直接回显服务端原始错误。
 
 示例:
   sail mb s3://my-new-bucket`,
@@ -109,7 +109,7 @@ Supports local→s3, s3→local, and s3→s3 (server-side copy); for local↔loc
 Comparison modes (S3 LastModified has second precision, with a 1s tolerance):
   (default)    destination missing / different size / source mtime newer than destination by more than 1s → transfer
   --update transfer only entries newer than the destination (skip when the destination is newer even if the size differs)
-  --checksum verify content by md5 when sizes match (ETag single-part fast path, otherwise streaming)
+  --checksum verify content by md5 when sizes match but the mtimes differ by more than 1s (ETag single-part fast path, otherwise streaming)
 
 Filtering (--exclude and --include combine; filtered entries are invisible in both directions — neither transferred nor removed by --delete):
   --exclude wildcard (repeatable), matches both the relative path and the file name; a trailing-/ directory pattern excludes the whole directory
@@ -127,7 +127,7 @@ Examples:
 比对模式(S3 LastModified 秒级精度,比对容差 1s):
   (默认)   目标缺失 / 大小不同 / 源修改时间晚于目标 1s 以上 → 传输
   --update 只传输比目标新的条目(目标较新时即使大小不同也跳过)
-  --checksum 大小相同时按内容 md5 校验(ETag 单分片快路径,否则流式计算)
+  --checksum 大小相同且修改时间相差 1s 以上时按内容 md5 校验(ETag 单分片快路径,否则流式计算)
 
 过滤(--exclude 与 --include 组合,被过滤条目双向不可见:既不传输也不被 --delete 删除):
   --exclude 通配符(可重复),同时匹配相对路径与文件名;尾 / 的目录模式排除整个目录
@@ -144,7 +144,7 @@ Examples:
 		"show what would be done without actually syncing":                                        "只显示将执行的操作,不实际同步",
 		"exclude wildcard (repeatable, matches relative path or file name)":                       "排除通配符(可重复,匹配相对路径或文件名)",
 		"include allowlist wildcard (repeatable, only matching entries are synced once provided)": "包含白名单通配符(可重复,提供后只同步命中条目)",
-		"verify content by md5 when sizes match":                                                  "大小相同时按内容 md5 校验差异",
+		"verify content by md5 when sizes match but the mtimes differ by more than 1s":            "大小相同且修改时间相差 1s 以上时按内容 md5 校验差异",
 		"transfer only entries newer than the destination":                                        "只传输比目标新的条目",
 	})
 }
