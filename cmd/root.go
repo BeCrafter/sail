@@ -74,11 +74,14 @@ func init() {
 	rootCmd.AddCommand(commandsDumpCmd)
 }
 
-// commandsDumpCmd 打印顶层命令名与分组,供文档同步检查使用。
-// 每行 "name\tgroup"。单独跑 `sail __commands` 可见,不出现在根 help 里。
+// commandsDumpCmd 打印顶层命令清单,供文档同步检查使用。
+// 每行 "name\tgroup\talias1,alias2"(别名可空,列数固定三列)。单独跑
+// `sail __commands` 可见,不出现在根 help 里。别名入列是因为 README 里会
+// 用 `sail upload` / `sail cat` 这类别名举例,校验脚本必须能把它们认成
+// 真实命令,否则只能靠猜——猜错就会把合法文档报成漂移。
 var commandsDumpCmd = &cobra.Command{
 	Use:     "__commands",
-	Short:   "print top-level commands as name<TAB>group (used by doc-sync checks)",
+	Short:   "print the command tree as name<TAB>group<TAB>aliases (used by doc-sync checks)",
 	GroupID: "config",
 	Hidden:  true,
 	Args:    cobra.NoArgs,
@@ -88,7 +91,11 @@ var commandsDumpCmd = &cobra.Command{
 			if !c.IsAvailableCommand() {
 				continue
 			}
-			lines = append(lines, c.Name()+"\t"+c.GroupID)
+			alias := ""
+			if len(c.Aliases) > 0 {
+				alias = strings.Join(c.Aliases, ",")
+			}
+			lines = append(lines, c.Name()+"\t"+c.GroupID+"\t"+alias)
 		}
 		sort.Strings(lines)
 		for _, l := range lines {

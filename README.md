@@ -202,6 +202,8 @@ Note the distinction between two kinds of env vars: the variables referenced ins
 
 ## Usage
 
+> **Complete flag reference**: the examples below are a guided tour, not an exhaustive list. Every command's full flag set, defaults, and semantics live in `sail <command> --help` (add `--lang zh` for Chinese). This holds for subcommands too: `sail serve webdav --help`, `sail config setup --help`.
+
 > **Path syntax**: `s3://bucket/key` explicitly specifies the bucket; `s3:///key` (empty bucket segment) uses the configured default bucket; `s3://bucket` (with `ls` only) lists buckets. Cross-bucket sync still uses explicit `s3://bucket/key`.
 
 ```bash

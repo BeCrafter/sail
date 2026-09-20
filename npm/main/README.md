@@ -110,7 +110,7 @@ table); fields it does not ask are kept as written in the config file.
 | Server | `sail serve webdav` | Share a bucket as a mountable network drive (macOS Finder / Windows Explorer) |
 | Config | `sail config` | Manage configuration (`config setup` wizard) |
 
-All commands support `--help` for detailed usage and examples.
+All commands support `--help` for detailed usage and examples; that output is the complete flag reference (every flag, its default, and its semantics). The table above is a summary, and the [repo README](https://github.com/BeCrafter/sail#readme) is the full guide.
 
 ## WebDAV gateway (`sail serve webdav`)
 

@@ -1,6 +1,8 @@
 package i18n
 
 import (
+	"strings"
+
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -47,6 +49,11 @@ func Apply(root *cobra.Command) {
 		c.Long = T(c.Long)
 		if c.Example != "" {
 			c.Example = T(c.Example)
+		}
+		// cobra 的 help 子命令正文里内嵌了宿主的显示名("Simply type sail help …"),
+		// 每个宿主一份原文,固定 key 覆盖不了,同样按模板整段改写。
+		if c.Name() == "help" && strings.HasPrefix(c.Use, "help [command]") {
+			c.Long = Tf("Help provides help for any command in the application.\nSimply type %s help [path to command] for full details.", c.Parent().DisplayName())
 		}
 		// cobra 给这两个开关的 Usage 拼的是 "help for <名>"/"version for <名>",
 		// 随命令名变化,固定 key 覆盖不了,故识别原文后按模板整段改写。

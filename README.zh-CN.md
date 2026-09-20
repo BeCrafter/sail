@@ -199,6 +199,8 @@ export SAIL_TEST_SECRET_KEY="your-secret-key"
 
 ## 使用
 
+> **完整参数表**:下面的示例是导览,不是全部。每个命令的完整参数、默认值与语义以 `sail <命令> --help` 为准(加 `--lang zh` 看中文)。子命令同理:`sail serve webdav --help`、`sail config setup --help`。
+
 > **路径语法**:`s3://bucket/key` 显式指定 bucket;`s3:///key`(空 bucket 段)用配置的默认 bucket;`s3://bucket` 仅 `ls` 列桶。跨桶同步仍用显式 `s3://bucket/key`。
 
 ```bash

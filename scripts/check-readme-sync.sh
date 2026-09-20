@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 #
-# 检查 README 与命令清单是否同步。
+# 检查三个 README 与真实命令树/帮助是否同步。任何一处漂移都报错退出:
+#   1. 真实命令树 —— `sail __commands` 与各层 `--help` 的 Available Commands(唯一事实来源)
+#   2. README.md        —— 英文完整文档
+#   3. README.zh-CN.md  —— 中文完整文档(与英文逐项对等)
+#   4. npm/main/README.md —— 随 npm 包发布的精简版(链回主 README 看细节)
 #
-# 三个来源必须一致,任何一处漂移都报错退出:
-#   1. 真实命令树 —— 从 `sail __commands` 拿(唯一事实来源,见 cmd/root.go)
-#   2. 主 README.md      —— 面向仓库/完整文档
-#   3. npm/main/README.md —— 会随 npm 包一起发布的精简版
+# 为什么需要它:npm 包 README 独立维护、中文 README 单独成篇,新增命令/子命令或
+# 改版时都容易漏改;README 里也可能残留已改名的命令或旗标。本脚本把这几类漂移挡在 CI 上。
 #
-# 为什么需要它:npm 包的 README 是独立维护的精简版,新增命令或主
-# README 改版时容易漏改,导致发布出去的包文档缺内容。本脚本把这种
-# 漂移挡在 CI 上。
+# 注意:主 README 的 Usage 是「示例导览」而非逐旗标参考,完整旗标表以 `sail <cmd> --help`
+# 为准(三份 README 都写明了这一点);因此这里只校验示例中用到的命令/子命令/旗标真实
+# 存在,不要求 README 列出全部旗标。命令与旗标的「全量覆盖」由 cmd/help_coverage_test.go
+# 与 cmd/i18n_coverage_test.go 在 go test 中守卫。
 #
 # 用法:
 #   ./scripts/check-readme-sync.sh            # 默认用 ./sail
@@ -29,8 +32,9 @@ SAIL_BIN="${SAIL_BIN:-./sail}"
 [[ -x "$SAIL_BIN" ]] || { echo -e "${RED}找不到可执行文件 $SAIL_BIN,请先构建${NC}"; exit 1; }
 
 MAIN_README="README.md"
+ZH_README="README.zh-CN.md"
 NPM_README="npm/main/README.md"
-for f in "$MAIN_README" "$NPM_README"; do
+for f in "$MAIN_README" "$ZH_README" "$NPM_README"; do
   [[ -f "$f" ]] || { echo -e "${RED}缺少 $f${NC}"; exit 1; }
 done
 
@@ -41,6 +45,170 @@ COMMANDS="$(printf '%s\n' "$DUMP" | cut -f1)"
 echo "真实命令清单($(printf '%s\n' "$COMMANDS" | wc -l | tr -d ' ') 个):"
 printf '%s\n' "$COMMANDS" | tr '\n' ' '; echo; echo
 
+# help_subs <cmd> <sub?>:该命令 --help 里 Available Commands 列出的子命令。
+# 三级命令固定为 `sail <cmd> <sub>` 形态(空格分隔,不引号)。
+help_subs() {
+  "$SAIL_BIN" $* --help --lang en 2>&1 |
+    awk '/^Available Commands:/{f=1; next} /^$/{f=0} f&&/^  /{print $1}'
+}
+
+# build_flag_index:把「命令<TAB>旗标」全表算一次(命令数 × 一次 --help),写进 $FLAG_INDEX。
+# 必须在主 shell 里调用:若包成函数,FLAG_INDEX 只会落在函数作用域里,返回即丢
+# (命令替换还会把索引一并吞掉)。逐条查表时再起进程会慢到不可用,故预计算。
+# 每行旗标形如 "-r, --recursive" / "--buckets",短长两种写法都入表——
+# 文档里两种都会用,少记一种就会把合法写法误报成漂移。
+build_flag_index() {
+  local c
+  while IFS= read -r c; do
+    "$SAIL_BIN" $c --help --lang en 2>&1 | awk -v c="$c" '
+      /^Flags:|^Global Flags:/{f=1; next}
+      f && /^[^[:space:]]/{f=0}
+      f && /^[[:space:]]+-/{
+        line=$0; sub(/^[[:space:]]+/, "", line)
+        n=split(line, p, /[[:space:]]+/)
+        s=p[1]; sub(/,$/, "", s)
+        if (s ~ /^-[^-]/) {                    # 短选项:与紧跟的长选项同属一条
+          print c "\t" s
+          if (n>1 && p[2] ~ /^--/) { l=p[2]; sub(/,$/, "", l); print c "\t" l }
+        } else if (s ~ /^--/) print c "\t" s
+      }'
+  done < <(tree_cmds)
+}
+
+# all_flags <cmd> <sub?>:该命令可用旗标(去重),查预计算表
+all_flags() {
+  local cmd="$*"
+  awk -F'\t' -v c="$cmd" '$1==c{print $2}' "$FLAG_INDEX" | sort -u
+}
+
+# tree_cmds:命令树里所有可见命令(含子命令),每行一个。
+# 子命令从各层 --help 动态派生,不写死清单——写死的话,新增子命令会静默绕过
+# 下面所有检查(第 2 节的 README 覆盖就再也管不到它),而这份脚本存在的意义
+# 正是拦住这类漂移。参见 cmd/help_coverage_test.go 的同源保证。
+#
+# 每次调用要起 O(命令数) 个子进程,而调用方在逐词循环里,故结果缓存在
+# TREE_CMDS 里:同一进程内命令树不会变,算一次就够(不加缓存会慢到不可用)。
+tree_cmds() {
+  [[ -n "${TREE_CMDS:-}" ]] && { printf '%s\n' "$TREE_CMDS"; return 0; }
+  local out
+  out="$(printf '%s\n' "$COMMANDS"
+    for c in $COMMANDS; do
+      for sub in $(help_subs "$c"); do
+        [[ "$sub" == "help" ]] && continue
+        printf '%s %s\n' "$c" "$sub"
+      done
+    done)"
+  TREE_CMDS="$out"
+  printf '%s\n' "$out"
+}
+
+# tree_aliases:命令别名(upload/download/cat 等),README 用它们举例属正常
+tree_aliases() {
+  printf '%s\n' "$DUMP" | awk -F'\t' 'NF>=3 && $3!=""{n=split($3,a,",");for(i=1;i<=n;i++)print a[i]}'
+}
+
+# doc_sail_tokens <readme>:代码块里每处 `sail` 调用起的空白切词(去掉行尾注释)。
+# doc_cmds / doc_flags 都由它派生,避免两处各写一遍同一段 awk 而漂移。
+doc_sail_tokens() {
+  awk '/^[[:space:]]*```/{inf=!inf; next}
+       !inf{next}
+       {
+         sub(/#.*/, "")                 # 剥掉行尾注释:sail --version  # or sail -v 的第二个 sail 不是调用
+         n=split($0, w)
+         for(i=1;i<=n;i++) if(w[i]=="sail"){
+           out=""
+           for(k=i; k<=n; k++) out = out (out==""?"":" ") w[k]
+           print out
+           break
+         }
+       }' "$1"
+}
+
+# is_tree_cmd <cmd…>:该串是否正好是命令树里的一个命令(支持两段式子命令)。
+is_tree_cmd() {
+  local want="$*" c
+  while IFS= read -r c; do
+    [[ "$c" == "$want" ]] && return 0
+  done < <(tree_cmds)
+  return 1
+}
+
+# doc_cmd_of <前导旗标…> <词…>:从一次 sail 调用的词元里取出「最长匹配的已注册命令」。
+# doc_cmds / doc_flags 共用它,保证两类判定口径一致:
+#   - 跳过命令前的旗标及其取值(sail -p test upload …);
+#   - 认出两段式子命令(serve webdav),不靠猜第二个词;
+#   - 词元不是已知命令时原样返回,交由调用方按「文档命令有效性」报错,
+#     不会被 && / | 之类的 shell 操作符带偏。
+doc_cmd_of() {
+  while [[ $# -gt 0 && "$1" == -* ]]; do
+    [[ "$1" == *=* ]] || shift          # 带 = 的旗标自带取值
+    shift
+  done
+  [[ $# -gt 0 ]] || return 0
+  case "$1" in
+    # shell 操作符/重定向:出现在 `sail` 之后的不是命令,而是 `cd sail && go build`
+    # 这类把 sail 当路径/名字用的行。跳过,别按「未知命令」误报。
+    '&'|'&&'|'|'|'||'|';'|'>'|'>>'|'<'|'2>'|'2>&1') return 0;;
+  esac
+  if [[ $# -gt 1 ]] && is_tree_cmd "$1" "$2"; then
+    printf '%s' "$1 $2"; return 0
+  fi
+  # 第一个词是带子命令的命令、第二个词却不是它的子命令(如 `sail serve webdav2`):
+  # 报两词出去,让「文档命令有效性」直接点名 webdav2,而不是把它当参数忽略、
+  # 再在后续检查里报成一个莫名其妙的旗标错误。
+  if [[ $# -gt 1 && -n "$(help_subs "$1")" ]]; then
+    printf '%s' "$1 $2"; return 0
+  fi
+  printf '%s' "$1"
+}
+
+# doc_cmds <readme>:示例里用到的命令名(含子命令),每行一个。
+doc_cmds() {
+  while read -r line; do
+    [[ -n "$line" ]] || continue
+    set -- $line
+    shift                                  # 丢掉 "sail"
+    doc_cmd_of "$@"
+    printf '\n'
+  done < <(doc_sail_tokens "$1") | sort -u
+}
+
+# doc_flags <readme>:示例里用到的旗标,输出 "命令<TAB>旗标"。
+# 旗标记在「最长匹配的已注册命令」名下:这样 doc_cmds 与 doc_flags 对
+# `sail serve webdav --tls-cert x` 得到同一个归属,不会一件一议。
+doc_flags() {
+  while read -r line; do
+    [[ -n "$line" ]] || continue
+    set -- $line
+    shift
+    cmd="$(doc_cmd_of "$@")" || true
+    [[ -n "$cmd" ]] || continue
+    n=$(printf '%s' "$cmd" | wc -w | tr -d ' ')
+    shift "$n"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --*=*)   printf '%s\t%s\n' "$cmd" "${1%%=*}";;
+        -)       :;;      # 单独一个 - 是 stdin/stdout 占位符,不是旗标
+        -*)      printf '%s\t%s\n' "$cmd" "$1";;
+      esac
+      shift
+    done
+  done < <(doc_sail_tokens "$1")
+}
+
+# doc_command_lines <readme>:代码块里所有以 sail 开头的示例命令行(去注释、去空白)。
+# 命令行本身与语言无关——中英 README 的同一条示例应当逐字一致,只注释不同。
+doc_command_lines() {
+  awk '/^[[:space:]]*```/{inf=!inf; next}
+       !inf{next}
+       {
+         line=$0
+         sub(/#.*/, "", line)
+         gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+         if (line ~ /^sail([[:space:]]|$)/) print line
+       }' "$1" | sort
+}
+
 # cmd_covered <readme> <cmd>:readme 是否提及该命令。
 # 覆盖三种写法:`sail <cmd>`、反引号包住的 `<cmd>`,或表格中段 `x` / `y`。
 cmd_covered() {
@@ -50,16 +218,93 @@ cmd_covered() {
   return 1
 }
 
-# ── 2. 每个命令必须在两个 README 中都出现 ──────────────────
+# ── 2. 每个命令(含子命令)必须在三份 README 中都出现 ────────
 echo "── 命令覆盖检查 ──"
-for cmd in $COMMANDS; do
-  for readme in "$MAIN_README" "$NPM_README"; do
+while IFS= read -r cmd; do
+  [[ -n "$cmd" ]] || continue
+  for readme in "$MAIN_README" "$ZH_README" "$NPM_README"; do
     cmd_covered "$readme" "$cmd" || err "$readme 未提及命令 \`$cmd\`"
   done
-done
-[[ $fail -eq 0 ]] && ok "所有命令均在两个 README 中出现"
+done < <(tree_cmds)
+[[ $fail -eq 0 ]] && ok "所有命令(含子命令)均在三份 README 中出现"
 
-# ── 3. 主 README 提到的 group 必须在 npm README 也有 ───────
+# ── 3. 命令树的层级必须在 --help 里可见 ────────────────────
+# 「帮助信息是否覆盖全部命令」:每个可见命令都要能通过父命令的
+# Available Commands 找到,并且自身 --help 有 Usage 段。
+echo
+echo "── 帮助信息覆盖检查 ──"
+parents="$("$SAIL_BIN" __commands | cut -f1)"
+for c in $parents; do
+  help_out="$("$SAIL_BIN" "$c" --help --lang en 2>&1 || true)"
+  if ! printf '%s\n' "$help_out" | grep -q "^Usage:"; then
+    err "sail $c --help 缺少 Usage 段"
+  fi
+  for sub in $("$SAIL_BIN" "$c" --help --lang en 2>&1 | awk '/^Available Commands:/{f=1;next} /^$/{f=0} f{print $1}'); do
+    [[ "$sub" == "help" ]] && continue
+    # 子命令必须自报 Usage,否则用户点进去看不到用法
+    "$SAIL_BIN" "$c" "$sub" --help --lang en >/dev/null 2>&1 ||
+      err "sail $c $sub --help 执行失败"
+  done
+done
+[[ $fail -eq 0 ]] && ok "每个命令都能通过 --help 找到并给出用法"
+
+# ── 4. README 里用到的命令必须真实存在(反向漂移)───────────
+# 文档里写了一个已改名/不存在的命令,用户照抄即报错,这类漂移同样要拦。
+# 别名(upload/download/cat)是合法写法,一并认。
+echo
+echo "── 文档命令有效性检查 ──"
+doc_bad=0
+valid_cmds="$( { tree_cmds; tree_aliases; } | sort -u )"
+for readme in "$MAIN_README" "$ZH_README" "$NPM_README"; do
+  while IFS= read -r cmd; do
+    [[ -n "$cmd" ]] || continue
+    if ! printf '%s\n' "$valid_cmds" | grep -qxF "$cmd"; then
+      err "$readme 中的命令 \`sail $cmd\` 既不是命令也不是别名"
+      doc_bad=1
+    fi
+  done < <(doc_cmds "$readme")
+done
+[[ $doc_bad -eq 0 ]] && ok "README 中出现的命令均真实存在(含别名)"
+
+# ── 5. README 里用到的旗标必须属于该命令(或全局)──────────
+# 与本轮新增的「命令必须真实存在」对称:文档写了一个不存在的旗标(或挂错了
+# 命令),用户照抄即报错。中英 diff 只能抓单边漂移,两边写错同一个旗标要靠这里。
+# 全量旗标表由 `sail <cmd> --help` 提供(三份 README 已写明),这里只查
+# 「文档用到的旗标在这个命令上确实存在」,不要求 README 列出全部旗标。
+echo
+echo "── 文档旗标有效性检查 ──"
+FLAG_INDEX="$(mktemp)"; trap 'rm -f "$FLAG_INDEX"' EXIT
+build_flag_index > "$FLAG_INDEX"
+flag_bad=0
+for readme in "$MAIN_README" "$ZH_README" "$NPM_README"; do
+  while IFS=$'\t' read -r cmd flag; do
+    [[ -n "$cmd" && -n "$flag" ]] || continue
+    # 命令本身就没通过上一条检查时不再报旗标,避免同一个笔误报两遍
+    printf '%s\n' "$valid_cmds" | grep -qxF "$cmd" || continue
+    case "$flag" in --help|-h|-v) continue;; esac    # 通用/全局开关,任何命令都接受
+    if ! all_flags $cmd | grep -qxF -- "$flag"; then
+      err "$readme 中 \`sail $cmd ... $flag\` 的旗标不属于该命令"
+      flag_bad=1
+    fi
+  done < <(doc_flags "$readme")
+done
+[[ $flag_bad -eq 0 ]] && ok "README 中出现的旗标均属于对应命令"
+
+# ── 6. 中文 README 与英文 README 的示例命令行必须逐条一致 ──
+# 双语是两篇独立文件,最容易漂移的是「一边加了/改了示例,另一边没跟上」。
+# 命令行本身与语言无关(两条命令行的差异只可能是漂移),注释则各写各的、
+# 不参与比对。用 diff 而非集合比大小,单边增删一条都能看出来。
+echo
+echo "── 中英 README 示例一致性检查 ──"
+diff_out="$(diff <(doc_command_lines "$MAIN_README") <(doc_command_lines "$ZH_README") || true)"
+if [[ -z "$diff_out" ]]; then
+  ok "中英 README 的示例命令行逐条一致"
+else
+  err "中英 README 示例不一致(< 仅英文, > 仅中文):"
+  printf '%s\n' "$diff_out" | sed 's/^/       /'
+fi
+
+# ── 7. 主 README 提到的 group 必须在 npm README 也有 ───────
 # 分组是面向用户的结构。哪些组存在由真实命令树决定;若某组在主 README
 # 有对应内容、npm README 却完全没有,说明精简版漏了一整类功能
 # (例如曾经的 serve / WebDAV)。
@@ -82,7 +327,7 @@ for gid in $(printf '%s\n' "$DUMP" | cut -f2 | sort -u); do
   fi
 done
 
-# ── 4. 关键功能小节必须同步存在 ────────────────────────────
+# ── 8. 关键功能小节必须同步存在 ────────────────────────────
 # 主 README 的顶级功能小节,若 npm README 完全没有对应内容,说明
 # 精简版漏了新功能。
 echo
@@ -102,5 +347,5 @@ if [[ $fail -eq 0 ]]; then
   echo -e "${GREEN}README 同步检查通过${NC}"
   exit 0
 fi
-echo -e "${RED}README 同步检查失败:请补齐 npm/main/README.md(或主 README)${NC}"
+echo -e "${RED}README 同步检查失败:请补齐三份 README(或修脚本里列出的漂移)${NC}"
 exit 1

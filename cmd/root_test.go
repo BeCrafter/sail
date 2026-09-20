@@ -106,15 +106,18 @@ func TestServeGroupedUnderServer(t *testing.T) {
 }
 
 // __commands 是 scripts/check-readme-sync.sh 的唯一事实来源:
-// 它必须列出全部顶层命令且带分组,否则文档同步检查会失去意义。
+// 它必须列出全部顶层命令且带分组与别名,否则文档同步检查会失去意义
+// (README 会用 `sail upload` / `sail cat` 这类别名举例,校验脚本要能认出来)。
 func TestCommandsDumpListsAllTopLevelCommands(t *testing.T) {
 	// 从 rootCmd 直接算期望集合,与实现同源但独立成算。
 	want := map[string]string{}
+	wantAlias := map[string]string{}
 	for _, c := range rootCmd.Commands() {
 		if !c.IsAvailableCommand() {
 			continue
 		}
 		want[c.Name()] = c.GroupID
+		wantAlias[c.Name()] = strings.Join(c.Aliases, ",")
 	}
 	if len(want) == 0 {
 		t.Fatal("rootCmd 没有任何可用命令")
@@ -127,13 +130,19 @@ func TestCommandsDumpListsAllTopLevelCommands(t *testing.T) {
 		t.Fatalf("__commands 执行失败: %v", err)
 	}
 
-	got := map[string]string{}
-	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+	got, gotAlias := map[string]string{}, map[string]string{}
+	// 只去行尾换行:别名列可能为空(如 "wc\tcontent\t"),TrimSpace 会把该列的分隔符一起吃掉
+	for _, line := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
 		if line == "" {
 			continue
 		}
-		name, group, _ := strings.Cut(line, "\t")
-		got[name] = group
+		cols := strings.Split(line, "\t")
+		if len(cols) != 3 {
+			t.Errorf("__commands 行 %q 不是三列(name/group/aliases)", line)
+			continue
+		}
+		got[cols[0]] = cols[1]
+		gotAlias[cols[0]] = cols[2]
 	}
 	if len(got) != len(want) {
 		t.Fatalf("命令数不符: __commands %d 个, rootCmd %d 个", len(got), len(want))
@@ -143,6 +152,9 @@ func TestCommandsDumpListsAllTopLevelCommands(t *testing.T) {
 			t.Errorf("__commands 缺少命令 %q", name)
 		} else if g != group {
 			t.Errorf("命令 %q 分组不符: __commands=%q rootCmd=%q", name, g, group)
+		}
+		if a := gotAlias[name]; a != wantAlias[name] {
+			t.Errorf("命令 %q 别名不符: __commands=%q rootCmd=%q", name, a, wantAlias[name])
 		}
 	}
 }

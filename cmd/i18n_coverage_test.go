@@ -39,7 +39,14 @@ func TestTranslatableStringsAreRegistered(t *testing.T) {
 			return
 		}
 		check(c.Name()+" Short", c.Short)
-		check(c.Name()+" Long", c.Long)
+		// cobra 的 help 子命令正文内嵌宿主显示名("Simply type <host> help …"),
+		// 每个宿主一份原文;i18n.Apply 按模板整段改写,这里还原成同一个 key。
+		if c.Name() == "help" && strings.HasPrefix(c.Use, "help [command]") && c.Parent() != nil {
+			check(c.Name()+" Long",
+				"Help provides help for any command in the application.\nSimply type %s help [path to command] for full details.")
+		} else {
+			check(c.Name()+" Long", c.Long)
+		}
 		check(c.Name()+" Example", c.Example)
 		visit := func(f *pflag.Flag) {
 			// 帮助/版本开关的 Usage 由 cobra 拼上命令名("help for <cmd>" 等),
