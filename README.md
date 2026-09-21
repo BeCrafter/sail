@@ -20,6 +20,7 @@
 - **Content viewing**: multi-format smart rendering — text/JSON/YAML/CSV/XML/image terminal ASCII art/binary; `head`/`tail`/`wc`/`grep` stream without writing to disk
 - **Checksum & auth**: `checksum` (md5/sha256 computation and comparison), `presign` presigned URLs, public access URLs based on a CDN domain
 - **WebDAV gateway**: `serve webdav` mounts a bucket as a network drive — macOS Finder / Windows Explorer read and write directly, with zero client install
+- **SMB gateway**: `serve smb` exports a bucket (or a prefix of it) as an SMB2 share — the same zero-install story over the protocol Finder and Explorer mount natively
 - **Multi-profile config**: prod / test / staging environment switching, keys can reference env vars to avoid plaintext
 - **Cross-platform**: macOS / Linux, single binary, download and use; shell auto-completion (zsh / bash / fish)
 
@@ -149,6 +150,23 @@ profiles:
 ```
 
 Each `serve` field maps one-to-one to the same-named `serve webdav` flag (size fields use the same string format as the flags, e.g. `5TiB`). `user`/`password` accept plaintext or a `${VAR}` environment-variable reference, matching the access-key/secret-key key-security mechanism; empty fields fall back to the flag defaults. The optional `users` list enables multi-user mode — see "Multi-user" under the WebDAV gateway. `sail config setup` guides these fields interactively (including generating and validating the `users` table); fields it does not ask are kept as written in the file.
+
+`sail serve smb` reads the same `serve:` block for everything protocol-agnostic (prefix, users, quota,
+staging, size limits, chunking, cache TTL, prewarm) — one bucket's sharing layout does not have to be
+written twice — and adds a small `serve.smb` sub-block for what is SMB-specific:
+
+```yaml
+    serve:
+      prefix: shared
+      users:
+        - name: alice
+          password: ${ALICE_PASSWORD}
+          prefix: alice/
+      smb:
+        listen: ":1445"     # SMB's own port, deliberately not inherited from serve.listen
+        share: sail         # share name in single-user mode; ignored in multi-user mode
+        server-name: SAIL   # the name this server calls itself in the NTLM challenge
+```
 
 ### cdn-domain notes
 
@@ -492,6 +510,116 @@ Rules that hold once it is on:
   command yet, but the **detection rule now exists**: the directory name records the owning logical
   path, so a single HEAD per candidate settles whether the generation is still referenced — a GC
   never has to scan the whole bucket.
+
+## SMB gateway (`sail serve smb`)
+
+Exports the whole bucket (or the prefix given by `--prefix`) as an SMB2 share, so Finder and
+Explorer mount it as a network drive with nothing installed on the client:
+
+```bash
+# Start (defaults to a high port: 445 is the port clients dial by default but it needs root)
+sail serve smb --profile prod --listen :1445 \
+  --user alice --password '***' --share sail
+
+# Share only a prefix inside the bucket (mapped to /, out-of-prefix paths are always rejected)
+sail serve smb --profile prod --prefix shared --share sail
+
+# Mount
+#   macOS:   smb://host:1445/sail          (Finder → Go → Connect to Server)
+#   Windows: \\host@1445\sail
+#   Linux:   mount -t cifs //host:1445/sail /mnt -o username=alice,port=1445
+```
+
+Which bucket is shared comes from the profile, exactly as in WebDAV mode. The port must be named at
+mount time on every platform because the server deliberately does not require root for port 445.
+Non-standard ports on **Windows** have historically needed a client-side registry value
+(`HKLM\SYSTEM\CurrentControlSet\Services\lanmanserver\parameters\SMBPort` or the equivalent for the
+redirector) — verify on your Windows version before rolling it out.
+
+### Flags
+
+Everything protocol-agnostic is shared with `serve webdav` and has identical semantics
+(`--prefix`, `--user`/`--password`, `serve.users`, `--staging-dir`, `--backend-max-object-size`,
+`--max-upload-size`, `--chunked-upload`, `--chunk-size`, `--dir-cache-ttl`, `--prewarm`).
+The SMB-specific ones:
+
+| Flag | Default | Notes (`serve.smb.*` config key) |
+|---|---|---|
+| `--listen` | `:1445` | Listen address. 445 needs root on every OS; clients name the port when mounting (`serve.smb.listen`) |
+| `--share` | `sail` | Share name in single-user mode; in multi-user mode each user gets a share named after them instead (`serve.smb.share`) |
+| `--server-name` | `SAIL` | The name this server calls itself in the NTLM challenge; clients display it (`serve.smb.server-name`) |
+
+There is no `--tls-cert`/`--tls-key` here: SMB2 has no TLS layer — message signing and encryption
+live inside the protocol and the library handles them.
+
+`--max-upload-size` refuses over-limit writes, but the client sees "permission denied" rather than a
+distinct error — see the differences below.
+
+### Multi-user and quota
+
+The user table is the same `serve.users` list, with the same per-user prefix and quota. One
+difference follows from the protocol: **a share binds exactly one filesystem**, so there is no way to
+give one share different content per user. In multi-user mode each user therefore gets their own
+share, named after them:
+
+```bash
+sail serve smb --profile prod --listen :1445   # serve.users: alice, bob
+# alice mounts smb://host:1445/alice, bob mounts smb://host:1445/bob
+# bob cannot connect to alice's share at all (the share is restricted, not hidden)
+```
+
+Quota is enforced by the same protocol-independent decorator as in WebDAV mode: a write that would
+exceed the limit is refused at commit time, and nothing is written.
+
+### Differences from WebDAV mode
+
+| | WebDAV | SMB |
+|---|---|---|
+| Transport security | `--tls-cert`/`--tls-key` (HTTPS) | SMB2 message signing/encryption inside the protocol; no TLS flags |
+| Authentication | HTTP Basic, compared per request | NTLMv2 challenge/response (the server needs the plaintext password) |
+| Default port | `:8080` | `:1445` (445 needs root) |
+| Mount shape | `https://host:port/path` | `smb://host:port/share` (Windows: `\\host@port\share`) |
+| Error reporting | HTTP status codes (404/405/413/507…) | NTSTATUS codes |
+| Write model | PUT is already a sequential stream | Positional writes are staged locally, then uploaded on close |
+| Config hot reload | user table hot-reloads on config change | **not supported** — the library can add shares and users but never remove them, so changing `serve.users` needs a restart |
+| Quota / size-limit error | `507 Insufficient Storage` / `413` | "permission denied" (see below) |
+
+### SMB-specific limitations
+
+- **A failed commit is not reported to the client.** The SMB2 library closes the handle without
+  checking the result, so a client whose upload could not be written still sees a successful CLOSE.
+  Failures are logged on the server (`committing <path> failed`) — if a file looks unchanged after a
+  write, check the server log. The window is narrow (the commit happens on close, in-process), but it
+  is not zero, and it is the one place where a silent failure is possible.
+- **Quota and per-file size limits surface as "permission denied".** The library maps filesystem
+  errors to NTSTATUS codes itself and offers no hook to map them, so `STATUS_DISK_FULL` and
+  `STATUS_FILE_TOO_LARGE` are not reachable; over-limit writes come back as `ACCESS_DENIED`. The
+  refusal is correct — only the code is less specific than it should be.
+- **Free-space reporting is fixed.** The library answers "how much room is there" with a constant
+  (4 GiB volume, 2 GiB free) because the driver has no say in it; a client therefore cannot see the
+  real quota, and `quota-available-bytes`-style reporting is WebDAV-only.
+- **Timestamps are not persisted.** S3 stores only a modification time, so a client's
+  creation/access/change times are accepted on writes and then read back as "now". Setting them is
+  not refused (a refusal at the end of a copy reports failure after the bytes arrived), it is simply
+  not stored.
+- **Rename and delete cost what the backend costs — and on a slow backend that breaks clients.**
+  On S3 a rename is a server-side copy plus a delete; on a gateway whose single DELETE takes ~27
+  seconds (and whose batch endpoint answers 500, so there is no fast path), a rename takes that long,
+  while clients treat rename as an instant operation. The sharper case: macOS `cp` creates an
+  AppleDouble sidecar (`._name`) and deletes it when the copy finishes — that delete holds the
+  share's write lock for its full latency, the client gives up waiting, and the copy reports
+  `Bad file descriptor` **even though every byte committed correctly**. Measured on such a gateway
+  (native macOS mount): a 1 MiB copy finishes in 32 s; an 8 MiB copy reports that error with the
+  object perfect in the bucket. `internal/s3del` already parallelizes deletes; the remaining cost is
+  the backend's, which makes this a gateway bug worth fixing rather than a sail one.
+- **Directory listings are cached** (`--dir-cache-ttl`, default 60s) and a write invalidates its own
+  directory immediately. Changes made by anyone else become visible after at most one TTL.
+- Symbolic links, hard links, extended attributes and ACLs are not S3 concepts and answer
+  "not supported".
+
+The trade-off that makes all of this work is that `internal/smbfs/` is a thin shell over the same
+protocol-independent kernel the WebDAV shell uses: quota, prefix isolation, chunked storage and the
+delete path are the same code, and swapping the SMB library touches nothing below this package.
 
 ## Cross-check with AWS CLI
 

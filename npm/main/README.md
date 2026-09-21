@@ -107,7 +107,8 @@ table); fields it does not ask are kept as written in the config file.
 | Checksum & access | `sail checksum` | Compute md5/sha256 or show the raw ETag |
 | Checksum & access | `sail presign` | Generate a presigned download URL |
 | Checksum & access | `sail url` | Generate a CDN access URL |
-| Server | `sail serve webdav` | Share a bucket as a mountable network drive (macOS Finder / Windows Explorer) |
+| Server | `sail serve webdav` | Share a bucket as a mountable network drive over WebDAV (macOS Finder / Windows Explorer) |
+| Server | `sail serve smb` | Share a bucket as a mountable network drive over SMB2 |
 | Config | `sail config` | Manage configuration (`config setup` wizard) |
 
 All commands support `--help` for detailed usage and examples; that output is the complete flag reference (every flag, its default, and its semantics). The table above is a summary, and the [repo README](https://github.com/BeCrafter/sail#readme) is the full guide.
@@ -206,6 +207,41 @@ Full details in the [repo README](https://github.com/BeCrafter/sail#multi-user-s
 
 See the [repo README](https://github.com/BeCrafter/sail#webdav-gateway-sail-serve-webdav) for the
 full flag table, design boundaries (in-process LOCK, 501 on directory MOVE/COPY), and chunked storage.
+
+## SMB gateway (`sail serve smb`)
+
+The same bucket (or the prefix given by `--prefix`) exported over SMB2, which Finder and Explorer
+mount as a network drive natively. Everything protocol-agnostic is shared with WebDAV mode:
+prefix, user table and quota, staging dir, size limits, chunked storage, listing cache and prewarm.
+
+```bash
+# Start; 445 is the port clients dial by default but it needs root, so the default is a high port
+sail serve smb --profile prod --listen :1445 --user alice --password '***' --share sail
+
+# Mount: macOS smb://host:1445/sail, Windows \\host@1445\sail,
+# Linux mount -t cifs //host:1445/sail /mnt -o username=alice,port=1445
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--listen` | `:1445` | Listen address; clients name the port when mounting |
+| `--share` | `sail` | Share name in single-user mode; multi-user mode names each share after its user |
+| `--server-name` | `SAIL` | The name the server calls itself in the NTLM challenge |
+| `--prefix` / `--user` / `--password` / `--staging-dir` / `--chunked-upload` / `--chunk-size` / `--dir-cache-ttl` / `--prewarm` | as in WebDAV | Identical semantics |
+
+`serve.smb` in the profile pins `listen` / `share` / `server-name`; the rest comes from the shared
+`serve:` block.
+
+Differences from WebDAV mode worth knowing before rolling it out: SMB2 signs/encrypts inside the
+protocol (no `--tls-cert`/`--tls-key`), authentication is NTLMv2 instead of Basic, errors are
+NTSTATUS codes rather than HTTP status codes, positional writes are staged locally and uploaded when
+the client closes the handle, and **the user table does not hot-reload** — the library can add shares
+and users but never remove them, so changing `serve.users` needs a restart. Quota and per-file size
+limits surface to clients as "permission denied", and a commit that fails is logged on the server
+rather than reported to the client (the library ignores the close result).
+
+See the [repo README](https://github.com/BeCrafter/sail#smb-gateway-sail-serve-smb) for the full
+list of differences and limitations.
 
 ## Documentation
 

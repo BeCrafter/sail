@@ -20,6 +20,7 @@
 - **内容查看**:多格式智能渲染——文本/JSON/YAML/CSV/XML/图片终端字符画/二进制;`head`/`tail`/`wc`/`grep` 流式读写不落盘
 - **校验与鉴权**:`checksum`(md5/sha256 计算与比对)、`presign` 预签名 URL、基于 CDN 域名的公开访问地址
 - **WebDAV 网关**:`serve webdav` 把 bucket 挂成网络盘,macOS Finder / Windows 资源管理器直接读写,零客户端安装
+- **SMB 网关**:`serve smb` 把 bucket(或其中某个前缀)导出为 SMB2 共享——同一个「零客户端安装」的故事,换成 Finder / 资源管理器原生挂载的协议
 - **多 profile 配置**:prod / test / staging 等多环境切换,密钥可引用环境变量避免明文
 - **跨平台**:macOS / Linux,单二进制下载即用;支持 shell 自动补全(zsh / bash / fish)
 
@@ -146,6 +147,21 @@ profiles:
 ```
 
 `serve` 块各字段与 `serve webdav` 的同名 flag 一一对应(大小类字段用与 flag 相同的字符串格式,如 `5TiB`)。`user`/`password` 可写明文或 `${VAR}` 引用环境变量,与 access-key/secret-key 的密钥安全机制一致;空字段由 flag 默认值兜底。可选的 `users` 列表开启多用户模式——见 WebDAV 网关一节的「多用户」。`sail config setup` 会交互式引导上述字段(含生成并校验 `users` 表);它不提问的字段按文件原样保留。
+
+`sail serve smb` 复用同一个 `serve:` 块里与协议无关的部分(前缀、用户表、配额、暂存、大小上限、分片、缓存、预热)——同一个桶的共享布局不必写两遍;SMB 独有的参数放在 `serve.smb` 子块里:
+
+```yaml
+    serve:
+      prefix: shared
+      users:
+        - name: alice
+          password: ${ALICE_PASSWORD}
+          prefix: alice/
+      smb:
+        listen: ":1445"     # SMB 自己的端口,刻意不继承 serve.listen
+        share: sail         # 单用户模式下的共享名;多用户模式下不使用
+        server-name: SAIL   # 服务端在 NTLM 挑战里自称的名字
+```
 
 ### cdn-domain 说明
 
@@ -467,6 +483,97 @@ sail serve webdav --profile prod --user alice --password '***' \
   删除或覆盖中途失败仍可能留下孤儿片:它们对列目录不可见、不影响数据一致性。目前还没有
   `sail gc` 子命令来回收,但片目录名按逻辑路径归属,**判定规则已经成立** —— 由 `.sail/parts/<L>/…`
   反推 L 后只需一次 HEAD 即可确认该代是否仍被引用,实现 GC 不必全桶扫描。
+
+## SMB 网关(`sail serve smb`)
+
+把整个 bucket(或 `--prefix` 指定的前缀)导出为 SMB2 共享,由 Finder / 资源管理器挂成网络盘,客户端零安装:
+
+```bash
+# 启动(默认高位端口:445 是客户端默认拨的端口,但它是特权端口)
+sail serve smb --profile prod --listen :1445 \
+  --user alice --password '***' --share sail
+
+# 只共享桶内某个前缀(映射为 /,越界路径一律拒绝)
+sail serve smb --profile prod --prefix shared --share sail
+
+# 挂载
+#   macOS:   smb://host:1445/sail          (Finder → 前往 → 连接服务器)
+#   Windows: \\host@1445\sail
+#   Linux:   mount -t cifs //host:1445/sail /mnt -o username=alice,port=1445
+```
+
+共享哪个桶同样由 profile 决定(与 WebDAV 模式一致)。端口在挂载时必须显式写出:服务端刻意不为了
+占用 445 而要求 root。**Windows** 上非标准端口历史上需要客户端侧注册表项,正式推广前请先在目标
+Windows 版本上实测。
+
+### 参数
+
+与协议无关的那部分和 `serve webdav` 完全共用、语义一致(`--prefix`、`--user`/`--password`、
+`serve.users`、`--staging-dir`、`--backend-max-object-size`、`--max-upload-size`、
+`--chunked-upload`、`--chunk-size`、`--dir-cache-ttl`、`--prewarm`)。SMB 独有的:
+
+| 参数 | 默认值 | 说明(`serve.smb.*` 配置键) |
+|---|---|---|
+| `--listen` | `:1445` | 监听地址。445 在各平台都需 root,故默认高位端口,由客户端在挂载时指定(`serve.smb.listen`) |
+| `--share` | `sail` | 单用户模式下的共享名;多用户模式下每个用户一个共享、共享名即用户名(`serve.smb.share`) |
+| `--server-name` | `SAIL` | 服务端在 NTLM 挑战里自称的名字,客户端界面会显示它(`serve.smb.server-name`) |
+
+这里没有 `--tls-cert`/`--tls-key`:SMB2 没有 TLS 这一层,签名与加密在协议内部,由库处理。
+
+`--max-upload-size` 会拒绝超限的写入,但客户端看到的是「权限不足」而不是专属错误——见下方差异表。
+
+### 多用户与配额
+
+用户表仍是同一份 `serve.users`,每个用户的空间前缀与配额语义不变。只有一处来自协议本身的差异:
+**一个共享只能绑一个文件系统**,所以「同一个共享按凭据显示不同内容」表达不出来。多用户模式下
+每个用户因此各有一个共享,共享名即用户名:
+
+```bash
+sail serve smb --profile prod --listen :1445   # serve.users: alice、bob
+# alice 挂载 smb://host:1445/alice,bob 挂载 smb://host:1445/bob
+# bob 根本连不上 alice 的共享(共享级拒绝,不是「列出来但连不上」)
+```
+
+配额由与 WebDAV 模式同一个协议无关装饰器执行:提交点判定,超限的写入被拒绝且不落库。
+
+### 与 WebDAV 模式的差异
+
+| | WebDAV | SMB |
+|---|---|---|
+| 传输安全 | `--tls-cert`/`--tls-key`(HTTPS) | 协议内的 SMB2 签名/加密,无 TLS 参数 |
+| 认证 | HTTP Basic,逐请求比对 | NTLMv2 挑战应答(服务端需持有明文口令) |
+| 默认端口 | `:8080` | `:1445`(445 需 root) |
+| 挂载形态 | `https://host:port/路径` | `smb://host:port/共享`(Windows:`\\host@port\共享`) |
+| 错误语义 | HTTP 状态码(404/405/413/507…) | NTSTATUS 错误码 |
+| 写模型 | PUT 本就是顺序流 | 定位写先落本地暂存,关闭句柄时才上传 |
+| 配置热加载 | 改配置热替换用户表 | **不支持**——库能加共享与用户却没有删的接口,改 `serve.users` 需重启 |
+| 配额/超限错误 | `507 Insufficient Storage` / `413` | 「权限不足」(见下) |
+
+### SMB 特有的限制
+
+- **提交失败不会回传给客户端**。SMB2 库关闭句柄时不检查返回值,上传写不进桶的客户端仍会看到
+  成功的 CLOSE。失败改为记服务端日志(`committing <path> failed`)——写完文件发现内容没变就去
+  查日志。这个窗口很窄(提交发生在进程内的关闭时刻),但不是零,也是本模式唯一可能静默失败的地方。
+- **配额与单文件上限表现为「权限不足」**。库自己把文件系统错误翻译成 NTSTATUS,没有留映射钩子,
+  于是 `STATUS_DISK_FULL` 与 `STATUS_FILE_TOO_LARGE` 取不到,超限写入一律回 `ACCESS_DENIED`。
+  拒绝本身是对的,只是错误码不够具体。
+- **剩余空间是固定的**。库对「还有多少空间」回一个常量(4GiB 卷、2GiB 可用),驱动说不上话;
+  客户端因此看不到真实配额,`quota-available-bytes` 那类播报只在 WebDAV 模式有。
+- **时间戳不持久化**。S3 只存修改时间,客户端写入的创建/访问/变更时间会被接受、读回时一律是
+  「现在」。设置请求不报错(在拷贝末尾报错会更糟:字节已经传完了),只是存不下来。
+- **改名与删除的耗时就是后端的耗时;后端慢会直接打崩客户端**。S3 上改名 = 服务端复制 + 删除;
+  在单次 DELETE 要 ~27 秒的网关上(且批量端点返 500、没有快路径),大文件改名就要那么久,而客户端
+  把改名当瞬时操作。更尖锐的一例:macOS 的 `cp` 会建 AppleDouble 边车(`._名字`)并在拷贝结束时
+  删掉它——那次删除会在整个延迟期间占着共享写锁,客户端等不到就放弃,于是拷贝报
+  `Bad file descriptor`,**而字节其实已经全部正确提交**。该网关上实测(原生 macOS 挂载):
+  1 MiB 拷贝 32 秒完成;8 MiB 拷贝报上述错误,但桶里的对象完好。删除路径已由 `internal/s3del`
+  并发化,剩下的成本在后端那边——这是该修网关而不是修 sail 的理由。
+- **目录列表有缓存**(`--dir-cache-ttl`,默认 60s),自己的写入会立刻失效自己的目录;别人在别处
+  改动的可见延迟最长一个 TTL。
+- 符号链接、硬链接、扩展属性、ACL 都不是 S3 的概念,一律答「不支持」。
+
+这套取舍能成立的前提是:`internal/smbfs/` 只是同一个协议无关内核之上的薄壳——配额、前缀隔离、
+分片存储、删除路径都是同一份代码,换 SMB 服务端库也动不到这一层以下。
 
 ## 限制
 
