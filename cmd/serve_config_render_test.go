@@ -130,3 +130,37 @@ func TestRenderProfileServeBlockUsersOnly(t *testing.T) {
 		t.Errorf("仅含 users 的块往返丢失: %+v", r.Serve.Users)
 	}
 }
+
+func TestRenderProfileServeBlockSMBRoundtrip(t *testing.T) {
+	cfg := &config.Config{
+		DefaultProfile: "prod",
+		Profiles: map[string]config.Profile{
+			"prod": {
+				Endpoint: "https://s3.example.com", AccessKey: "ak", SecretKey: "sk", Bucket: "b",
+				Serve: config.ServeConfig{SMB: config.SMBConfig{
+					Listen: ":2445", Share: "team-share", ServerName: "SAIL-TEST",
+				}},
+			},
+		},
+	}
+	rendered := renderConfigFile(cfg)
+	if !strings.Contains(rendered, "      smb:\n") || !strings.Contains(rendered, `        listen: ":2445"`) {
+		t.Fatalf("SMB 配置块未渲染:\n%s", rendered)
+	}
+
+	p := t.TempDir() + "/config.yaml"
+	if err := os.WriteFile(p, []byte(rendered), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	r, err := loaded.Resolve("prod")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got := r.Serve.SMB; got.Listen != ":2445" || got.Share != "team-share" || got.ServerName != "SAIL-TEST" {
+		t.Errorf("SMB 配置往返错误: %+v", got)
+	}
+}

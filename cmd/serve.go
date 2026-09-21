@@ -29,25 +29,31 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// serveWebdavFlags 是 `sail serve webdav` 的全部参数。
-type serveWebdavFlags struct {
-	listen            string
-	prefix            string
-	user              string
-	password          string
+// serveFlags 是两个 serve 子命令共用的 flag 落点。命令各自只注册自己那部分:
+// WebDAV 有 --tls-cert/--tls-key/--print-windows-setup,SMB 有 --share/--server-name。
+// 未注册的字段保持零值,changed() 恒为 false,故共用的合并逻辑不必知道是哪条命令。
+type serveFlags struct {
+	listen         string
+	prefix         string
+	user           string
+	password       string
+	backendMaxSize string
+	maxUploadSize  string
+	stagingDir     string
+	chunkedUpload  bool
+	chunkSize      string
+	dirCacheTTL    string
+	prewarm        []string
+	// WebDAV 专属
 	tlsCert           string
 	tlsKey            string
-	backendMaxSize    string
-	maxUploadSize     string
-	stagingDir        string
-	chunkedUpload     bool
-	chunkSize         string
-	dirCacheTTL       string
-	prewarm           []string
 	printWindowsSetup bool
+	// SMB 专属
+	share      string
+	serverName string
 }
 
-var serveWebdavOpts serveWebdavFlags
+var serveWebdavOpts serveFlags
 
 var serveCmd = &cobra.Command{
 	GroupID: "server",
@@ -57,7 +63,8 @@ var serveCmd = &cobra.Command{
 Which bucket is shared comes from the profile, so name it with --profile (the global
 --bucket flag and SAIL_BUCKET still override it when needed).
 
-  serve webdav  -- share over the WebDAV protocol (HTTPS optional)`,
+  serve webdav  -- share over the WebDAV protocol (HTTPS optional)
+  serve smb     -- share over the SMB2 protocol (clients mount a network drive)`,
 }
 
 var serveWebdavCmd = &cobra.Command{
@@ -226,15 +233,16 @@ type serveSettings struct {
 	prewarm       []string
 }
 
-// mergeServe 按「flag(显式设置) > profile.serve.* > flag 默认值」合并并校验
-// 全部 serve 参数。changed 返回某 flag 是否被显式设置;测试可传显式 map。
-func mergeServe(o serveWebdavFlags, r *config.Resolved, changed func(string) bool) (serveSettings, error) {
-	listen := pick(changed("listen"), o.listen, r.Serve.Listen)
+// mergeServeBase 合并两种协议壳共用的那部分参数,并做与协议无关的校验
+// (用户表互斥与语义、大小/分片/缓存时长语法)。监听地址不在这里解析:它的
+// 配置落点按协议分(serve.listen / serve.smb.listen),由各自的 merge 负责。
+//
+// 解析链:flag(显式设置) > profile.serve.* > flag 默认值。changed 返回某
+// flag 是否被显式设置;测试可传显式 map。
+func mergeServeBase(o serveFlags, r *config.Resolved, changed func(string) bool) (serveSettings, error) {
 	prefix := pick(changed("prefix"), o.prefix, r.Serve.Prefix)
 	user := pick(changed("user"), o.user, r.Serve.User)
 	password := pick(changed("password"), o.password, r.Serve.Password)
-	tlsCert := pick(changed("tls-cert"), o.tlsCert, r.Serve.TLSCert)
-	tlsKey := pick(changed("tls-key"), o.tlsKey, r.Serve.TLSKey)
 	stagingDir := pick(changed("staging-dir"), o.stagingDir, r.Serve.StagingDir)
 	backendMaxRaw := pick(changed("backend-max-object-size"), o.backendMaxSize, r.Serve.BackendMaxSize)
 	maxUploadRaw := pick(changed("max-upload-size"), o.maxUploadSize, r.Serve.MaxUploadSize)
@@ -263,9 +271,6 @@ func mergeServe(o serveWebdavFlags, r *config.Resolved, changed func(string) boo
 			"--user and --password are required (from flags or profile %q \"serve\" config): this gateway does not allow anonymous sharing",
 			r.ProfileName))
 	}
-	if (tlsCert == "") != (tlsKey == "") {
-		return serveSettings{}, errors.New(i18n.T("--tls-cert and --tls-key must be supplied together"))
-	}
 
 	backendMax, err := parseSize(backendMaxRaw)
 	if err != nil {
@@ -287,13 +292,10 @@ func mergeServe(o serveWebdavFlags, r *config.Resolved, changed func(string) boo
 	}
 
 	return serveSettings{
-		listen:        listen,
 		prefix:        prefix,
 		user:          user,
 		password:      password,
 		users:         users,
-		tlsCert:       tlsCert,
-		tlsKey:        tlsKey,
 		stagingDir:    stagingDir,
 		maxUpload:     maxUpload,
 		chunkedUpload: chunkedUpload,
@@ -303,11 +305,54 @@ func mergeServe(o serveWebdavFlags, r *config.Resolved, changed func(string) boo
 	}, nil
 }
 
+// mergeServe 在共用参数之外补 WebDAV 专属部分:监听地址与 TLS 对。
+func mergeServe(o serveFlags, r *config.Resolved, changed func(string) bool) (serveSettings, error) {
+	s, err := mergeServeBase(o, r, changed)
+	if err != nil {
+		return serveSettings{}, err
+	}
+	s.listen = pick(changed("listen"), o.listen, r.Serve.Listen)
+	s.tlsCert = pick(changed("tls-cert"), o.tlsCert, r.Serve.TLSCert)
+	s.tlsKey = pick(changed("tls-key"), o.tlsKey, r.Serve.TLSKey)
+	if (s.tlsCert == "") != (s.tlsKey == "") {
+		return serveSettings{}, errors.New(i18n.T("--tls-cert and --tls-key must be supplied together"))
+	}
+	return s, nil
+}
+
+// smbSettings 是 SMB 生效参数:共用部分 + SMB 专属三味。
+type smbSettings struct {
+	serveSettings
+	share      string
+	serverName string
+}
+
+// mergeServeSMB 合并 `serve smb` 的参数。监听地址刻意不继承 serve.listen:
+// 两种协议各跑各的进程,把 SMB 放到 WebDAV 的端口上只会更意外;SMB 自己那份
+// 配置落点是 serve.smb.listen,省略则用 flag 默认值。
+func mergeServeSMB(o serveFlags, r *config.Resolved, changed func(string) bool) (smbSettings, error) {
+	base, err := mergeServeBase(o, r, changed)
+	if err != nil {
+		return smbSettings{}, err
+	}
+	base.listen = pick(changed("listen"), o.listen, r.Serve.SMB.Listen)
+	share := pick(changed("share"), o.share, r.Serve.SMB.Share)
+	if strings.Contains(share, "\\") || strings.Contains(share, "/") {
+		return smbSettings{}, errors.New(i18n.Tf(
+			"invalid --share %q: SMB share names must not contain a path separator", share))
+	}
+	return smbSettings{
+		serveSettings: base,
+		share:         share,
+		serverName:    pick(changed("server-name"), o.serverName, r.Serve.SMB.ServerName),
+	}, nil
+}
+
 // serveRuntime 聚合 serve 进程的运行期状态:冷区设置快照、共享 S3 client、
 // 网关与每用户栈缓存。热加载只动用户表(I7);栈缓存与 reload 只被初始构建
 // 与 watch goroutine 串行触达,reload 之间经 reloadMu 互斥,无需其他锁。
 type serveRuntime struct {
-	o        serveWebdavFlags
+	o        serveFlags
 	changed  func(string) bool
 	settings serveSettings
 	bucket   string
@@ -332,11 +377,15 @@ type serveRuntime struct {
 	ensured   map[string]bool
 }
 
-// userStack 是一名用户的栈:s3fs 内核 → quotafs 配额装饰器 → webdavfs 壳层
-// 文件系统。配额热更新只动 qfs(SetQuota 原子改参数,不重建栈)。
+// userStack 是一名用户的协议无关栈:内核 → quotafs 配额装饰器。配额热更新只动
+// qfs(SetQuota 原子改参数,不重建栈)。
+//
+// shell 是包在栈之上的协议壳(*webdavfs.FileSystem 或 SMB 壳的每用户条目);
+// 一个进程只跑一个协议(D5),故同一份缓存里不会同时出现两种壳。栈在这里不
+// 持有壳类型,WebDAV 与 SMB 才能真正共用同一段建栈逻辑。
 type userStack struct {
-	fs  *webdavfs.FileSystem
-	qfs *quotafs.FS
+	qfs   *quotafs.FS
+	shell any
 }
 
 // effectiveUserTable 把生效参数归一为用户表:多用户取配置表;单用户是
@@ -349,7 +398,7 @@ func effectiveUserTable(s serveSettings) []config.UserConfig {
 }
 
 // newServeRuntime 构建共享 S3 client、初始用户栈与网关。
-func newServeRuntime(o serveWebdavFlags, r *config.Resolved, s serveSettings, changed func(string) bool, logger *log.Logger) (*serveRuntime, error) {
+func newServeRuntime(o serveFlags, r *config.Resolved, s serveSettings, changed func(string) bool, logger *log.Logger) (*serveRuntime, error) {
 	s3c, err := client.New(context.Background(), r)
 	if err != nil {
 		return nil, err
@@ -378,50 +427,65 @@ func newServeRuntime(o serveWebdavFlags, r *config.Resolved, s serveSettings, ch
 func (rt *serveRuntime) buildEntries(users []config.UserConfig) ([]webdavfs.UserEntry, error) {
 	entries := make([]webdavfs.UserEntry, 0, len(users))
 	for _, u := range users {
-		eff := config.EffectivePrefix(rt.settings.prefix, u.Prefix)
-		limit, err := quotaBytes(u.Quota)
+		st, err := rt.coreStack(u)
 		if err != nil {
 			return nil, err
 		}
-		st, ok := rt.stacks[eff]
+		dfs, ok := st.shell.(*webdavfs.FileSystem)
 		if !ok {
-			core, err := s3fs.New(s3fs.Config{
-				Client:        rt.s3c,
-				Bucket:        rt.bucket,
-				Prefix:        eff,
-				StagingDir:    rt.settings.stagingDir,
-				MaxUploadSize: rt.settings.maxUpload,
-				ChunkedUpload: rt.settings.chunkedUpload,
-				ChunkSize:     rt.settings.chunkSize,
-			})
-			if err != nil {
-				return nil, err
-			}
-			// 内核 → quotafs 配额装饰器 → 壳层。配额上限可由 SetQuota 热改,
-			// 不必重建栈(I7)。
-			qfs := quotafs.New(core, core, limit, 0, rt.logger)
-			qfs.SetLabel("quotafs[" + u.Name + "]") // 多用户下日志可归因
-			if limit > 0 {
-				// 预热用量快照:否则首次写入要走「从未成功」的等待路径
-				// (至多 3s,且期间按 0 计)。异步、失败仅告警,不影响启动。
-				qfs.Refresh(context.Background())
-			}
-			dfs := webdavfs.NewWithListingCache(qfs, rt.settings.dirCacheTTL)
+			// 壳只在栈新建时建一次:它持有目录列表缓存,重建等于把缓存丢掉。
+			dfs = webdavfs.NewWithListingCache(st.qfs, rt.settings.dirCacheTTL)
 			dfs.SetLogger(rt.logger) // 后台刷新失败的告警走同一条日志
-			st = &userStack{fs: dfs, qfs: qfs}
-			rt.stacks[eff] = st
-		} else {
-			// 复用栈:配额原子热更新(改 quota 不重建栈,P2 场景)。
-			st.qfs.SetQuota(limit)
+			st.shell = dfs
 		}
 		entries = append(entries, webdavfs.UserEntry{
 			Name:        u.Name,
 			Password:    u.Password,
-			FileSystem:  st.fs,
+			FileSystem:  dfs,
 			PrewarmDirs: rt.settings.prewarm,
 		})
 	}
 	return entries, nil
+}
+
+// coreStack 取或建一名用户的协议无关栈,并按用户配置原子设定配额(复用栈时即
+// 配额热更新:I7)。建栈只在内存里接线,不发请求。
+func (rt *serveRuntime) coreStack(u config.UserConfig) (*userStack, error) {
+	eff := config.EffectivePrefix(rt.settings.prefix, u.Prefix)
+	limit, err := quotaBytes(u.Quota)
+	if err != nil {
+		return nil, err
+	}
+	st, ok := rt.stacks[eff]
+	if ok {
+		// 复用栈:配额原子热更新(改 quota 不重建栈,P2 场景)。
+		st.qfs.SetQuota(limit)
+		return st, nil
+	}
+	core, err := s3fs.New(s3fs.Config{
+		Client:        rt.s3c,
+		Bucket:        rt.bucket,
+		Prefix:        eff,
+		StagingDir:    rt.settings.stagingDir,
+		MaxUploadSize: rt.settings.maxUpload,
+		ChunkedUpload: rt.settings.chunkedUpload,
+		ChunkSize:     rt.settings.chunkSize,
+	})
+	if err != nil {
+		return nil, err
+	}
+	// 内核 → quotafs 配额装饰器 → 壳层。配额上限可由 SetQuota 热改,
+	// 不必重建栈(I7)。
+	qfs := quotafs.New(core, core, limit, 0, rt.logger)
+	qfs.SetLabel("quotafs[" + u.Name + "]") // 多用户下日志可归因
+	if limit > 0 {
+		// 预热用量快照:否则首次写入要走「从未成功」的等待路径
+		// (至多 3s,且期间按 0 计)。异步、失败仅告警,不影响启动。
+		qfs.Refresh(context.Background())
+	}
+	st = &userStack{qfs: qfs}
+	rt.stacks[eff] = st
+	return st, nil
 }
 
 // quotaBytes 解析用户的配额字符串;空 = 不限额(0)。
@@ -573,6 +637,21 @@ func (rt *serveRuntime) warnColdZone(r2 *config.Resolved, s2 serveSettings) {
 	}
 }
 
+// ensureUserDir 幂等创建一个用户空间的目录 marker(0 字节、key 以 "/" 结尾)。
+// 失败只告警:用户根的 Stat/列取在内核侧是合成的,没有 marker 也能正常挂载
+// 使用,下一次 reload(WebDAV)或重启(SMB)会重试。两种协议壳共用这段逻辑。
+func ensureUserDir(s3c *s3.Client, bucket, eff string, logger *log.Logger) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := s3c.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(bucket),
+		Key:           aws.String(eff + "/"),
+		Body:          bytes.NewReader(nil),
+		ContentLength: aws.Int64(0),
+	})
+	return err
+}
+
 // ensureDirAsync 为一个生效前缀异步补建目录 marker;已成功过的前缀跳过。
 func (rt *serveRuntime) ensureDirAsync(eff string) {
 	// 只取 ensuredMu:本函数会被持 reloadMu 的 applyUserTable 调用,
@@ -584,17 +663,7 @@ func (rt *serveRuntime) ensureDirAsync(eff string) {
 		return
 	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_, err := rt.s3c.PutObject(ctx, &s3.PutObjectInput{
-			Bucket:        aws.String(rt.bucket),
-			Key:           aws.String(eff + "/"),
-			Body:          bytes.NewReader(nil),
-			ContentLength: aws.Int64(0),
-		})
-		if err != nil {
-			// 失败仅告警:用户根的 Stat/列取在内核侧是合成的,没有 marker
-			// 也能正常挂载使用;下次 reload 会重试(I10)。
+		if err := ensureUserDir(rt.s3c, rt.bucket, eff, rt.logger); err != nil {
 			rt.logger.Print(i18n.Tf("WARN: creating directory for user space %q failed (users still work; retried on next reload): %v", eff, err))
 			return
 		}
@@ -741,38 +810,48 @@ func newServeHTTPServer(addr string, handler http.Handler) *http.Server {
 	}
 }
 
-// serveURLs 把 --listen 地址解析成可直接挂载的完整 URL 列表。
-//
-// listen 常写成 ":8080" 或 "0.0.0.0:8080",这些不是客户端能连的地址。这里按
-// 实际绑定展开成:
+// listenHosts 把 --listen 解析成客户端可连的主机名列表:
 //   - 指定了具体 host(如 192.168.1.5:8080)时,只给那一个地址;
-//   - 通配地址(空 / 0.0.0.0 / ::)时,给出 localhost(本机挂载)+ 各网卡的
-//     局域网 IPv4(其它设备挂载),让用户按场景复制。
+//   - 通配地址(空 / 0.0.0.0 / ::)时,给出 localhost(本机)+ 各网卡的
+//     局域网 IPv4(其它设备),让用户按场景复制。
 //
-// 解析失败或无需展开(如 "unix:/tmp/x.sock")时返回 nil,不打断启动。
-func serveURLs(scheme, listen string) []string {
+// 解析失败或无需展开(如 "unix:/tmp/x.sock")时 ok 为 false,调用方不打断启动。
+func listenHosts(listen string) (hosts []string, port string, ok bool) {
 	host, port, err := net.SplitHostPort(listen)
 	if err != nil || port == "" {
-		return nil
+		return nil, "", false
 	}
 	// 显式绑定了具体主机:只暴露它,不猜其它地址。
 	if ip := net.ParseIP(host); host != "" && (ip == nil || !ip.IsUnspecified()) {
-		return []string{urlFor(scheme, host, port)}
+		return []string{host}, port, true
 	}
-	// 通配绑定:本机 + 局域网。
-	urls := []string{urlFor(scheme, "localhost", port)}
-	for _, ip := range lanIPv4s() {
-		urls = append(urls, urlFor(scheme, ip, port))
+	return append([]string{"localhost"}, lanIPv4s()...), port, true
+}
+
+// serveURLs 把监听地址展开成可直接挂载的 WebDAV URL 列表。
+func serveURLs(scheme, listen string) []string {
+	hosts, port, ok := listenHosts(listen)
+	if !ok {
+		return nil
+	}
+	urls := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		urls = append(urls, urlFor(scheme, h, port))
 	}
 	return urls
 }
 
-// urlFor 拼一个挂载 URL;IPv6 字面量加方括号。
-func urlFor(scheme, host, port string) string {
+// hostPort 拼 host:port;IPv6 字面量加方括号。
+func hostPort(host, port string) string {
 	if strings.Contains(host, ":") {
 		host = "[" + host + "]"
 	}
-	return scheme + "://" + host + ":" + port + "/"
+	return host + ":" + port
+}
+
+// urlFor 拼一个挂载 URL。
+func urlFor(scheme, host, port string) string {
+	return scheme + "://" + hostPort(host, port) + "/"
 }
 
 // lanIPv4s 枚举本机上可用的局域网 IPv4 地址(排除回环与非全局单播)。

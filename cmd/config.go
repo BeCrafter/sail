@@ -367,7 +367,8 @@ func serveBlockEmpty(s config.ServeConfig) bool {
 		s.TLSCert == "" && s.TLSKey == "" && s.StagingDir == "" &&
 		s.BackendMaxSize == "" && s.MaxUploadSize == "" &&
 		!s.ChunkedUpload && s.ChunkSize == "" &&
-		s.DirCacheTTL == "" && len(s.Prewarm) == 0
+		s.DirCacheTTL == "" && len(s.Prewarm) == 0 &&
+		s.SMB.Listen == "" && s.SMB.Share == "" && s.SMB.ServerName == ""
 }
 
 // yamlQuote 把用户自由输入的值渲染成 YAML 双引号标量:值里的 "#"、":"、
@@ -405,6 +406,18 @@ func serveBlock(s config.ServeConfig) string {
 	fmt.Fprintf(&b, "      chunked-upload: %t\n", s.ChunkedUpload)
 	b.WriteString(f("dir-cache-ttl", s.DirCacheTTL))
 	b.WriteString(servePrewarmBlock(s.Prewarm))
+	if s.SMB.Listen != "" || s.SMB.Share != "" || s.SMB.ServerName != "" {
+		b.WriteString("      smb:\n")
+		smbf := func(key, val string) string {
+			if val == "" {
+				return fmt.Sprintf("        # %s:\n", key)
+			}
+			return fmt.Sprintf("        %s: %s\n", key, yamlQuote(val))
+		}
+		b.WriteString(smbf("listen", s.SMB.Listen))
+		b.WriteString(smbf("share", s.SMB.Share))
+		b.WriteString(smbf("server-name", s.SMB.ServerName))
+	}
 	return b.String()
 }
 

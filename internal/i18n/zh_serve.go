@@ -3,15 +3,7 @@ package i18n
 func init() {
 	register(map[string]string{
 		// serve.go — command help metadata
-		"Start a server that shares a bucket over a standard protocol": "启动服务(把 bucket 通过标准协议共享)",
-		`Share one bucket with the file manager built into the OS; clients install nothing.
-Which bucket is shared comes from the profile, so name it with --profile (the global
---bucket flag and SAIL_BUCKET still override it when needed).
-
-  serve webdav  -- share over the WebDAV protocol (HTTPS optional)`: `把某个 bucket 共享给系统自带的文件管理器,客户端零安装。
-共享哪个 bucket 由 profile 决定,用 --profile 指定(全局 --bucket 与 SAIL_BUCKET 需要时仍可覆盖)。
-
-  serve webdav  —— 以 WebDAV 协议共享(HTTPS 可选)`,
+		"Start a server that shares a bucket over a standard protocol":                       "启动服务(把 bucket 通过标准协议共享)",
 		"Share a bucket over WebDAV (mountable directly by macOS Finder / Windows Explorer)": "以 WebDAV 协议共享 bucket(macOS Finder / Windows 资源管理器可直接挂载)",
 		`Share the whole bucket over the WebDAV protocol (or the prefix given by --prefix); which
 bucket that is comes from the profile, so name it with --profile (the global --bucket flag and
@@ -169,5 +161,104 @@ net start webclient
 
    卸载:net use Z: /delete
 `,
+
+		// serve.go — 父命令帮助里的一行 SMB 入口
+		`Share one bucket with the file manager built into the OS; clients install nothing.
+Which bucket is shared comes from the profile, so name it with --profile (the global
+--bucket flag and SAIL_BUCKET still override it when needed).
+
+  serve webdav  -- share over the WebDAV protocol (HTTPS optional)
+  serve smb     -- share over the SMB2 protocol (clients mount a network drive)`: `把某个 bucket 共享给系统自带的文件管理器,客户端零安装。
+共享哪个 bucket 由 profile 决定,用 --profile 指定(全局 --bucket 与 SAIL_BUCKET 需要时仍可覆盖)。
+
+  serve webdav  —— 以 WebDAV 协议共享(HTTPS 可选)
+  serve smb     —— 以 SMB2 协议共享(客户端挂载网络盘)`,
+
+		// serve_smb.go — command help metadata
+		"Share a bucket over SMB2 (mountable directly by macOS Finder / Windows Explorer)": "以 SMB2 协议共享 bucket(macOS Finder / Windows 资源管理器可直接挂载)",
+		`Share the whole bucket over SMB2 (or the prefix given by --prefix); which bucket that is
+comes from the profile, so name it with --profile (the global --bucket flag and SAIL_BUCKET
+still override it when needed). Clients mount it with capabilities built into the OS, no
+software to install.
+
+Design boundaries:
+  - SMB2's WRITE carries a 64-bit offset; the kernel's write handle is a sequential stream.
+    Positional writes therefore land in a local staging file first and are uploaded when the
+    client closes the handle, so point --staging-dir at a disk with room for the files being
+    written (staging peak is about one file's size x concurrently open files, counted twice
+    while the upload reads it back).
+  - A failed commit cannot be reported to the client: the SMB2 library closes the handle
+    without checking the result, so the client sees a successful CLOSE. Failures are logged
+    on the server instead — watch the log if a file looks unchanged.
+  - Quota and per-file size limits are enforced at that same commit point, so they inherit its
+    silence: the object is correctly not written, but the client is not told. The library also
+    translates filesystem errors to SMB status codes itself with no hook to override, so even
+    where an error does reach the client there is no distinct "out of space" code.
+  - User names and passwords are NTLM credentials, not HTTP Basic; a client that authenticates
+    is choosing a share, and in multi-user mode each user gets their own share named after
+    them (a share binds exactly one filesystem, so "one share, different content per user"
+    is not expressible).
+  - The user table is NOT hot-reloaded: the library can add shares and users but never remove
+    them, so changing serve.users requires a restart.
+  - With --chunked-upload on, files larger than --chunk-size are stored as chunks under the
+    reserved .sail/ prefix plus a small manifest object at the logical key: the bucket then
+    contains .sail/ objects, and "sail presign" fails loud on such a bucket because a presigned
+    URL would hand out the manifest instead of the file.
+
+Examples:
+  sail serve smb --profile prod --listen :1445 \
+    --user alice --password '***' --share sail
+  sail serve smb --profile prod --prefix shared --share sail
+    # then mount smb://host:1445/sail`: `以 SMB2 协议共享整个 bucket(或 --prefix 指定的前缀);共享哪个 bucket 由 --profile
+决定(全局 --bucket 与 SAIL_BUCKET 需要时仍可覆盖),客户端用系统自带能力挂载,无需安装任何软件。
+
+设计边界:
+  - SMB2 的 WRITE 带 64 位 offset,而内核的写句柄是顺序流:定位写先落本地暂存文件,
+    客户端关闭句柄时才上传。--staging-dir 因此要指向空间足够的盘(峰值 ≈ 单文件大小 ×
+    并发打开的文件数,上传回读期间再算一份)。
+  - 提交失败无法回传给客户端:SMB2 库关闭句柄时不检查返回值,客户端看到的是成功的
+    CLOSE。失败改记服务端日志 —— 文件内容看起来没变就去查日志。
+  - 配额与单文件上限在同一个提交点判定,因此也带上了同一条静默:对象确实不会落库,
+    但客户端不会被告知。库另外还自己把文件系统错误翻译成 SMB 状态码、没有留映射钩子,
+    所以即使错误真的到了客户端,也没有专属的「空间不足」码可用。
+  - 用户名/口令是 NTLM 凭据,不是 HTTP Basic;多用户模式下每个用户一个共享、共享名即
+    用户名(一个共享只能绑一个文件系统,「同一共享按凭据显示不同内容」表达不出来)。
+  - 用户表不热加载:库能加共享与用户却没有删的接口,改 serve.users 需要重启。
+  - 开启 --chunked-upload 后,超过 --chunk-size 的文件以「分片 + manifest」存储(片在
+    保留前缀 .sail/ 下):此时桶里会有 .sail/ 对象,且 "sail presign" 会对这类桶直接报错
+    —— 预签名 URL 会给出 manifest 而不是文件本身。
+
+示例:
+  sail serve smb --profile prod --listen :1445 \
+    --user alice --password '***' --share sail
+  sail serve smb --profile prod --prefix shared --share sail
+    # 然后挂载 smb://host:1445/sail`,
+		"listen address; 445 is the port SMB clients dial by default but it needs root, so this defaults to a high port and clients name it when mounting": "监听地址;445 是 SMB 客户端默认拨的端口,但它是特权端口,故这里默认用高位端口,由客户端在挂载时指定",
+		"NTLM user name (required)": "NTLM 用户名(必填)",
+		"NTLM password (required)":  "NTLM 口令(必填)",
+		"share name for the single-user case; in multi-user mode each user gets a share named after them instead":                                                                                                         "单用户模式下的共享名;多用户模式下每个用户一个共享、共享名即用户名",
+		"the name this server calls itself in the NTLM challenge (clients display it)":                                                                                                                                    "服务端在 NTLM 挑战里自称的名字(客户端界面会显示它)",
+		"per-file size limit, defaults to --backend-max-object-size; over the limit nothing is written, but the client is not told (the check runs at close, and the library ignores that result — see the command help)": "单文件大小上限,默认取 --backend-max-object-size;超限的对象不会落库,但客户端不会被告知(判定发生在关闭句柄时,而库不看那次返回值——详见命令帮助)",
+		"staging directory for positional writes, defaults to the system temp dir; peak is about one file's size x concurrently open files":                                                                               "定位写的暂存目录,默认用系统临时目录;峰值 ≈ 单文件大小 × 并发打开的文件数",
+		"how long a directory listing and its entry metadata are cached (e.g. 60s, 10m; 0 disables); SMB's directory listing stats every entry one by one, so turning this off costs one backend round trip per entry":    "目录列表与条目元信息的缓存时长(如 60s、10m;0 = 关闭);SMB 的目录列举要对每个条目单独取一次元信息,关掉缓存等于每个条目一次后端往返",
+
+		// serve_smb.go — 运行期文案
+		"sail smb started: %s  bucket=%s profile=%s%s user=%s max-object-size=%s staging=%s chunked=%s share=%s\n": "sail smb 已启动:%s  bucket=%s profile=%s%s user=%s max-object-size=%s staging=%s chunked=%s share=%s\n",
+		"  share %s -> user %s\n": "  共享 %s -> 用户 %s\n",
+		"  the user table is read at startup only: changing serve.users requires a restart\n":                                                                                            "  用户表只在启动时读取:改 serve.users 需要重启才生效\n",
+		"WARN: creating directory for user space %q failed (users still work; restarting retries): %v":                                                                                   "警告: 为用户空间 %q 创建目录失败(用户仍可用;重启会重试): %v",
+		"no bucket to share: pass --bucket, set SAIL_BUCKET, or add \"bucket\" to profile %q in the config file — SMB exposes a whole bucket, and without one there is nothing to share": "没有可共享的 bucket:请传 --bucket、设 SAIL_BUCKET,或给配置文件里 profile %q 加上 \"bucket\" —— SMB 共享的是整桶,没有桶就无从共享",
+		"invalid --share %q: SMB share names must not contain a path separator":                                                                                                          "无效的 --share %q:SMB 共享名里不能含路径分隔符",
+		"SMB share name %q must not be empty":                                                                                       "SMB 共享名 %q 不能为空",
+		"SMB share name %q contains a path separator, which SMB does not allow":                                                     "SMB 共享名 %q 含路径分隔符,SMB 不允许这样命名",
+		"SMB share name %q is reserved by the SMB protocol (IPC$)":                                                                  "SMB 共享名 %q 是 SMB 协议保留名(IPC$)",
+		"SMB share name %q contains \":\", which clients may read as a port or stream separator":                                    "SMB 共享名 %q 含 \":\",客户端可能将其识别为端口或流分隔符",
+		"SMB user name %q must not be empty":                                                                                        "SMB 用户名 %q 不能为空",
+		"SMB user name %q (the share name in multi-user mode) contains a path separator, which SMB does not allow":                  "SMB 用户名 %q(多用户模式下即共享名)含路径分隔符,SMB 不允许这样命名",
+		"SMB user name %q (the share name in multi-user mode) is reserved by the SMB protocol (IPC$)":                               "SMB 用户名 %q(多用户模式下即共享名)是 SMB 协议保留名(IPC$)",
+		"SMB user name %q (the share name in multi-user mode) contains \":\", which clients may read as a port or stream separator": "SMB 用户名 %q(多用户模式下即共享名)含 \":\",客户端可能将其识别为端口或流分隔符",
+		"invalid SMB share name %q": "无效的 SMB 共享名 %q",
+		"invalid SMB user name %q":  "无效的 SMB 用户名 %q",
+		"SMB users %q and %q resolve to the same share %q; share names must differ": "SMB 用户 %q 与 %q 映射到同一个共享 %q;共享名必须不同",
 	})
 }
