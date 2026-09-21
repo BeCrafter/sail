@@ -530,11 +530,15 @@ sail serve smb --profile prod --prefix shared --share sail
 #   Linux:   mount -t cifs //host:1445/sail /mnt -o username=alice,port=1445
 ```
 
+The macOS form is the one that has been exercised end to end (native `mount_smbfs` against a
+self-hosted gateway); the Linux and Windows commands above are the documented syntax for those
+clients — run them once on your own platform before depending on them.
+
 Which bucket is shared comes from the profile, exactly as in WebDAV mode. The port must be named at
 mount time on every platform because the server deliberately does not require root for port 445.
-Non-standard ports on **Windows** have historically needed a client-side registry value
-(`HKLM\SYSTEM\CurrentControlSet\Services\lanmanserver\parameters\SMBPort` or the equivalent for the
-redirector) — verify on your Windows version before rolling it out.
+Mounting a **non-standard port on Windows** has historically needed client-side configuration, and
+that path is the one thing here that has not been verified end to end (the acceptance run had no
+Windows machine): test it on your Windows version before rolling it out.
 
 ### Flags
 

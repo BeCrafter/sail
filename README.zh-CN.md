@@ -502,9 +502,12 @@ sail serve smb --profile prod --prefix shared --share sail
 #   Linux:   mount -t cifs //host:1445/sail /mnt -o username=alice,port=1445
 ```
 
+其中 macOS 那条是**经过端到端实测**的(原生 `mount_smbfs` + 自建网关);Linux 与 Windows 两条
+是这两个客户端的既有写法,请在各自的平台上先跑一次再依赖它。
+
 共享哪个桶同样由 profile 决定(与 WebDAV 模式一致)。端口在挂载时必须显式写出:服务端刻意不为了
-占用 445 而要求 root。**Windows** 上非标准端口历史上需要客户端侧注册表项,正式推广前请先在目标
-Windows 版本上实测。
+占用 445 而要求 root。**Windows 上挂非标准端口**历史上需要客户端侧配置,而这条路径恰恰是本次唯一
+没有端到端验证过的(验收环境没有 Windows 机器):正式推广前请先在目标 Windows 版本上实测。
 
 ### 参数
 

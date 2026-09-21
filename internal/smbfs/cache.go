@@ -213,7 +213,12 @@ func (c *cachedFS) prewarmLoop(ctx context.Context, key string) {
 		// 走 singleflight 路径:与用户请求触发的刷新互斥,同一目录不会同时跑
 		// 两份全量列举;顺带拿到本轮耗时用于安排下一轮。
 		start := time.Now()
-		if _, err := c.fetch(ctx, key); err != nil && c.logger != nil {
+		// 每轮单独封顶:预热 goroutine 活得和进程一样久,不能让它抱着一个
+		// 永不超时的调用卡死在一台不响应的后端上。
+		fctx, cancel := context.WithTimeout(ctx, listingRefreshTimeout)
+		_, err := c.fetch(fctx, key)
+		cancel()
+		if err != nil && c.logger != nil {
 			c.logger.Printf("smbfs: prewarm of %s failed (will retry): %v", key, err)
 		}
 		last := time.Since(start)

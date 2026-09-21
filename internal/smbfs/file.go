@@ -231,19 +231,28 @@ func (f *fileHandle) ensureStaging() error {
 
 // loadFromBackend 把既有对象内容灌进暂存,让定位写表现为「读改写」。
 // 对象不存在是正常情况(CREATE 之后紧跟第一次写),不是错误。
+//
+// loaded 只在真的灌完之后才置真:中途失败(回读错误、暂存盘满)时暂存里是半截
+// 内容,若把它当成「已加载」,后续写入会把这半截当成完整前缀提交上去 —— 那是
+// 静默的数据损坏,比让这次写失败严重得多。
 // 调用方须持 f.mu。
 func (f *fileHandle) loadFromBackend() error {
-	f.loaded = true
 	r, err := f.b.core.OpenRead(f.ctx, f.path)
 	if errors.Is(err, vfs.ErrNotExist) {
+		f.loaded = true
 		return nil
 	}
 	if err != nil {
 		return err
 	}
 	defer r.Close()
-	_, err = io.Copy(f.st, r)
-	return err
+	if _, err := io.Copy(f.st, r); err != nil {
+		// 失败后暂存内容不可信:截回 0,让下一次写重新灌一遍。
+		_ = f.st.Truncate(0)
+		return err
+	}
+	f.loaded = true
+	return nil
 }
 
 // commitLocked 把暂存灌进 vfs.OpenWrite 提交。提交成功后暂存保留:客户端可能

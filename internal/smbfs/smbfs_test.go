@@ -16,6 +16,7 @@ import (
 	"github.com/BeCrafter/sail/internal/vfs"
 	"github.com/BeCrafter/sail/internal/vfs/quotafs"
 	"github.com/BeCrafter/sail/internal/vfs/s3fs"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	smb2 "github.com/hirochachacha/go-smb2"
 )
 
@@ -109,6 +110,18 @@ func mountShareCore(t *testing.T, ttl time.Duration, preset map[string][]byte, q
 		conn.Close()
 	})
 	return share, fake, core, srv
+}
+
+// newTestClient 造一个指向 fakes3 的 S3 client(白盒测试里直接拿内核用)。
+func newTestClient(t *testing.T, fake *fakes3.Server) *s3.Client {
+	t.Helper()
+	c, err := client.New(context.Background(), &config.Resolved{
+		Endpoint: fake.URL(), AccessKey: "ak", SecretKey: "sk", Region: "us-east-1", PathStyle: true,
+	})
+	if err != nil {
+		t.Fatalf("构造 S3 client 失败: %v", err)
+	}
+	return c
 }
 
 func pattern(n int) []byte {
@@ -447,4 +460,46 @@ func TestNewRejectsEmptyUserTable(t *testing.T) {
 // counts 把后端请求计数收敛成一个可比较的值(测试只关心「有没有打后端」)。
 func counts(f *fakes3.Server) [4]int64 {
 	return [4]int64{f.Counts.Head.Load(), f.Counts.Get.Load(), f.Counts.List.Load(), f.Counts.Copy.Load()}
+}
+
+// invalidate 的作用域:写某个文件只让它自己与直接父目录失效 —— 根目录的列举
+// 是整棵树里最贵的一次,每写一个文件都作废它,缓存就白做了。
+func TestInvalidateScopeIsTheTouchedBranch(t *testing.T) {
+	sh, fake := mountShare(t, time.Minute, map[string][]byte{
+		"d/x.bin": []byte("x"),
+		"d/y.bin": []byte("y"),
+	})
+	_ = sh
+
+	core, err := s3fs.New(s3fs.Config{
+		Client:     newTestClient(t, fake),
+		Bucket:     testBucket,
+		StagingDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("构造 s3fs 失败: %v", err)
+	}
+	c := newCachedFS(core, time.Minute, log.New(io.Discard, "", 0))
+	ctx := context.Background()
+	for _, p := range []string{"/", "/d"} {
+		if _, err := c.ReadDir(ctx, p); err != nil {
+			t.Fatalf("预热 %s 失败: %v", p, err)
+		}
+	}
+
+	before := counts(fake)
+	c.invalidate("/d/x.bin", false)
+	if _, err := c.ReadDir(ctx, "/d"); err != nil {
+		t.Fatalf("列 /d 失败: %v", err)
+	}
+	if counts(fake) == before {
+		t.Fatal("直接父目录应失效并因此重新列举")
+	}
+	after := counts(fake)
+	if _, err := c.ReadDir(ctx, "/"); err != nil {
+		t.Fatalf("列 / 失败: %v", err)
+	}
+	if counts(fake) != after {
+		t.Fatal("根目录不该被一次普通写入作废")
+	}
 }
