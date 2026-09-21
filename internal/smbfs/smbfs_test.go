@@ -3,6 +3,7 @@ package smbfs
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -301,8 +302,12 @@ func TestPositionalWriteIsReadModifyWrite(t *testing.T) {
 	}
 }
 
-// 配额超限:提交被拒,且后端不留下被截断的对象(客户端看到权限不足 ——
-// 库把错误映射写死了,这条限制记在 README)。
+// 配额超限:数据不落库 —— 这是配额要紧的那一半。
+//
+// 刻意不断言「客户端看到什么错误」:走 WritableFile 路径时准入在提交点做,
+// 而库关闭句柄时不检查返回值,客户端因此拿不到专属错误码(它只会看到服务端
+// 日志里的那行告警)。这条限制写在 README 的 SMB 限制一节里,别让测试给出
+// 一个比现实更漂亮的印象。
 func TestQuotaRefusalLeavesBackendUntouched(t *testing.T) {
 	sh, fake, _, _ := mountShareCore(t, 0, nil, 1<<10)
 
@@ -310,16 +315,42 @@ func TestQuotaRefusalLeavesBackendUntouched(t *testing.T) {
 	if err != nil {
 		t.Fatalf("创建失败: %v", err)
 	}
+	// Create 会先落一个 0 字节对象(库的 CREATE 语义),写内容落暂存、关闭才提交。
 	if _, err := f.Write(pattern(4 << 10)); err != nil {
-		// 库把超配额报成 ACCESS_DENIED,客户端读到的是权限类错误。
-		if !strings.Contains(strings.ToLower(err.Error()), "denied") && !strings.Contains(strings.ToLower(err.Error()), "access") {
-			t.Fatalf("超配额的错误不是权限类: %v", err)
-		}
+		t.Logf("写入阶段就报了错(取决于库的路径):%v", err)
 	}
 	f.Close()
 
 	if obj, ok := fake.Get(testBucket, "big.bin"); ok && len(obj.Data) != 0 {
 		t.Fatalf("超配额的文件不得落库: len=%d", len(obj.Data))
+	}
+}
+
+// 目录删除:非空目录不删(SMB2 语义)。客户端按自己那份可能过时的视图判断
+// 「目录空了」,若壳直接走递归删除,别人刚写进去的对象会被顺手清掉。
+func TestDeleteDirRefusesNonEmpty(t *testing.T) {
+	_, fake, core, _ := mountShareCore(t, time.Minute, map[string][]byte{
+		"d/keep.bin": []byte("must survive"),
+	}, 0)
+	b := newBackend(newCachedFS(core, time.Minute, log.New(io.Discard, "", 0)), t.TempDir(), log.New(io.Discard, "", 0))
+
+	err := b.DeleteDir("/d")
+	if err == nil {
+		t.Fatal("非空目录应拒绝删除")
+	}
+	if !errors.Is(err, vfs.ErrExist) {
+		t.Fatalf("拒绝理由应是 ErrExist(可判定),实际 %v", err)
+	}
+	if _, ok := fake.Get(testBucket, "d/keep.bin"); !ok {
+		t.Fatal("被拒绝的删除不得动到子树里的对象")
+	}
+
+	// 空目录(只剩标记对象)照常可删。
+	if err := b.MkDir("/empty", 0o755); err != nil {
+		t.Fatalf("建目录失败: %v", err)
+	}
+	if err := b.DeleteDir("/empty"); err != nil {
+		t.Fatalf("空目录应可删: %v", err)
 	}
 }
 

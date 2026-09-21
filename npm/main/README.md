@@ -237,8 +237,9 @@ protocol (no `--tls-cert`/`--tls-key`), authentication is NTLMv2 instead of Basi
 NTSTATUS codes rather than HTTP status codes, positional writes are staged locally and uploaded when
 the client closes the handle, and **the user table does not hot-reload** — the library can add shares
 and users but never remove them, so changing `serve.users` needs a restart. Quota and per-file size
-limits surface to clients as "permission denied", and a commit that fails is logged on the server
-rather than reported to the client (the library ignores the close result).
+limits are checked at commit time, and a commit that fails — including one refused for being over
+quota — is logged on the server rather than reported to the client (the library ignores the close
+result), so the data is correctly not written but the client does not find out until it looks.
 
 See the [repo README](https://github.com/BeCrafter/sail#smb-gateway-sail-serve-smb) for the full
 list of differences and limitations.

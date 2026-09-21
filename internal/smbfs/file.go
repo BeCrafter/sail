@@ -232,9 +232,12 @@ func (f *fileHandle) ensureStaging() error {
 // loadFromBackend 把既有对象内容灌进暂存,让定位写表现为「读改写」。
 // 对象不存在是正常情况(CREATE 之后紧跟第一次写),不是错误。
 //
-// loaded 只在真的灌完之后才置真:中途失败(回读错误、暂存盘满)时暂存里是半截
-// 内容,若把它当成「已加载」,后续写入会把这半截当成完整前缀提交上去 —— 那是
-// 静默的数据损坏,比让这次写失败严重得多。
+// 两个细节都是「失败后再来一次」的正确性前提:
+//   - 每次灌之前先 Seek(0):io.Copy 是顺序写,从当前偏移接着写;上一次灌了
+//     一半失败后偏移停在半途,不回头就会写成 [前半截空洞][完整对象] 这种错位内容。
+//   - loaded 只在整段灌完之后才置真:半截内容被当成「已加载」的话,后续写入会
+//     把它当完整前缀提交上去 —— 静默的数据损坏,比让这次写失败严重得多。
+//
 // 调用方须持 f.mu。
 func (f *fileHandle) loadFromBackend() error {
 	r, err := f.b.core.OpenRead(f.ctx, f.path)
@@ -246,17 +249,21 @@ func (f *fileHandle) loadFromBackend() error {
 		return err
 	}
 	defer r.Close()
+	if _, err := f.st.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
 	if _, err := io.Copy(f.st, r); err != nil {
-		// 失败后暂存内容不可信:截回 0,让下一次写重新灌一遍。
+		// 失败后暂存内容不可信:截回 0,让下一次写从干净状态重灌。
 		_ = f.st.Truncate(0)
+		_, _ = f.st.Seek(0, io.SeekStart)
 		return err
 	}
 	f.loaded = true
 	return nil
 }
 
-// commitLocked 把暂存灌进 vfs.OpenWrite 提交。提交成功后暂存保留:客户端可能
-// 还在同一个句柄上继续写,再提交一次就是把新内容整体覆盖上去。
+// commitLocked 把暂存灌进 vfs.OpenWrite 提交。提交成功后暂存不在这里清理(清理由
+// Close 负责):句柄可能还要继续写,再提交一次就是把新内容整体覆盖上去。
 // 调用方须持 f.mu。
 func (f *fileHandle) commitLocked() error {
 	if !f.dirty || f.st == nil {
@@ -274,9 +281,10 @@ func (f *fileHandle) commitLocked() error {
 	if opt, ok := w.(vfs.WriteOptioner); ok {
 		opt.SetWriteOptions(vfs.WriteOptions{ContentLength: fi.Size()})
 	}
-	// 配额准入在提交点做:到这里才知道真实长度,而 webdav 那条路径之所以能
-	// 「读请求体之前」判,是因为 HTTP 给了 Content-Length。超限返回
-	// vfs.ErrInsufficientStorage,库把它降级成 ACCESS_DENIED(见 README)。
+	// 配额准入在提交点做:到这里才知道真实长度(webdav 那条路径能在「读请求体
+	// 之前」判,是因为 HTTP 给了 Content-Length)。在这里被拒意味着客户端早已
+	// 收到过「写成功」的回应 —— 库不检查句柄关闭的返回值。超限的数据不会落库
+	// (这是要紧的那一半),但客户端看不到专属错误码:见 README 的 SMB 限制一节。
 	if adm, ok := w.(writeAdmitter); ok {
 		if err := adm.AdmitWrite(ctx, fi.Size()); err != nil {
 			w.Close()

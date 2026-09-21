@@ -573,7 +573,8 @@ sail serve smb --profile prod --listen :1445   # serve.users: alice, bob
 ```
 
 Quota is enforced by the same protocol-independent decorator as in WebDAV mode: a write that would
-exceed the limit is refused at commit time, and nothing is written.
+exceed the limit is refused at commit time, and nothing is written. What differs is what the client
+sees — see the silent-refusal bullet under "SMB-specific limitations" below.
 
 ### Differences from WebDAV mode
 
@@ -586,7 +587,7 @@ exceed the limit is refused at commit time, and nothing is written.
 | Error reporting | HTTP status codes (404/405/413/507…) | NTSTATUS codes |
 | Write model | PUT is already a sequential stream | Positional writes are staged locally, then uploaded on close |
 | Config hot reload | user table hot-reloads on config change | **not supported** — the library can add shares and users but never remove them, so changing `serve.users` needs a restart |
-| Quota / size-limit error | `507 Insufficient Storage` / `413` | "permission denied" (see below) |
+| Quota / size-limit error | `507 Insufficient Storage` / `413` | refused at close; the client is not told (see below) |
 
 ### SMB-specific limitations
 
@@ -595,10 +596,13 @@ exceed the limit is refused at commit time, and nothing is written.
   Failures are logged on the server (`committing <path> failed`) — if a file looks unchanged after a
   write, check the server log. The window is narrow (the commit happens on close, in-process), but it
   is not zero, and it is the one place where a silent failure is possible.
-- **Quota and per-file size limits surface as "permission denied".** The library maps filesystem
-  errors to NTSTATUS codes itself and offers no hook to map them, so `STATUS_DISK_FULL` and
-  `STATUS_FILE_TOO_LARGE` are not reachable; over-limit writes come back as `ACCESS_DENIED`. The
-  refusal is correct — only the code is less specific than it should be.
+- **An over-quota or over-limit write is refused, but the client is not told.** The check has to run
+  at commit time (SMB2 carries no Content-Length up front), the commit happens when the client closes
+  the handle, and the library ignores that return value — so the object is correctly *not* written
+  (nothing over quota ever lands in the bucket), while the client sees a successful close and only
+  finds out by looking at the file afterwards. The server log has a line for it. The library also
+  maps filesystem errors to NTSTATUS codes itself with no hook to override, so `STATUS_DISK_FULL` and
+  `STATUS_FILE_TOO_LARGE` are unreachable even where an error does reach the client.
 - **Free-space reporting is fixed.** The library answers "how much room is there" with a constant
   (4 GiB volume, 2 GiB free) because the driver has no say in it; a client therefore cannot see the
   real quota, and `quota-available-bytes`-style reporting is WebDAV-only.
@@ -618,6 +622,11 @@ exceed the limit is refused at commit time, and nothing is written.
   the backend's, which makes this a gateway bug worth fixing rather than a sail one.
 - **Directory listings are cached** (`--dir-cache-ttl`, default 60s) and a write invalidates its own
   directory immediately. Changes made by anyone else become visible after at most one TTL.
+- **Renaming a file that is still open writes to the old name.** The shell's handle is bound to the
+  path it was opened with, and the library's rename updates only its own record, so the commit at
+  close goes to the pre-rename path: the old name reappears with the new content while the renamed
+  file keeps its earlier bytes. File managers close before renaming in the normal case, so this is
+  rare — but it is not detectable from inside the shell.
 - Symbolic links, hard links, extended attributes and ACLs are not S3 concepts and answer
   "not supported".
 

@@ -3,6 +3,7 @@ package smbfs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -192,10 +193,27 @@ func (b *backend) DeleteFile(p string) error {
 	return b.core.Remove(ctx, logicalPath(p), false)
 }
 
+// DeleteDir 删除目录。刻意按 SMB2 的语义来:非空目录不删。
+//
+// 内核的 Remove(recursive=true) 会把整个前缀连同子树一起清掉,而客户端判断
+// 「这个目录空了」用的是它自己那份可能已经过时的视图 —— 中间别人写进来的对象
+// 就会被这次删除顺手带走。列一次的成本很低(命中缓存,不额外打后端),
+// 拿来把「空目录才删」这条语义钉住是划算的。
+//
+// 拒绝时客户端看不到错误(库在关闭句柄时删目录,不检查返回值),但目录还在、
+// 数据还在,刷新一次就能看见 —— 比静默删掉一棵子树好得多。
 func (b *backend) DeleteDir(p string) error {
 	ctx, cancel := b.op()
 	defer cancel()
-	return b.core.Remove(ctx, logicalPath(p), true)
+	logical := logicalPath(p)
+	entries, err := b.core.ReadDir(ctx, logical)
+	if err != nil {
+		return err
+	}
+	if len(entries) > 0 {
+		return fmt.Errorf("smbfs: %s is not empty (%d entries): %w", logical, len(entries), vfs.ErrExist)
+	}
+	return b.core.Remove(ctx, logical, false)
 }
 
 func (b *backend) Rename(oldPath, newPath string) error {
