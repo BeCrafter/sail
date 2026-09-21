@@ -65,6 +65,23 @@ type ServeConfig struct {
 	// Prewarm 是后台保热的目录清单(flag --prewarm);空 = 不预热。
 	// 多用户模式下同一清单会在每个用户自己的空间内生效。
 	Prewarm []string `mapstructure:"prewarm"`
+	// SMB 是 `serve smb` 独有的参数。协议无关的那些(prefix / users /
+	// staging-dir / 上限 / 分片 / dir-cache-ttl / prewarm)两种协议共用上面
+	// 同名字段 —— 同一个 bucket 的共享方式换协议时,用户表与空间划分不该跟着
+	// 重写一遍;只有端口、共享名这类协议特有的才分家。
+	SMB SMBConfig `mapstructure:"smb"`
+}
+
+// SMBConfig 是 serve.smb 块:`sail serve smb` 的专属参数落点。字段语义与
+// cmd/serve_smb.go 的同名 flag 一一对应。
+type SMBConfig struct {
+	// Listen 是 SMB 的监听地址。刻意不继承 serve.listen:两种协议各跑各的
+	// 进程,把它们塞到同一个端口上只会更意外。
+	Listen string `mapstructure:"listen"`
+	// Share 是单用户模式下的共享名(默认 "sail")。
+	Share string `mapstructure:"share"`
+	// ServerName 是 NTLM 挑战里服务端自称的名字(默认 "SAIL")。
+	ServerName string `mapstructure:"server-name"`
 }
 
 // Config 是 ~/.config/sail/config.yaml 的整体结构
@@ -216,6 +233,11 @@ func (c *Config) Resolve(profile string) (*Resolved, error) {
 			ChunkSize:      expandEnv(p.Serve.ChunkSize),
 			DirCacheTTL:    expandEnv(p.Serve.DirCacheTTL),
 			Prewarm:        expandEnvList(p.Serve.Prewarm),
+			SMB: SMBConfig{
+				Listen:     expandEnv(p.Serve.SMB.Listen),
+				Share:      expandEnv(p.Serve.SMB.Share),
+				ServerName: expandEnv(p.Serve.SMB.ServerName),
+			},
 		},
 	}
 

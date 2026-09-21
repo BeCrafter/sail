@@ -132,7 +132,7 @@ func TestServeWebdavRequiresBucketAndCredentials(t *testing.T) {
 	// 「读不到配置」或「缺 user/password」。
 	writeServeConfig(t, "")
 	t.Setenv("SAIL_BUCKET", "")
-	serveWebdavOpts = serveWebdavFlags{backendMaxSize: "5TiB", listen: ":8080", user: "alice", password: "s3cret"}
+	serveWebdavOpts = serveFlags{backendMaxSize: "5TiB", listen: ":8080", user: "alice", password: "s3cret"}
 	cfgBucket = ""
 	err := runServeWebdav(serveWebdavCmd, nil)
 	if err == nil {
@@ -147,7 +147,7 @@ func TestServeWebdavRequiresBucketAndCredentials(t *testing.T) {
 	// user/password/tls 校验依赖配置合并结果:注入合法配置(不提供 user/password),
 	// 断言报错同时提及 flag 与 serve 配置两条来源。
 	writeServeConfig(t, "mybucket")
-	serveWebdavOpts = serveWebdavFlags{backendMaxSize: "5TiB", listen: ":8080", user: "", password: ""}
+	serveWebdavOpts = serveFlags{backendMaxSize: "5TiB", listen: ":8080", user: "", password: ""}
 	credErr := runServeWebdav(serveWebdavCmd, nil)
 	if credErr == nil || !strings.Contains(credErr.Error(), "--user") {
 		t.Fatalf("缺少密码应报错,实际 %v", credErr)
@@ -262,7 +262,7 @@ func TestServeWebdavConfigProvidesCredentials(t *testing.T) {
 
 	writeServeConfigWithServe(t, "",
 		"      user: alice\n      password: s3cret\n")
-	serveWebdavOpts = serveWebdavFlags{backendMaxSize: "5TiB", listen: ":8080"}
+	serveWebdavOpts = serveFlags{backendMaxSize: "5TiB", listen: ":8080"}
 	if err := runServeWebdav(serveWebdavCmd, nil); err == nil || !strings.Contains(err.Error(), "bucket") {
 		t.Fatalf("配置提供凭据但无桶,应卡在缺桶,实际 %v", err)
 	}
@@ -270,7 +270,7 @@ func TestServeWebdavConfigProvidesCredentials(t *testing.T) {
 	// 配置提供非法 backend-max-object-size:应被拒绝(证明大小解析走合并值)。
 	writeServeConfigWithServe(t, "mybucket",
 		"      user: alice\n      password: s3cret\n      backend-max-object-size: 不是大小\n")
-	serveWebdavOpts = serveWebdavFlags{backendMaxSize: "5TiB", listen: ":8080"}
+	serveWebdavOpts = serveFlags{backendMaxSize: "5TiB", listen: ":8080"}
 	if err := runServeWebdav(serveWebdavCmd, nil); err == nil || !strings.Contains(err.Error(), "backend-max-object-size") {
 		t.Fatalf("配置提供非法上限应被拒绝,实际 %v", err)
 	}
@@ -425,7 +425,7 @@ func TestServeWebdavRejectsBadChunkSize(t *testing.T) {
 	r := &config.Resolved{ProfileName: "prod"}
 	// changed 显式置位:模拟用户显式给了 --chunked-upload 与 --chunk-size。
 	changed := map[string]bool{"chunked-upload": true, "chunk-size": true}
-	o := serveWebdavFlags{
+	o := serveFlags{
 		backendMaxSize: "5TiB",
 		listen:         ":8080",
 		user:           "alice",

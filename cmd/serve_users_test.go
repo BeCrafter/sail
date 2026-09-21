@@ -29,8 +29,8 @@ func usersFrom(names ...string) []config.UserConfig {
 var noChanged = func(string) bool { return false }
 
 // defaultFlags 复刻 init() 里 serve webdav 各 flag 的默认值。
-func defaultFlags() serveWebdavFlags {
-	return serveWebdavFlags{
+func defaultFlags() serveFlags {
+	return serveFlags{
 		listen:         ":8080",
 		backendMaxSize: "5TiB",
 		chunkSize:      "4GiB",
@@ -427,11 +427,11 @@ func TestServeRuntimeQuotaHotUpdate(t *testing.T) {
 	// 热更新配额为 2KiB:同一用户栈,无需重建。
 	table2 := usersFrom("alice")
 	table2[0].Quota = "2048"
-	before := f.rt.stacks["team/alice-space"].fs
+	before := f.rt.stacks["team/alice-space"].shell
 	if err := f.rt.applyUserTable(table2); err != nil {
 		t.Fatalf("applyUserTable 失败: %v", err)
 	}
-	if after := f.rt.stacks["team/alice-space"].fs; after != before {
+	if after := f.rt.stacks["team/alice-space"].shell; after != before {
 		t.Fatal("改 quota 不得重建栈")
 	}
 	if resp := f.doAs(t, "alice", "pw-alice", "PUT", "/b.txt", strings.Repeat("y", 500)); resp.StatusCode != http.StatusCreated {
