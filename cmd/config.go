@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/BeCrafter/sail/internal/config"
@@ -28,14 +29,19 @@ setup wizard notes:
   - access-key / secret-key can be typed as plaintext; pressing Enter on empty references a per-profile
     derived env var (e.g. profile test → SAIL_TEST_ACCESS_KEY); after writing it prints the vars to export
   - when reconfiguring an existing profile, configured plaintext keys are not echoed; Enter keeps them
-  - the WebDAV gateway (serve block) is guided as well: listen / prefix / auth (single or multi-user) / TLS /
-    chunked-upload / staging-dir; multi-user tables are validated in place (duplicate names, nested prefixes,
-    quota syntax — quota accepts MB/GB/TB). An existing serve block defaults to "keep" —
-    choose append to add users to the existing table, reconfigure to edit it, or remove to drop it. Size limits,
-    dir-cache-ttl and prewarm are not asked here; edit the config file to change them
+  - the gateway (serve block) is guided as well, in layers. It is shared by "sail serve webdav" and
+    "sail serve smb", so the wizard asks which services to configure (webdav | smb | both) first, then walks
+    the layers in order: the shared settings (prefix, auth mode — single-user or multi-user — chunked-upload,
+    staging-dir), then each selected service's own settings (WebDAV: listen, TLS; SMB: listen, share,
+    server-name). Multi-user tables are validated in place (duplicate names, nested prefixes, quota syntax —
+    quota accepts MB/GB/TB). An existing serve block defaults to "keep" — choose append to add users to the
+    existing table, reconfigure to edit it, or remove to drop it. A service that is not selected is left as
+    configured, never cleared. Size limits, dir-cache-ttl and prewarm are not asked here; edit the config file
+    to change them
   - inputs are normalized where possible: a bare port gets its colon (8443 -> :8443), a URL without a
-    scheme gets https://, single-letter quota units become MB/GB/TB, ~ is expanded in paths, and y/n
-    answers accept yes/true/1/on; invalid values are re-prompted with an explanation
+    scheme gets https://, single-letter quota units become MB/GB/TB, ~ is expanded in paths, and yes/no
+    answers accept yes/true/1/on (the service and auth-mode choices take their own keywords); invalid values
+    are re-prompted with an explanation
   - it ends with a config summary; empty fields are clearly marked for review
 See the README "Configuration" section for details.`,
 }
@@ -307,9 +313,9 @@ func renderConfigFile(cfg *config.Config) string {
 	b.WriteString("# Two ways to provide keys: plaintext, or ${VAR} referencing an environment variable (avoids plaintext on disk).\n")
 	b.WriteString("# Keys left empty by setup generate a ${SAIL_<PROFILE>_(ACCESS|SECRET)_KEY} placeholder; edit to any ${VAR} manually.\n")
 	if cfg.Lang != "" {
-		fmt.Fprintf(&b, "lang: %s\n", cfg.Lang)
+		fmt.Fprintf(&b, "lang: %s\n", yamlScalar(cfg.Lang))
 	}
-	fmt.Fprintf(&b, "default-profile: %s\n", cfg.DefaultProfile)
+	fmt.Fprintf(&b, "default-profile: %s\n", yamlScalar(cfg.DefaultProfile))
 	b.WriteString("profiles:\n")
 	for _, name := range names {
 		b.WriteString(renderProfile(name, cfg.Profiles[name]))
@@ -351,11 +357,14 @@ func renderProfile(name string, p config.Profile) string {
     endpoint: %s
     access-key: %s
     secret-key: %s
-    bucket: "%s"
-    region: "%s"
+    bucket: %s
+    region: %s
     path-style: %s
-    cdn-domain: "%s"
-%s%s`, name, p.Endpoint, ak, sk, p.Bucket, p.Region, ps, p.CDNDomain, cdp, serveBlock(p.Serve))
+    cdn-domain: %s
+%s%s`,
+		yamlScalar(name), yamlScalar(p.Endpoint), yamlScalar(ak), yamlScalar(sk),
+		yamlScalar(p.Bucket), yamlScalar(p.Region), ps, yamlScalar(p.CDNDomain),
+		cdp, serveBlock(p.Serve))
 }
 
 // serveBlockEmpty 判定 serve 块是否为纯默认(全空)。ServeConfig 含切片,
@@ -378,6 +387,61 @@ func yamlQuote(v string) string {
 	return fmt.Sprintf("%q", v)
 }
 
+// yamlIndicatorStart 是明文标量开头必须加引号的 YAML 指示符(flow 集合、
+// 锚点/别名、标签、块标量、注释、引号等)。
+const yamlIndicatorStart = "[]{},&*!|>'\"%@`#"
+
+// yamlNeedsQuote 判定一个值能否安全裸写成 YAML 明文标量。只在裸写真会出事时
+// 返回 true:值被改写(" #" 之后被当注释、首尾空白被吃掉)、整份文件无法解析
+// (指示符开头、": " 变成嵌套映射)、或类型被改(bool/数字/null)。判不准时
+// 一律加引号——多引一处只是不好看,少引一处是静默写坏用户配置。
+func yamlNeedsQuote(v string) bool {
+	if v == "" {
+		return true // 裸写解析成 null,不是空串
+	}
+	if strings.TrimSpace(v) != v {
+		return true // 首尾空白会被吃掉
+	}
+	if strings.ContainsAny(v, "\n\r\t") {
+		return true // 控制字符直接让解析器报错
+	}
+	if strings.Contains(v, ": ") || strings.Contains(v, " #") {
+		return true // ": " 变嵌套映射;" #" 之后被当注释截掉
+	}
+	if strings.HasPrefix(v, ":") || strings.HasSuffix(v, ":") {
+		return true // 前导冒号(监听地址 ":8443")跨 YAML 方言不保险;尾冒号会被当键分隔符
+	}
+	if strings.ContainsRune(v, '"') {
+		return true
+	}
+	if (v[0] == '-' || v[0] == '?') && (len(v) == 1 || v[1] == ' ') {
+		return true // "- "/"? " 是列表项/映射键
+	}
+	if strings.IndexByte(yamlIndicatorStart, v[0]) >= 0 {
+		return true
+	}
+	// 长得像 bool/null/数字的值裸写会被解析成非字符串,mapstructure 解进
+	// string 字段会报错,整份配置都读不出来。
+	switch strings.ToLower(v) {
+	case "true", "false", "yes", "no", "on", "off", "null", "~", "y", "n",
+		".inf", "+.inf", "-.inf", ".nan":
+		return true
+	}
+	if _, err := strconv.ParseFloat(v, 64); err == nil {
+		return true
+	}
+	return false
+}
+
+// yamlScalar 渲染一个字符串标量:能安全裸写就裸写(保持可读),否则退到
+// yamlQuote。配置里所有字符串字段都应经它输出,不留裸拼的口子。
+func yamlScalar(v string) string {
+	if yamlNeedsQuote(v) {
+		return yamlQuote(v)
+	}
+	return v
+}
+
 // serveBlock 渲染 profile 下的 serve 块;全部字段为空(纯默认)时返回空串,
 // 不产生冗余块。空字段注释掉以便手工补齐;password 原样写入,${VAR} 得以保留。
 func serveBlock(s config.ServeConfig) string {
@@ -388,7 +452,7 @@ func serveBlock(s config.ServeConfig) string {
 		if val == "" {
 			return fmt.Sprintf("      # %s:\n", key)
 		}
-		return fmt.Sprintf("      %s: %s\n", key, val)
+		return fmt.Sprintf("      %s: %s\n", key, yamlScalar(val))
 	}
 	var b strings.Builder
 	b.WriteString("    serve:\n")
@@ -412,7 +476,7 @@ func serveBlock(s config.ServeConfig) string {
 			if val == "" {
 				return fmt.Sprintf("        # %s:\n", key)
 			}
-			return fmt.Sprintf("        %s: %s\n", key, yamlQuote(val))
+			return fmt.Sprintf("        %s: %s\n", key, yamlScalar(val))
 		}
 		b.WriteString(smbf("listen", s.SMB.Listen))
 		b.WriteString(smbf("share", s.SMB.Share))
@@ -423,7 +487,7 @@ func serveBlock(s config.ServeConfig) string {
 
 // serveUsersBlock 渲染 serve.users 用户表;无用户返回空串。
 // 项缩进 8 空格、字段 10 空格(与 README 示例一致)。空字段注释掉以便手工
-// 补齐;name/password/prefix/quota 是自由输入,统一经 yamlQuote 加引号。
+// 补齐;name/password/prefix/quota 是自由输入,统一经 yamlScalar 安全渲染。
 func serveUsersBlock(users []config.UserConfig) string {
 	if len(users) == 0 {
 		return ""
@@ -432,12 +496,12 @@ func serveUsersBlock(users []config.UserConfig) string {
 		if val == "" {
 			return fmt.Sprintf("          # %s:\n", key)
 		}
-		return fmt.Sprintf("          %s: %s\n", key, yamlQuote(val))
+		return fmt.Sprintf("          %s: %s\n", key, yamlScalar(val))
 	}
 	var b strings.Builder
 	b.WriteString("      users:\n")
 	for _, u := range users {
-		fmt.Fprintf(&b, "        - name: %s\n", yamlQuote(u.Name))
+		fmt.Fprintf(&b, "        - name: %s\n", yamlScalar(u.Name))
 		b.WriteString(uf("password", u.Password))
 		b.WriteString(uf("prefix", u.Prefix))
 		b.WriteString(uf("quota", u.Quota))
@@ -453,7 +517,7 @@ func servePrewarmBlock(dirs []string) string {
 	var b strings.Builder
 	b.WriteString("      prewarm:\n")
 	for _, d := range dirs {
-		fmt.Fprintf(&b, "        - %s\n", yamlQuote(d))
+		fmt.Fprintf(&b, "        - %s\n", yamlScalar(d))
 	}
 	return b.String()
 }
@@ -471,29 +535,94 @@ func firstProfileName(m map[string]config.Profile) string {
 	return names[0]
 }
 
-// serveDigest 生成 serve 块的一行摘要(绝不显示密码)。空块 = 未配置;
-// 非空列出 listen / 认证方式 / 前缀 / TLS;凭据缺失时提示 serve 会拒绝启动。
-func serveDigest(s config.ServeConfig) string {
+// serveSummaryLines 返回 serve 块的分层摘要行(每行 "层名: 内容"),按
+// 「通用 / WebDAV / SMB」三层展开,只输出有内容的层;空块返回 nil。
+// 绝不显示密码。两种协议共用这个块,故通用层不偏向任一方。
+func serveSummaryLines(s config.ServeConfig) []string {
 	if serveBlockEmpty(s) {
-		return i18n.T("(unset; sail serve webdav uses flag defaults)")
+		return nil
 	}
+	var lines []string
+	add := func(layer, content string) {
+		if content != "" {
+			lines = append(lines, fmt.Sprintf("%-8s%s", layer+":", content))
+		}
+	}
+	add("shared", sharedSummary(s))
+	add("webdav", webdavSummary(s))
+	add("smb", smbSummary(s))
+	return lines
+}
+
+// sharedSummary 渲染通用层:前缀 / 认证 / 分片 / 暂存。末尾带上向导不问、但
+// 已配置就会被保留的尺寸与缓存字段(仅设置了才出现)——否则它们在摘要里完全
+// 隐形,用户看不出这些值存在。
+func sharedSummary(s config.ServeConfig) string {
+	var parts []string
+	if s.Prefix != "" {
+		parts = append(parts, "prefix="+s.Prefix)
+	}
+	parts = append(parts, authSummary(s))
+	if s.ChunkedUpload {
+		parts = append(parts, "chunked=on")
+	} else {
+		parts = append(parts, "chunked=off")
+	}
+	if s.StagingDir != "" {
+		parts = append(parts, "staging="+s.StagingDir)
+	}
+	for _, kv := range []struct{ key, val string }{
+		{"max-object", s.BackendMaxSize},
+		{"max-upload", s.MaxUploadSize},
+		{"chunk-size", s.ChunkSize},
+		{"dir-cache-ttl", s.DirCacheTTL},
+	} {
+		if kv.val != "" {
+			parts = append(parts, kv.key+"="+kv.val)
+		}
+	}
+	if len(s.Prewarm) > 0 {
+		parts = append(parts, "prewarm="+strings.Join(s.Prewarm, ","))
+	}
+	return strings.Join(parts, " ")
+}
+
+// authSummary 渲染认证段:多用户报人数,单用户报用户名,两者皆空时明确提示
+// serve 会拒绝启动。
+func authSummary(s config.ServeConfig) string {
+	switch {
+	case len(s.Users) > 0:
+		return i18n.Tf("%d user(s)", len(s.Users))
+	case s.User != "" && s.Password != "":
+		return i18n.Tf("single user %s", s.User)
+	default:
+		return i18n.T("(no credentials; serve will refuse to start)")
+	}
+}
+
+// webdavSummary 渲染 WebDAV 层:监听地址与是否启用 TLS。
+func webdavSummary(s config.ServeConfig) string {
 	var parts []string
 	if s.Listen != "" {
 		parts = append(parts, "listen="+s.Listen)
 	}
-	switch {
-	case len(s.Users) > 0:
-		parts = append(parts, i18n.Tf("%d user(s)", len(s.Users)))
-	case s.User != "" && s.Password != "":
-		parts = append(parts, i18n.Tf("single user %s", s.User))
-	default:
-		parts = append(parts, i18n.T("(no credentials; serve webdav will refuse to start)"))
-	}
-	if s.Prefix != "" {
-		parts = append(parts, "prefix="+s.Prefix)
-	}
 	if s.TLSCert != "" {
 		parts = append(parts, "tls")
+	}
+	return strings.Join(parts, " ")
+}
+
+// smbSummary 渲染 SMB 层:监听地址、共享名与服务端名。
+func smbSummary(s config.ServeConfig) string {
+	var parts []string
+	if s.SMB.Listen != "" {
+		parts = append(parts, "listen="+s.SMB.Listen)
+	}
+	if s.SMB.Share != "" {
+		parts = append(parts, "share="+s.SMB.Share)
+	}
+	if s.SMB.ServerName != "" {
+		parts = append(parts, "server-name="+s.SMB.ServerName)
 	}
 	return strings.Join(parts, " ")
 }
@@ -534,7 +663,14 @@ func setupSummary(prof string, isDefault bool, p config.Profile) string {
 		cdn = i18n.T("(unset; the url command is unavailable)")
 	}
 	fmt.Fprintf(&b, "  cdn-domain: %s\n", cdn)
-	fmt.Fprintf(&b, "  serve:      %s\n", serveDigest(p.Serve))
+	if lines := serveSummaryLines(p.Serve); lines != nil {
+		b.WriteString("  serve:\n")
+		for _, l := range lines {
+			fmt.Fprintf(&b, "    %s\n", l)
+		}
+	} else {
+		fmt.Fprintf(&b, "  serve:      %s\n", i18n.T("(unset; serve webdav / smb use flag defaults)"))
+	}
 	if !serveBlockEmpty(p.Serve) {
 		b.WriteString(i18n.T("note: backend-max-object-size / max-upload-size / chunk-size / dir-cache-ttl / prewarm are kept as configured (not asked here); edit the config file to change them") + "\n")
 	}

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -112,7 +113,7 @@ func TestRenderConfigFile(t *testing.T) {
 	if !strings.Contains(out, "cdn-bucket-path: false  #") {
 		t.Errorf("test 块应输出显式 cdn-bucket-path: false 并带说明:\n%s", out)
 	}
-	if !strings.Contains(out, `bucket: "b1"`) || !strings.Contains(out, `bucket: "b2"`) {
+	if !strings.Contains(out, `bucket: b1`) || !strings.Contains(out, `bucket: b2`) {
 		t.Errorf("应保留各 profile 的 bucket 值:\n%s", out)
 	}
 }
@@ -179,5 +180,159 @@ func TestRenderConfigFileLang(t *testing.T) {
 	out = renderConfigFile(cfg)
 	if strings.Contains(out, "lang:") {
 		t.Errorf("lang 为空时不应输出 lang 行:\n%s", out)
+	}
+}
+
+// yamlNeedsQuote 的判定表。前半是裸写真会出事的值(必须加引号),后半是常见
+// 的安全值(必须保持裸写,否则「只在必要时加引号」就名存实亡)。
+func TestYAMLNeedsQuote(t *testing.T) {
+	mustQuote := []string{
+		"",           // 裸写成 null
+		"pw ", " pw", // 首尾空白被吃掉
+		"a\tb", "a\nb", // 控制字符
+		"my #secret", "a #b", // " #" 之后被当注释截断
+		"a: b",                   // ": " 变嵌套映射
+		"[::1]:8443", "[x", "{x", // flow 集合
+		"*alice", "&alice", "!tag", "|p", ">p", "%p", "@a", "`a", "#h", ",c", "]x", "}x",
+		"'sq", `has"quote`,
+		"- dash", "? q", ":8443", ":", "-", "?", "prod:",
+		"true", "false", "yes", "no", "on", "off", "null", "~", "y", "n",
+		"123", "1.5", "-2", ".inf",
+	}
+	for _, v := range mustQuote {
+		if !yamlNeedsQuote(v) {
+			t.Errorf("%q 裸写不安全,应加引号", v)
+		}
+	}
+	safeRaw := []string{
+		"alice", "bob/", "team", "/yiche", "us-east-1", "prod",
+		"https://s3.example.com", "bucket-a", "SAIL-TEST",
+		"${SAIL_PROD_ACCESS_KEY}", "${ALICE_PW}",
+		"a#b", "team#1", // "#" 前无空格:是普通字符,不是注释
+		"my:prod", "p#ssword", "p:ss", "C:\\tmp", "中文值", "10GB", "60s", "4GiB",
+	}
+	for _, v := range safeRaw {
+		if yamlNeedsQuote(v) {
+			t.Errorf("%q 可以裸写,不该加引号", v)
+		}
+	}
+}
+
+// TestRenderScalarsRoundtrip 是引号策略的核心回归:向导渲染出的配置必须能被
+// sail 自己逐字读回。修复前 endpoint/access-key/serve.* 等 14 个标量是裸拼的,
+// 值含 "["(如 IPv6 监听地址)会让整份 YAML 不可解析,含 " #" 会被静默截断。
+func TestRenderScalarsRoundtrip(t *testing.T) {
+	values := []string{
+		"[::1]:8443", "*alice", "&alice", "my #secret", "pw ", " pw",
+		"a: b", "true", "123", "#hash", "-dash", ":8443", "|pipe",
+		`has"quote`, `back\slash`, "中文值", "${SAIL_VAR}",
+		"alice", "bob/", "/yiche", "C:\\tmp", "a#b", "team#1",
+	}
+	for _, v := range values {
+		prof := config.Profile{
+			Endpoint: v, AccessKey: v, SecretKey: v,
+			Bucket: v, Region: v, CDNDomain: v,
+			Serve: config.ServeConfig{
+				Listen: v, Prefix: v, User: v, Password: v,
+				TLSCert: v, TLSKey: v, StagingDir: v,
+				BackendMaxSize: v, MaxUploadSize: v, ChunkSize: v, DirCacheTTL: v,
+				Users:   []config.UserConfig{{Name: v, Password: v, Prefix: v, Quota: v}},
+				Prewarm: []string{v},
+				SMB:     config.SMBConfig{Listen: v, Share: v, ServerName: v},
+			},
+		}
+		// profile 名固定为 prod:viper 会把映射键小写化,拿值当键会测到那个
+		// 既有行为而非渲染器。profile 名本身的加引号另见 TestRenderProfileNameQuoted。
+		// default-profile 是值不是键,可以放心用自由值测。
+		cfg := &config.Config{DefaultProfile: v, Profiles: map[string]config.Profile{"prod": prof}}
+
+		rendered := renderConfigFile(cfg)
+		p := t.TempDir() + "/config.yaml"
+		if err := os.WriteFile(p, []byte(rendered), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := config.Load(p)
+		if err != nil {
+			t.Errorf("值 %q 渲染出的 YAML 无法读回: %v\n%s", v, err, rendered)
+			continue
+		}
+		if loaded.DefaultProfile != v {
+			t.Errorf("值 %q: default-profile 往返失败: got %q", v, loaded.DefaultProfile)
+		}
+		got, ok := loaded.Profiles["prod"]
+		if !ok {
+			t.Errorf("值 %q: profile 块丢失:\n%s", v, rendered)
+			continue
+		}
+		checks := []struct {
+			name, got, want string
+		}{
+			{"endpoint", got.Endpoint, v},
+			{"access-key", got.AccessKey, v},
+			{"secret-key", got.SecretKey, v},
+			{"bucket", got.Bucket, v},
+			{"region", got.Region, v},
+			{"cdn-domain", got.CDNDomain, v},
+			{"serve.listen", got.Serve.Listen, v},
+			{"serve.prefix", got.Serve.Prefix, v},
+			{"serve.user", got.Serve.User, v},
+			{"serve.password", got.Serve.Password, v},
+			{"serve.tls-cert", got.Serve.TLSCert, v},
+			{"serve.tls-key", got.Serve.TLSKey, v},
+			{"serve.staging-dir", got.Serve.StagingDir, v},
+			{"serve.backend-max-object-size", got.Serve.BackendMaxSize, v},
+			{"serve.max-upload-size", got.Serve.MaxUploadSize, v},
+			{"serve.chunk-size", got.Serve.ChunkSize, v},
+			{"serve.dir-cache-ttl", got.Serve.DirCacheTTL, v},
+			{"serve.smb.listen", got.Serve.SMB.Listen, v},
+			{"serve.smb.share", got.Serve.SMB.Share, v},
+			{"serve.smb.server-name", got.Serve.SMB.ServerName, v},
+		}
+		for _, c := range checks {
+			if c.got != c.want {
+				t.Errorf("值 %q: %s 往返失败: got %q\n%s", v, c.name, c.got, rendered)
+			}
+		}
+		if len(got.Serve.Users) != 1 {
+			t.Errorf("值 %q: users 表丢失: %+v", v, got.Serve.Users)
+		} else {
+			u := got.Serve.Users[0]
+			if u.Name != v || u.Password != v || u.Prefix != v || u.Quota != v {
+				t.Errorf("值 %q: users 字段往返失败: %+v", v, u)
+			}
+		}
+		if len(got.Serve.Prewarm) != 1 || got.Serve.Prewarm[0] != v {
+			t.Errorf("值 %q: prewarm 往返失败: %v", v, got.Serve.Prewarm)
+		}
+	}
+}
+
+// profile 名会作为映射键渲染,尾冒号之类的值会让整份 YAML 不可解析,必须加引号。
+// (Viper 会把键小写化,故这里用全小写的名字,避免把那个既有行为混进来。
+// 另注:含 "." 的名字会被 viper 当键分隔符拆开,那是 viper 的限制,加引号救不了。)
+func TestRenderProfileNameQuoted(t *testing.T) {
+	for _, name := range []string{"prod:", "my:prod", "a b"} {
+		cfg := &config.Config{
+			DefaultProfile: name,
+			Profiles: map[string]config.Profile{
+				name: {Endpoint: "https://s3.example.com", AccessKey: "ak", SecretKey: "sk"},
+			},
+		}
+		rendered := renderConfigFile(cfg)
+		p := t.TempDir() + "/config.yaml"
+		if err := os.WriteFile(p, []byte(rendered), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := config.Load(p)
+		if err != nil {
+			t.Errorf("profile 名 %q 渲染后无法读回: %v\n%s", name, err, rendered)
+			continue
+		}
+		if _, ok := loaded.Profiles[name]; !ok {
+			t.Errorf("profile 名 %q: 块丢失: %+v", name, loaded.Profiles)
+		}
+		if loaded.DefaultProfile != name {
+			t.Errorf("profile 名 %q: default-profile 往返失败: %q", name, loaded.DefaultProfile)
+		}
 	}
 }

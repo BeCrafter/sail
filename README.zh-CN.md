@@ -74,9 +74,12 @@ sail config setup
 - `endpoint` 为必填项,留空会原地重问
 - `access-key` / `secret-key` 可直接输入明文;回车留空则引用按 profile 派生的环境变量(机制见下方"密钥安全"),写盘后会打印需要 `export` 的变量名
 - 重配已有 profile 时,已配置的明文密钥不回显,回车即保留
-- WebDAV 网关(`serve:` 块)同样引导配置:listen / prefix / 认证方式(单用户或多用户) / TLS /
-  chunked-upload / staging-dir。已有 `serve` 块默认保留,可选追加用户、重新配置或删除;多用户表随输入即校验
-  (重名、前缀嵌套、quota 语法);向导不提问的字段(尺寸上限、`dir-cache-ttl`、`prewarm`)原样保留
+- 网关(`serve:` 块,`serve webdav` 与 `serve smb` 共用)分层引导:先问是否配置,再问要配置哪些服务
+  (`webdav` | `smb` | `both`),然后依次走通用设置(前缀、认证模式——单用户或多用户、chunked-upload、
+  staging-dir),最后逐个服务问各自的专属设置(WebDAV:listen、TLS;SMB:listen、share、server-name)。
+  已有 `serve` 块默认保留,可选追加用户、重新配置或删除;未被选中的服务按原配置保留、不会被清空;
+  多用户表随输入即校验(重名、前缀嵌套、quota 语法);向导不提问的字段(尺寸上限、`dir-cache-ttl`、
+  `prewarm`)原样保留
 - 输入会尽量归一化:裸端口自动补冒号(`8443` → `:8443`)、URL 缺协议头补 `https://`、quota 单字母单位
   补全为 `MB`/`GB`/`TB`、路径中的 `~` 自动展开、y/n 回答接受 `yes`/`true`/`1`/`on`;非法值会说明原因后重问
 - 写盘后输出配置摘要,空字段明确标注,便于核对缺失项
@@ -146,9 +149,9 @@ profiles:
       # prewarm: [/bigdir]        # 需要后台保热的目录
 ```
 
-`serve` 块各字段与 `serve webdav` 的同名 flag 一一对应(大小类字段用与 flag 相同的字符串格式,如 `5TiB`)。`user`/`password` 可写明文或 `${VAR}` 引用环境变量,与 access-key/secret-key 的密钥安全机制一致;空字段由 flag 默认值兜底。可选的 `users` 列表开启多用户模式——见 WebDAV 网关一节的「多用户」。`sail config setup` 会交互式引导上述字段(含生成并校验 `users` 表);它不提问的字段按文件原样保留。
+`serve` 块各字段与 `serve webdav` 的同名 flag 一一对应(大小类字段用与 flag 相同的字符串格式,如 `5TiB`)。`user`/`password` 可写明文或 `${VAR}` 引用环境变量,与 access-key/secret-key 的密钥安全机制一致;空字段由 flag 默认值兜底。可选的 `users` 列表开启多用户模式——见 WebDAV 网关一节的「多用户」。`sail config setup` 会交互式引导上述字段(含生成并校验 `users` 表,以及 `serve.smb` 子块——配置该块时它会先问你要哪些协议);它不提问的字段按文件原样保留。
 
-`sail serve smb` 复用同一个 `serve:` 块里与协议无关的部分(前缀、用户表、配额、暂存、大小上限、分片、缓存、预热)——同一个桶的共享布局不必写两遍;SMB 独有的参数放在 `serve.smb` 子块里:
+`sail serve smb` 复用同一个 `serve:` 块里与协议无关的部分(前缀、用户表、配额、暂存、大小上限、分片、缓存、预热)——同一个桶的共享布局不必写两遍;SMB 独有的参数放在 `serve.smb` 子块里,该子块同样可由 `sail config setup` 引导:在它问「要配置哪些协议」时选 `smb`(或 `both`)。
 
 ```yaml
     serve:

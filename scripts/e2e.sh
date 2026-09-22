@@ -545,7 +545,7 @@ printf 'test\nhttps://s3-test.example.com\nak\nsk\nbucket-b\n\nus-east-1\ny\nn\n
     SHELL= "$SAIL_BIN" -c "$WORK_DIR/add-cfg.yaml" config setup >/dev/null 2>&1
 grep -q '  prod:' "$WORK_DIR/add-cfg.yaml" && ok "setup 增 profile 保留 prod" || err "setup 增 profile 丢 prod"
 grep -q '  test:' "$WORK_DIR/add-cfg.yaml" && ok "setup 增 profile 加 test" || err "setup 增 profile 未加 test"
-grep -q 'bucket: "bucket-a"' "$WORK_DIR/add-cfg.yaml" && ok "setup 增 profile 保留 prod.bucket" || err "setup 增 profile 改动了 prod.bucket"
+grep -q 'bucket: bucket-a' "$WORK_DIR/add-cfg.yaml" && ok "setup 增 profile 保留 prod.bucket" || err "setup 增 profile 改动了 prod.bucket"
 grep -q 'default-profile: prod' "$WORK_DIR/add-cfg.yaml" && ok "setup 增 profile 默认不变" || err "setup 增 profile 默认被改"
 
 # ── 把新增 profile 设为默认(promote) ──

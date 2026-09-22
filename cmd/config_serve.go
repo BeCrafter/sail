@@ -14,7 +14,8 @@ import (
 	"github.com/BeCrafter/sail/internal/i18n"
 )
 
-// collectServeConfig 交互式收集 profile 的 serve 块(WebDAV 网关参数)。
+// collectServeConfig 交互式收集 profile 的 serve 块(serve webdav 与 serve smb
+// 共用;协议专属字段由 collectServeParams 问,选中的协议才问)。
 //
 // 保留语义(避免重配时丢数据):已有非空 serve 块时给出选择
 // 「回车=原样保留 / a=追加用户(仅多用户表存在时)/ r=重新配置 / d=删除」;
@@ -24,13 +25,18 @@ import (
 // dir-cache-ttl / prewarm 原样保留。
 func collectServeConfig(r *bufio.Reader, existing config.ServeConfig) (config.ServeConfig, error) {
 	if serveBlockEmpty(existing) {
-		label := i18n.T(`configure the serve block for "sail serve webdav" (listen/prefix/auth/TLS/chunked-upload/staging-dir)?`)
+		label := i18n.T(`configure the serve block (shared by "sail serve webdav" and "sail serve smb")?`)
 		if !promptBoolReader(r, label, false) {
 			return config.ServeConfig{}, nil
 		}
 		return collectServeParams(r, config.ServeConfig{})
 	}
-	fmt.Println(serveDigest(existing))
+	if lines := serveSummaryLines(existing); lines != nil {
+		fmt.Println("serve:")
+		for _, l := range lines {
+			fmt.Println("  " + l)
+		}
+	}
 	canAppend := len(existing.Users) > 0
 	label := i18n.T("serve block: Enter=keep, r=reconfigure, d=remove")
 	if canAppend {
@@ -39,7 +45,7 @@ func collectServeConfig(r *bufio.Reader, existing config.ServeConfig) (config.Se
 	for i := 0; i < 3; i++ {
 		switch promptReaderDisplay(r, label, "", "") {
 		case "d", "D":
-			fmt.Println(i18n.T("serve block removed; sail serve webdav will fall back to flags (edit the config file to add one later)"))
+			fmt.Println(i18n.T("serve block removed; serve webdav / serve smb will fall back to flags (edit the config file to add one later)"))
 			return config.ServeConfig{}, nil
 		case "r", "R":
 			return collectServeParams(r, existing)
@@ -87,34 +93,200 @@ func printServeUsers(users []config.UserConfig) {
 	}
 }
 
-// collectServeParams 逐字段收集 serve 参数:默认值取 existing 同名字段
-// (回车即保留),留空 = 不写值(启动时落回 flag 默认)。只返回用户表收集
-// 的放弃类错误;标量字段不做校验(与 bucket/region 一致),缺失由摘要标注、
-// 启动时 fail-loud。
+// collectServeParams 逐层收集 serve 参数:先问要配置哪些服务,再问两种服务
+// 共用的参数,最后逐个服务问各自的专属参数。默认值取 existing 同名字段
+// (回车即保留),留空 = 不写值(启动时落回 flag 默认)。
+//
+// 未选中的服务只跳过提问、绝不清空已有值——两种协议各跑各的进程,不是互斥
+// 关系,清空属于静默丢弃(整体删除有 d 选项)。
+//
+// 只返回用户表收集的放弃类错误;标量字段不做校验(与 bucket/region 一致),
+// 缺失由摘要标注、启动时 fail-loud。
 func collectServeParams(r *bufio.Reader, existing config.ServeConfig) (config.ServeConfig, error) {
-	fmt.Println(i18n.T(`serve parameters (for "sail serve webdav"; Enter keeps the shown value, empty = flag default)`))
+	p := promptProtocols(r, existing)
+	noteSkippedProtocols(p, existing)
 	s := existing
-	s.Listen = promptListen(r, existing.Listen)
-	s.Prefix = promptReader(r, i18n.T("shared prefix mapped to / (empty = the whole bucket)"), existing.Prefix)
-	if err := collectServeAuth(r, &s, existing); err != nil {
+	if err := collectSharedParams(r, &s, existing); err != nil {
 		return config.ServeConfig{}, err
 	}
-	s.TLSCert = promptPath(r, i18n.T("tls-cert (path to the certificate; empty = serve over HTTP)"), existing.TLSCert, true)
-	if s.TLSCert == "" {
-		// 无证书则私钥无意义:清掉「有 key 无 cert」的半配置态。
-		s.TLSKey = ""
-	} else {
-		s.TLSKey = promptPath(r, i18n.T("tls-key (path to the private key; required together with tls-cert)"), existing.TLSKey, true)
+	if p.webdav {
+		collectWebdavParams(r, &s)
+	}
+	if p.smb {
+		collectSMBParams(r, &s)
+	}
+	return s, nil
+}
+
+// noteSkippedProtocols 对未选中、但已配置了专属字段的服务给出说明,
+// 免得用户以为那些值被清掉了。
+func noteSkippedProtocols(p serveProtocols, existing config.ServeConfig) {
+	if !p.webdav && (existing.Listen != "" || existing.TLSCert != "" || existing.TLSKey != "") {
+		fmt.Println(i18n.T("note: WebDAV listen/TLS keep their configured values; they are not asked while WebDAV is not selected"))
+	}
+	if !p.smb && existing.SMB != (config.SMBConfig{}) {
+		fmt.Println(i18n.T("note: SMB listen/share/server-name keep their configured values; they are not asked while SMB is not selected"))
+	}
+}
+
+// serveSection 打印一层的段落标题,让引导输出按「通用 / WebDAV / SMB」分节。
+func serveSection(title string) {
+	fmt.Printf("\n── %s ──\n", title)
+}
+
+// collectSharedParams 收集两种服务共用的参数:前缀、认证、分片与暂存目录。
+// 需要 existing 单参:认证选定模式后会清空另一侧,得先拿原始用户表当 seed。
+func collectSharedParams(r *bufio.Reader, s *config.ServeConfig, existing config.ServeConfig) error {
+	serveSection(i18n.T("shared settings (used by both services)"))
+	s.Prefix = promptReader(r, i18n.T("shared prefix mapped to / (empty = the whole bucket)"), existing.Prefix)
+	if err := collectServeAuth(r, s, existing); err != nil {
+		return err
 	}
 	s.ChunkedUpload = promptBoolReader(r, i18n.T("chunked-upload (store files over chunk-size as chunks + a manifest)?"), existing.ChunkedUpload)
 	s.StagingDir = promptPath(r, i18n.T("staging-dir (write staging directory; empty = the system temp dir)"), existing.StagingDir, false)
-	return s, nil
+	return nil
+}
+
+// collectWebdavParams 收集 WebDAV 专属参数:监听地址与 TLS 对(成对才有意义)。
+func collectWebdavParams(r *bufio.Reader, s *config.ServeConfig) {
+	serveSection(i18n.T("WebDAV settings"))
+	s.Listen = promptListen(r, s.Listen, serveWebdavOpts.listen)
+	s.TLSCert = promptPath(r, i18n.T("tls-cert (path to the certificate; empty = serve over HTTP)"), s.TLSCert, true)
+	if s.TLSCert == "" {
+		// 无证书则私钥无意义:清掉「有 key 无 cert」的半配置态。
+		s.TLSKey = ""
+		return
+	}
+	s.TLSKey = promptPath(r, i18n.T("tls-key (path to the private key; required together with tls-cert)"), s.TLSKey, true)
+}
+
+// collectSMBParams 收集 SMB 专属参数:监听地址、共享名与服务端名。
+func collectSMBParams(r *bufio.Reader, s *config.ServeConfig) {
+	serveSection(i18n.T("SMB settings"))
+	s.SMB.Listen = promptListen(r, s.SMB.Listen, serveSmbOpts.listen)
+	s.SMB.Share = promptSMBShare(r, s.SMB.Share)
+	label := fmt.Sprintf(i18n.T("SMB server name (the name this server calls itself in the NTLM challenge; empty = flag default %s)"), serveSmbOpts.serverName)
+	s.SMB.ServerName = promptReader(r, label, s.SMB.ServerName)
+}
+
+// serveAuthMode 是通用层的认证模式:单用户(一个账号覆盖整个共享空间)或
+// 多用户(serve.users,每人独立前缀与配额)。
+type serveAuthMode bool
+
+const (
+	authSingle serveAuthMode = false
+	authMulti  serveAuthMode = true
+)
+
+// parseAuthMode 宽容解析认证模式回答:single|s|1|global|g|one 与 multi|m|2|users|u。
+// 返回 (值, 是否识别),未识别由调用方重问。
+func parseAuthMode(v string) (serveAuthMode, bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "single", "s", "1", "global", "g", "one":
+		return authSingle, true
+	case "multi", "m", "2", "users", "u":
+		return authMulti, true
+	}
+	return authSingle, false
+}
+
+// authModeNames 把认证模式渲染成可直接回填的默认值文本。
+func authModeNames(m serveAuthMode) string {
+	if m {
+		return "multi"
+	}
+	return "single"
+}
+
+// promptAuthMode 询问认证模式;未识别的回答重问(至多 3 次后取默认)。
+// 这是一道显式分叉:选定之后才进入该模式自己的字段,不再混在字段中间问。
+func promptAuthMode(r *bufio.Reader, def serveAuthMode) serveAuthMode {
+	label := i18n.T("auth mode (single = one account for the whole space; multi = serve.users, one private space per user)")
+	for i := 0; i < 3; i++ {
+		line := promptReader(r, label, authModeNames(def))
+		if m, ok := parseAuthMode(line); ok {
+			return m
+		}
+		fmt.Printf(i18n.T("unrecognized answer %q; please answer single or multi\n"), line)
+	}
+	return def
+}
+
+// promptSMBShare 读取 SMB 单用户模式的共享名并就地校验:镜像 mergeServeSMB
+// 的规则(不能含路径分隔符),非法则说明原因后重问。server-name 不额外校验,
+// 免得向导比 `serve smb` 本身更严。
+func promptSMBShare(r *bufio.Reader, def string) string {
+	label := fmt.Sprintf(i18n.T("SMB share name for single-user mode (empty = flag default %s)"), serveSmbOpts.share)
+	for i := 0; i < 3; i++ {
+		v := promptReader(r, label, def)
+		if v == "" || !strings.ContainsAny(v, `\/`) {
+			return v
+		}
+		fmt.Printf(i18n.T("invalid share name %q: SMB share names must not contain a path separator\n"), v)
+	}
+	return def
+}
+
+// serveProtocols 是本次向导要配置哪些协议。
+type serveProtocols struct{ webdav, smb bool }
+
+// parseProtocols 宽容解析协议回答:webdav|w、smb|s、both|b|all(大小写不敏感)。
+// 返回 (值, 是否识别),未识别由调用方重问。
+func parseProtocols(v string) (serveProtocols, bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "webdav", "w", "dav", "http", "https":
+		return serveProtocols{webdav: true}, true
+	case "smb", "s":
+		return serveProtocols{smb: true}, true
+	case "both", "b", "all", "webdav+smb", "smb+webdav":
+		return serveProtocols{webdav: true, smb: true}, true
+	}
+	return serveProtocols{}, false
+}
+
+// defaultProtocols 依据已有配置推断默认选项。判据只看协议专属字段:
+// serve.listen / tls-* 属 WebDAV,serve.smb.* 属 SMB。只配了共享字段
+// (prefix/users/staging…)或全新配置时默认 WebDAV,延续向导既有行为。
+func defaultProtocols(existing config.ServeConfig) serveProtocols {
+	webdav := existing.Listen != "" || existing.TLSCert != "" || existing.TLSKey != ""
+	smb := existing.SMB != (config.SMBConfig{})
+	if !webdav && !smb {
+		return serveProtocols{webdav: true}
+	}
+	return serveProtocols{webdav: webdav, smb: smb}
+}
+
+// protocolNames 把协议选择渲染成可直接回填的默认值文本。
+func protocolNames(p serveProtocols) string {
+	switch {
+	case p.webdav && p.smb:
+		return "both"
+	case p.smb:
+		return "smb"
+	default:
+		return "webdav"
+	}
+}
+
+// promptProtocols 询问本次要配置哪些协议;未识别的回答重问(至多 3 次后取默认)。
+func promptProtocols(r *bufio.Reader, existing config.ServeConfig) serveProtocols {
+	def := defaultProtocols(existing)
+	label := i18n.T("protocols to configure (webdav|smb|both)")
+	for i := 0; i < 3; i++ {
+		line := promptReader(r, label, protocolNames(def))
+		if p, ok := parseProtocols(line); ok {
+			return p
+		}
+		fmt.Printf(i18n.T("unrecognized answer %q; please answer webdav, smb or both\n"), line)
+	}
+	return def
 }
 
 // promptListen 读取监听地址并宽容纠正(纯数字补冒号、去掉误写的 scheme);
 // 端口缺失或越界则说明原因后重问(至多 3 次,避免管道输入死循环)。
-func promptListen(r *bufio.Reader, def string) string {
-	label := fmt.Sprintf(i18n.T("listen address (empty = flag default %s)"), serveWebdavOpts.listen)
+// flagDefault 只用于提示文本:WebDAV 与 SMB 的默认端口不同,各传各的。
+func promptListen(r *bufio.Reader, def, flagDefault string) string {
+	label := fmt.Sprintf(i18n.T("listen address (empty = flag default %s)"), flagDefault)
 	for i := 0; i < 3; i++ {
 		raw := promptReader(r, label, def)
 		norm, changed, err := normalizeListen(raw)
@@ -204,20 +376,20 @@ func expandTilde(v string) string {
 	return v
 }
 
-// collectServeAuth 收集认证配置:先问单用户/多用户,再按选择引导。
+// collectServeAuth 收集认证配置:先显式选择认证模式(单用户/多用户),再进入
+// 该模式自己的字段。
 // 两种模式互斥(I4):选定一侧即清空另一侧(用户显式选择,不算静默丢弃)。
 func collectServeAuth(r *bufio.Reader, s *config.ServeConfig, existing config.ServeConfig) error {
 	if len(existing.Users) > 0 && (existing.User != "" || existing.Password != "") {
 		fmt.Println(i18n.T("warning: this profile sets both serve.users and user/password (mutually exclusive); the mode you pick below clears the other side"))
 	}
-	multi := promptBoolReader(r, i18n.T("multi-user mode (serve.users: one private space per user)?"), len(existing.Users) > 0)
-	if !multi {
+	if promptAuthMode(r, len(existing.Users) > 0) == authSingle {
 		if len(existing.Users) > 0 {
 			fmt.Println(i18n.T("note: switching to single-user clears the serve.users table; switching to multi-user clears user/password"))
 		}
 		s.Users = nil
-		s.User = promptReader(r, i18n.T("user (Basic auth username; required by sail serve webdav, empty = configure later)"), existing.User)
-		s.Password = promptSecretReader(r, i18n.T("password for the Basic auth user (plaintext or ${VAR}; empty = configure later)"), existing.Password)
+		s.User = promptReader(r, i18n.T("user (login name for serve webdav / serve smb; empty = configure later)"), existing.User)
+		s.Password = promptSecretReader(r, i18n.T("password for the user (plaintext or ${VAR}; empty = configure later)"), existing.Password)
 		return nil
 	}
 	// 多用户:user/password 与 users 互斥,清掉单用户半边。
@@ -239,8 +411,8 @@ func collectServeAuth(r *bufio.Reader, s *config.ServeConfig, existing config.Se
 		}
 		// 空表:回退单用户(默认是),否则重新录入。
 		if promptBoolReader(r, i18n.T("no users added; fall back to single-user authentication?"), true) {
-			s.User = promptReader(r, i18n.T("user (Basic auth username; required by sail serve webdav, empty = configure later)"), existing.User)
-			s.Password = promptSecretReader(r, i18n.T("password for the Basic auth user (plaintext or ${VAR}; empty = configure later)"), existing.Password)
+			s.User = promptReader(r, i18n.T("user (login name for serve webdav / serve smb; empty = configure later)"), existing.User)
+			s.Password = promptSecretReader(r, i18n.T("password for the user (plaintext or ${VAR}; empty = configure later)"), existing.Password)
 			return nil
 		}
 	}
@@ -253,7 +425,7 @@ func collectServeAuth(r *bufio.Reader, s *config.ServeConfig, existing config.Se
 // 返回错误(与 endpoint 的 3 次守卫同风格,防管道输入死循环)。
 // 返回的表保证通过校验;空表合法(由调用方决定回退策略)。
 func collectServeUsers(r *bufio.Reader, basePrefix string, seed []config.UserConfig) ([]config.UserConfig, error) {
-	fmt.Println(i18n.T("each user has: name (login username, unique), password (Basic auth), prefix (their private space under the shared prefix), quota (space limit for their objects)"))
+	fmt.Println(i18n.T("each user has: name (login name, unique), password (login password), prefix (their private space under the shared prefix), quota (space limit for their objects)"))
 	fmt.Println(i18n.T("quota units: MB / GB / TB (e.g. 500MB, 10GB, 1TB; a plain number means bytes)"))
 	users := append([]config.UserConfig(nil), seed...)
 	fails := 0
@@ -262,7 +434,7 @@ func collectServeUsers(r *bufio.Reader, basePrefix string, seed []config.UserCon
 		if name == "" {
 			return users, nil
 		}
-		pw := promptSecretReader(r, fmt.Sprintf(i18n.T("password for user %s (Basic auth password; plaintext or ${VAR} env reference)"), name), "")
+		pw := promptSecretReader(r, fmt.Sprintf(i18n.T("password for user %s (login password; plaintext or ${VAR} env reference)"), name), "")
 		prefix := promptReader(r, fmt.Sprintf(i18n.T("prefix for user %s (this user's private space, relative to serve.prefix, e.g. alice/; empty = the base prefix itself)"), name), "")
 		if norm := normalizeUserPrefix(prefix); norm != prefix {
 			// 手滑写成 /alice/ 时直接纠正,而不是让 ValidateUsers 报错重来。

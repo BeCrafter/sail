@@ -110,7 +110,7 @@ func TestRenderProfileServeBlockUsersOnly(t *testing.T) {
 		},
 	}
 	rendered := renderConfigFile(cfg)
-	if !strings.Contains(rendered, "      users:") || !strings.Contains(rendered, `- name: "alice"`) {
+	if !strings.Contains(rendered, "      users:") || !strings.Contains(rendered, `- name: alice`) {
 		t.Errorf("仅含 users 的 serve 块被丢弃:\n%s", rendered)
 	}
 

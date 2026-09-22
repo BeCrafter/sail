@@ -74,10 +74,13 @@ Interactively generates or updates `~/.config/sail/config.yaml` (`--reset` reset
 - `endpoint` is required — leaving it empty re-prompts in place
 - `access-key` / `secret-key` can be entered in plaintext; press Enter on empty to reference per-profile env vars (see "Key security" below). After writing, it prints the variable names you need to `export`
 - When reconfiguring an existing profile, already-configured plaintext keys are not echoed — press Enter to keep them
-- The WebDAV gateway (`serve:` block) is guided as well: listen / prefix / auth (single or multi-user) / TLS /
-  chunked-upload / staging-dir. An existing `serve` block defaults to "keep" — choose to append users to the
-  existing table, reconfigure it, or remove it; multi-user tables are validated as you enter them (duplicate
-  names, nested prefixes, quota syntax), and the fields the wizard does not ask (size limits, `dir-cache-ttl`,
+- The gateway (`serve:` block, shared by `serve webdav` and `serve smb`) is guided in layers: first whether
+  to configure it, then which services (`webdav` | `smb` | `both`), then the shared settings (prefix, auth
+  mode — single-user or multi-user — chunked-upload, staging-dir), then each selected service's own settings
+  (WebDAV: listen, TLS; SMB: listen, share, server-name). An existing `serve` block defaults to "keep" —
+  choose to append users to the existing table, reconfigure it, or remove it; a service you do not select
+  keeps its configured values untouched; multi-user tables are validated as you enter them (duplicate names,
+  nested prefixes, quota syntax), and the fields the wizard does not ask (size limits, `dir-cache-ttl`,
   `prewarm`) are kept as configured
 - Inputs are normalized where possible: a bare port gets its colon (`8443` → `:8443`), a URL without a
   scheme gets `https://`, single-letter quota units become `MB`/`GB`/`TB`, `~` is expanded in paths, and
@@ -149,11 +152,12 @@ profiles:
       # prewarm: [/bigdir]        # directories to keep hot in the background
 ```
 
-Each `serve` field maps one-to-one to the same-named `serve webdav` flag (size fields use the same string format as the flags, e.g. `5TiB`). `user`/`password` accept plaintext or a `${VAR}` environment-variable reference, matching the access-key/secret-key key-security mechanism; empty fields fall back to the flag defaults. The optional `users` list enables multi-user mode — see "Multi-user" under the WebDAV gateway. `sail config setup` guides these fields interactively (including generating and validating the `users` table); fields it does not ask are kept as written in the file.
+Each `serve` field maps one-to-one to the same-named `serve webdav` flag (size fields use the same string format as the flags, e.g. `5TiB`). `user`/`password` accept plaintext or a `${VAR}` environment-variable reference, matching the access-key/secret-key key-security mechanism; empty fields fall back to the flag defaults. The optional `users` list enables multi-user mode — see "Multi-user" under the WebDAV gateway. `sail config setup` guides these fields interactively (including generating and validating the `users` table, and the `serve.smb` sub-block — it asks which protocols you want when you configure the block); fields it does not ask are kept as written in the file.
 
 `sail serve smb` reads the same `serve:` block for everything protocol-agnostic (prefix, users, quota,
 staging, size limits, chunking, cache TTL, prewarm) — one bucket's sharing layout does not have to be
-written twice — and adds a small `serve.smb` sub-block for what is SMB-specific:
+written twice — and adds a small `serve.smb` sub-block for what is SMB-specific. `sail config setup` asks
+for that sub-block too: pick `smb` (or `both`) when it asks which protocols to configure.
 
 ```yaml
     serve:

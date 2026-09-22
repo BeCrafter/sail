@@ -143,11 +143,13 @@ func TestExpandTilde(t *testing.T) {
 func TestCollectServeListenTolerance(t *testing.T) {
 	in := []string{
 		"y",           // 配置 serve 块
-		"8443",        // 纯数字 → :8443
+		"webdav",      // 服务
 		"",            // prefix
-		"n",           // 单用户
+		"single",      // 认证模式
 		"alice", "pw", // 凭据
-		"", "", "", // tls/chunked/staging
+		"", "", // chunked-upload / staging-dir
+		"8443", // 纯数字 → :8443
+		"",     // tls-cert 空
 	}
 	got, err := collectServeConfig(newReader(in...), config.ServeConfig{})
 	if err != nil {
@@ -162,12 +164,14 @@ func TestCollectServeListenTolerance(t *testing.T) {
 func TestCollectServeListenReprompt(t *testing.T) {
 	in := []string{
 		"y",
+		"webdav", // 服务
+		"",       // prefix
+		"single", // 认证模式
+		"alice", "pw",
+		"", "", // chunked-upload / staging-dir
 		"localhost", // 缺端口 → 重问
 		"9090",      // 纯数字 → :9090
-		"",
-		"n",
-		"alice", "pw",
-		"", "", "",
+		"",          // tls-cert 空
 	}
 	got, err := collectServeConfig(newReader(in...), config.ServeConfig{})
 	if err != nil {
@@ -181,10 +185,10 @@ func TestCollectServeListenReprompt(t *testing.T) {
 // 用户前缀不规范(带首尾斜杠)时被纠正而非报错。
 func TestCollectServeUserPrefixNormalized(t *testing.T) {
 	in := []string{
-		"y", "", "", "y", // 门/多用户
+		"y", "webdav", "", "multi", // 门/服务/多用户
 		"alice", "pw", "/alice", "", // 前缀带前导斜杠 → 纠正为 alice/
 		"",
-		"", "", "",
+		"", "", "", "", // chunked/staging/listen/tls
 	}
 	got, err := collectServeConfig(newReader(in...), config.ServeConfig{})
 	if err != nil {
@@ -198,10 +202,10 @@ func TestCollectServeUserPrefixNormalized(t *testing.T) {
 // quota 单字母单位自动补全。
 func TestCollectServeQuotaShortUnit(t *testing.T) {
 	in := []string{
-		"y", "", "", "y",
+		"y", "webdav", "", "multi",
 		"alice", "pw", "alice/", "10G", // 单字母 → 10GB
 		"",
-		"", "", "",
+		"", "", "", "", // chunked/staging/listen/tls
 	}
 	got, err := collectServeConfig(newReader(in...), config.ServeConfig{})
 	if err != nil {

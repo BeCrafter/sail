@@ -82,8 +82,10 @@ profiles:
       # prefix, tls-cert, tls-key, staging-dir, chunked-upload, dir-cache-ttl, prewarm, ... also supported
 ```
 
-`sail config setup` guides these fields interactively (including generating and validating the multi-user
-table); fields it does not ask are kept as written in the config file.
+`sail config setup` guides these fields interactively, in layers: which services to configure
+(`webdav` | `smb` | `both`), then the settings they share, then each service's own — including the
+`serve.smb` sub-block and a generated, validated multi-user table. Fields it does not ask are kept as
+written in the config file.
 
 ## Common commands
 
@@ -230,7 +232,8 @@ sail serve smb --profile prod --listen :1445 --user alice --password '***' --sha
 | `--prefix` / `--user` / `--password` / `--staging-dir` / `--chunked-upload` / `--chunk-size` / `--dir-cache-ttl` / `--prewarm` | as in WebDAV | Identical semantics |
 
 `serve.smb` in the profile pins `listen` / `share` / `server-name`; the rest comes from the shared
-`serve:` block.
+`serve:` block. `sail config setup` asks for these three too — pick `smb` (or `both`) when it asks
+which services to configure.
 
 Differences from WebDAV mode worth knowing before rolling it out: SMB2 signs/encrypts inside the
 protocol (no `--tls-cert`/`--tls-key`), authentication is NTLMv2 instead of Basic, errors are
